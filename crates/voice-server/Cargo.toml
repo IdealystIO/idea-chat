@@ -1,0 +1,38 @@
+[package]
+name = "voice-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "idea-chat voice fleet: the `voice-node` relay and the `voice-director` control plane."
+
+[dependencies]
+voice-proto = { workspace = true }
+voice-coord = { workspace = true }
+async-trait = "0.1"
+# Gateway: HTTP reverse proxy + the client half of the WebSocket proxy.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+tokio-tungstenite = "0.21"
+http = "1"
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+[[bin]]
+name = "voice-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "voice-director"
+path = "src/bin/director.rs"
+
+[[bin]]
+name = "voice-gateway"
+path = "src/bin/gateway.rs"
+
+[dev-dependencies]
+tokio-tungstenite = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+futures-util = "0.3"

@@ -1,0 +1,35 @@
+# idea-chat — exploration workspace.
+#
+# Everything here is deliberately OUTSIDE the idealyst-native tree. The point of
+# step 1 (see docs/framework-gap-analysis.md §9) is to build the whole
+# out-and-in audio loop at APP level first, then decide what earns a place in
+# the SDK. The current best candidate for promotion is `audio-output` — the one
+# box that genuinely does not exist on native.
+[workspace]
+resolver = "2"
+members = [
+    "crates/voice-proto",
+    "crates/voice-coord",
+    "crates/voice-server",
+    "crates/voice-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+voice-proto = { path = "crates/voice-proto" }
+voice-coord = { path = "crates/voice-coord" }
+
+# Framework, by path. idea-chat is not part of the idealyst-native workspace;
+# cargo resolves each crate's own `workspace = true` inheritance from ITS root.
+idealyst           = { path = "../idealyst-native/crates/idealyst" }
+runtime-core       = { path = "../idealyst-native/crates/runtime/core" }
+runtime-vocabulary = { path = "../idealyst-native/crates/runtime/vocabulary" }
+runtime-scene      = { path = "../idealyst-native/crates/runtime/scene" }
+idea-ui            = { path = "../idealyst-native/crates/ui/idea-ui" }
+microphone         = { path = "../idealyst-native/crates/sdk/client/microphone" }
+media-stream       = { path = "../idealyst-native/crates/sdk/client/media-stream" }
+net                = { path = "../idealyst-native/crates/sdk/client/net" }

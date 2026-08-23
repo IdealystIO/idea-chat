@@ -1,0 +1,159 @@
+# The voice fleet: one director, three nodes, one Postgres.
+#
+#   docker compose up -d --build
+#   curl localhost:9000/fleet
+#
+# Then run the web client (from the devcontainer or the host) and point it at
+# http://localhost:9000.
+#
+# ## Why three explicit node services and not `--scale`
+#
+# Each node must advertise a PUBLIC_URL that *browsers* can dial. Under
+# `--scale`, replicas share a service definition and Docker assigns arbitrary
+# host ports, so a replica cannot know the address the outside world reaches it
+# on. Naming the nodes keeps them browser-reachable, which is the whole point of
+# being able to test with real tabs.
+#
+# In production this is a per-node public address — a Service per pod, a
+# per-instance DNS name, or a load balancer that maps one hostname to one node.
+# The node never needs to discover it; you tell it, and it tells the fleet.
+#
+# ## Adding a node while calls are running
+#
+# Copy a node block, give it a new NODE_ID/port, and `docker compose up -d`.
+# It registers itself and starts receiving NEW rooms within one heartbeat.
+# Nothing else is reconfigured — the director is stateless and reads the fleet
+# from the store on every request. That is the autoscaling path.
+#
+# ## Removing one without dropping calls
+#
+#   curl -X POST localhost:9000/nodes/node-c/drain   # no new rooms
+#   # …wait for `curl localhost:9000/fleet` to show rooms=0 for node-c…
+#   docker compose stop voice-node-c
+#
+# Stopping it directly also works — SIGTERM triggers the same drain-then-
+# deregister path — but draining first lets in-progress calls finish naturally.
+
+x-node: &node
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+  restart: unless-stopped
+  networks: [voice]
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment: &node-env
+    COORD_BACKEND: postgres
+    POSTGRES_URL: postgres://postgres:dev@postgres:5432/voice
+    # 0 = unbounded. Set a real number to make the fleet refuse new rooms
+    # before a node degrades; the director then answers 503, which is the
+    # signal to scale out.
+    CAPACITY: "0"
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8787/health"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks: [voice]
+    ports: ["55432:5432"]
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: voice
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d voice"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  voice-director:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    command: ["voice-director"]
+    restart: unless-stopped
+    networks: [voice]
+    ports: ["9000:9000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: "9000"
+      COORD_BACKEND: postgres
+      POSTGRES_URL: postgres://postgres:dev@postgres:5432/voice
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Single public origin. Everything a client needs — the web app, placement,
+  # and every node socket — is reachable through this one port, which is what
+  # makes `ngrok http 8080` sufficient to test with remote people.
+  #
+  # APP_URL points at wherever the client is served. `idealyst dev` runs on the
+  # HOST (it needs the framework checkout), so the gateway reaches back out via
+  # host.docker.internal rather than expecting a container to serve it.
+  voice-gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    command: ["voice-gateway"]
+    restart: unless-stopped
+    networks: [voice]
+    ports: ["8080:8080"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      voice-director:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      DIRECTOR_URL: http://voice-director:9000
+      APP_URL: ${APP_URL:-http://host.docker.internal:8081}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/_voice/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  voice-node-a:
+    <<: *node
+    ports: ["8787:8787"]
+    environment:
+      <<: *node-env
+      PORT: "8787"
+      NODE_ID: node-a
+      PUBLIC_URL: ws://127.0.0.1:8787
+
+  voice-node-b:
+    <<: *node
+    ports: ["8788:8787"]
+    environment:
+      <<: *node-env
+      PORT: "8787"
+      NODE_ID: node-b
+      PUBLIC_URL: ws://127.0.0.1:8788
+
+  voice-node-c:
+    <<: *node
+    ports: ["8789:8787"]
+    environment:
+      <<: *node-env
+      PORT: "8787"
+      NODE_ID: node-c
+      PUBLIC_URL: ws://127.0.0.1:8789
+
+networks:
+  voice:
+    driver: bridge
+
+volumes:
+  pgdata:

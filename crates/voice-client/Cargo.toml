@@ -1,0 +1,45 @@
+[package]
+name = "voice-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "idea-chat step-1 voice client — mic capture out, remote PCM in, proving the AudioStream transport seams end to end."
+
+# The app crate IS the artifact: `src/lib.rs` holds the components and
+# `src/main.rs` is the one-line entry point. Both targets coexist.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+idealyst = { workspace = true }
+runtime-core = { workspace = true, features = ["async-driver"] }
+runtime-vocabulary = { workspace = true }
+runtime-scene = { workspace = true }
+idea-ui = { workspace = true }
+microphone = { workspace = true }
+media-stream = { workspace = true }
+net = { workspace = true }
+voice-proto = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+# Web-only playback. This is the escape hatch that stands in for the missing
+# `audio-output` SDK: on web the framework already bridges a synthetic
+# AudioStream to a real MediaStreamTrack, so all that is left is attaching it
+# to an <audio> element. On native there is no equivalent and the module
+# returns a typed error naming the gap.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Document", "Window", "Element", "Node", "HtmlElement",
+    "HtmlAudioElement", "HtmlMediaElement", "MediaStream", "Location",
+] }
+
+[package.metadata.idealyst.app]
+name      = "idea-chat voice"
+bundle_id = "dev.ideachat.voice"
+version   = "0.1.0"
+targets   = ["web"]
+
+[package.metadata.idealyst.app.permissions]
+microphone = "idea-chat uses your microphone for voice channels."

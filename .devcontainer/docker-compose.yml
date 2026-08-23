@@ -1,0 +1,83 @@
+# Dev environment. The fleet you RUN is in ../docker-compose.yml; this is the
+# environment you BUILD it in.
+services:
+  dev:
+    image: mcr.microsoft.com/devcontainers/rust:1
+    volumes:
+      # Mount the PARENT of idea-chat, not idea-chat itself. The workspace
+      # path-depends on `../idealyst-native`, so both repos have to sit side by
+      # side inside the container exactly as they do on the host — mounting only
+      # this repo breaks every framework dependency at manifest-parse time.
+      - ../..:/workspaces:cached
+      # Keep the cargo registry and build cache off the bind mount: a cold
+      # `cargo build` of the framework is minutes, and a named volume survives
+      # container rebuilds.
+      - cargo-registry:/usr/local/cargo/registry
+      - target-cache:/workspaces/idea-chat/target
+    command: sleep infinity
+    networks: [devnet]
+    environment:
+      # Point the tests at the sidecar services by name.
+      POSTGRES_URL: postgres://postgres:dev@postgres:5432/voice
+      REDIS_URL: redis://redis:6379
+      COORD_BACKEND: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    networks: [devnet]
+    ports:
+      # Exposed so you can psql from the host while debugging.
+      - "55432:5432"
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: voice
+    # `pg_isready` alone returns true before the init scripts finish, so name
+    # the database explicitly — otherwise the first test run races the bootstrap.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d voice"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    networks: [devnet]
+    ports:
+      - "6399:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  chrome:
+    # For `tools/loop-test.js` and `tools/three-way.js`. Playwright connects
+    # over CDP rather than launching a browser inside the dev container.
+    image: ghcr.io/browserless/chromium:latest
+    networks: [devnet]
+    ports:
+      - "3000:3000"
+    # 64MB of /dev/shm is not enough for Chromium; 2g matches Playwright's own
+    # image and prevents renderer crashes mid-test.
+    shm_size: 2gb
+    environment:
+      CONCURRENT: "5"
+      TOKEN: ""
+      CONNECTION_TIMEOUT: "300000"
+      # The fake audio device needs these; without them getUserMedia in the
+      # headless browser returns a track that is permanently silent, which is
+      # indistinguishable from a broken pipeline.
+      DEFAULT_LAUNCH_ARGS: '["--use-fake-device-for-media-stream","--use-fake-ui-for-media-stream"]'
+
+networks:
+  devnet:
+    driver: bridge
+
+volumes:
+  cargo-registry:
+  target-cache:

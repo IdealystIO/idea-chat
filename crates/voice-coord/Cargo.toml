@@ -1,0 +1,24 @@
+[package]
+name = "voice-coord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Room/node coordination for idea-chat: the atomic operations that keep room->node assignment and participant counts from ever disagreeing."
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"], optional = true }
+tokio-postgres = { version = "0.7", optional = true }
+deadpool-postgres = { version = "0.13", optional = true }
+
+[features]
+# Postgres is the default because most deployments already run one, and a
+# second stateful system is a real operational cost. See the crate docs.
+default = ["postgres-store", "redis-store"]
+postgres-store = ["dep:tokio-postgres", "dep:deadpool-postgres"]
+redis-store = ["dep:redis"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

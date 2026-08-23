@@ -1,0 +1,32 @@
+# Server-only workspace, used by deploy/Dockerfile.
+#
+# The real workspace has a fourth member — `voice-client` — whose path deps
+# reach into the sibling `idealyst-native` checkout. The server tier needs none
+# of that (it depends on axum, tokio, and the two local crates), so building it
+# against this trimmed manifest keeps the image context to THIS repo instead of
+# copying an entire framework checkout just so cargo can parse manifests it will
+# never build.
+#
+# Keep the three member versions in sync with ../Cargo.toml.
+[workspace]
+resolver = "2"
+members = [
+    "crates/voice-proto",
+    "crates/voice-coord",
+    "crates/voice-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+voice-proto = { path = "crates/voice-proto" }
+voice-coord = { path = "crates/voice-coord" }
+
+[profile.release]
+# Voice nodes are latency-sensitive and long-lived; a slower build for a faster
+# binary is the right trade here.
+lto = "thin"
+codegen-units = 1

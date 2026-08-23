@@ -1,0 +1,8 @@
+[package]
+name = "voice-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire format for idea-chat voice frames. Zero dependencies, no framework types — the layer most likely to move into an SDK, so it stays portable."
+
+[dependencies]
