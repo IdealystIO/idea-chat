@@ -15,6 +15,34 @@ repo right now is to prove that by building around it.
 Everything here lives outside the `idealyst-native` tree on purpose. What earns
 promotion into the SDK gets decided after it works, not before.
 
+## Hearth — the client
+
+`crates/hearth` is the app: an implementation of the `Hearth.dc.html` design on
+idealyst, composed from `idea-ui` components over a Hearth-specific theme.
+Spaces, channels, always-open voice/video/share rooms, direct messages,
+threads, search, a person menu and profile, moderation, seven settings, and a
+device preview.
+
+```bash
+cd crates/hearth && idealyst build --web
+idealyst serve dist/web --port 8099
+node tools/hearth-ui.js          # 28 assertions through a real browser
+```
+
+Everything visible is a stock `idea-ui` component; the ~60 `stylesheet!` blocks
+in `styles.rs` are layout only. Light/dark and four accents are token values —
+one closure re-themes every component and every app stylesheet at once.
+
+The seed content in `model.rs` is the design's own fixture. It is deliberately
+the shape a server response has to arrive in: every view reads through the
+accessors there, so wiring this to the real backend is a change to that module
+and nowhere else.
+
+**[docs/hearth-framework-findings.md](docs/hearth-framework-findings.md)** is
+the other deliverable — eleven things in idealyst that cost debugging time or
+forced a departure from the design, plus what worked. The largest by far: a
+`#[component]` body is not a reactive scope, and nothing tells you.
+
 ## Step 1 — the voice loop (current)
 
 Proves the out-and-in audio path with no codec, no QUIC, and no new framework

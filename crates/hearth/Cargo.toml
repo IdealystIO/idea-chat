@@ -1,0 +1,30 @@
+[package]
+name = "hearth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hearth — the idea-chat client. A small, quiet place to talk: spaces, rooms that never end, and no firehose."
+
+# The app crate IS the artifact: `src/lib.rs` holds the components and
+# `src/main.rs` is the one-line entry point. Both targets coexist, matching
+# `voice-client`'s shape so the two apps stay buildable the same way.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+idealyst = { workspace = true }
+runtime-core = { workspace = true, features = ["async-driver"] }
+runtime-vocabulary = { workspace = true }
+runtime-scene = { workspace = true }
+idea-ui = { workspace = true }
+icons-lucide = { workspace = true }
+
+[package.metadata.idealyst.app]
+name      = "Hearth"
+bundle_id = "dev.ideachat.hearth"
+version   = "0.1.0"
+targets   = ["web"]
+
+[package.metadata.idealyst.app.permissions]
+microphone = "Hearth uses your microphone in voice rooms."
+camera     = "Hearth uses your camera when you turn it on in a room."
