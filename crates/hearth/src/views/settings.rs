@@ -9,7 +9,7 @@ use idea_ui::{shape, size, tone, typography_kind, variant, Badge, Button, Stack,
 use runtime_core::{switch, component, ui, Element, StyleApplication};
 
 use crate::model::{App, Notify};
-use voice_dsp::Mode;
+use voice_dsp::{Mode, Strength};
 use crate::net;
 use crate::styles;
 use crate::views::bits::{cb, Muted, SectionLabel, Strong};
@@ -84,7 +84,31 @@ fn on_off(current: bool, set: impl Fn(bool) + 'static) -> Vec<Element> {
 
 #[component]
 pub fn SettingsPage(#[prop(static)] app: App) -> Element {
-    switch(move || (app.dark.get(), app.accent.get(), app.notify.get(), app.quiet_hours.get(), app.compact.get(), app.read_receipts.get(), app.mic.get(), app.cam.get(), app.suppress.get(), app.in_voice.get()), move |_| settings_body(app))
+    // Nested rather than flat: `PartialEq` on tuples stops at twelve elements,
+    // and this page has more settings than that now. Grouping the suppression
+    // ones is also just true — they are one subject.
+    switch(
+        move || {
+            (
+                app.dark.get(),
+                app.accent.get(),
+                app.notify.get(),
+                app.quiet_hours.get(),
+                app.compact.get(),
+                app.read_receipts.get(),
+                app.mic.get(),
+                app.cam.get(),
+                (
+                    app.suppress.get(),
+                    app.in_voice.get(),
+                    app.sup_transients.get(),
+                    app.sup_residual.get(),
+                    app.sup_leveling.get(),
+                ),
+            )
+        },
+        move |_| settings_body(app),
+    )
 }
 
 fn settings_body(app: App) -> Element {
@@ -146,13 +170,21 @@ fn settings_body(app: App) -> Element {
                     suppression_note(app),
                 ])
 
+                suppression_stages(app)
+
                 group("Appearance & privacy", vec![
                     row(
                         "Theme",
                         "Follows your system unless you say otherwise.",
                         vec![
-                            option("Light", !dark, move || app.dark.set(false)),
-                            option("Dark", dark, move || app.dark.set(true)),
+                            option("Light", !dark, move || {
+                                app.dark.set(false);
+                                crate::prefs::set_flag("dark", false);
+                            }),
+                            option("Dark", dark, move || {
+                                app.dark.set(true);
+                                crate::prefs::set_flag("dark", true);
+                            }),
                         ],
                     ),
                     row(
@@ -200,6 +232,79 @@ fn settings_body(app: App) -> Element {
     }
 }
 
+/// The stages, each switchable on its own.
+///
+/// Hidden entirely when suppression is off, because every row here describes
+/// something that only happens when there is a model in the chain — and a
+/// settings page that shows controls which do nothing is a settings page people
+/// stop reading.
+///
+/// Independently switchable is the point rather than a nicety. When a call
+/// sounds wrong the question is always *which stage*, and the only reliable way
+/// to answer it is to turn them off one at a time and listen.
+fn suppression_stages(app: App) -> Vec<Element> {
+    if app.suppress.get() == Mode::Off {
+        return Vec::new();
+    }
+    let transients = app.sup_transients.get();
+    let residual = app.sup_residual.get();
+
+    vec![group("Suppression stages", vec![
+        row(
+            "Keystrokes and knocks",
+            "Impulsive noise the model leaves behind. Stronger also softens hard consonants.",
+            strengths(transients, move |s| {
+                app.sup_transients.set(s);
+                crate::prefs::set("suppress.transients", s.as_str());
+                restage(app);
+            }),
+        ),
+        row(
+            "Residual hiss",
+            "What survives the model. Driven by the model's own verdict on each block, so it can tell a quiet word from a quiet noise.",
+            strengths(residual, move |s| {
+                app.sup_residual.set(s);
+                crate::prefs::set("suppress.residual", s.as_str());
+                restage(app);
+            }),
+        ),
+        row(
+            "Even out volume",
+            "Brings everyone to a similar level, so nobody has to ride the slider.",
+            on_off(app.sup_leveling.get(), move |v| {
+                app.sup_leveling.set(v);
+                crate::prefs::set_flag("suppress.leveling", v);
+                restage(app);
+            }),
+        ),
+    ])]
+}
+
+/// The four-way strength picker, shared by every stage that has one.
+fn strengths(current: Strength, set: impl Fn(Strength) + 'static) -> Vec<Element> {
+    let set = std::rc::Rc::new(set);
+    [Strength::Off, Strength::Light, Strength::Standard, Strength::Strong]
+        .into_iter()
+        .map(|s| {
+            let set = set.clone();
+            option(s.label(), current == s, move || set(s))
+        })
+        .collect()
+}
+
+/// Rebuild the capture chain so a stage change is audible now rather than on
+/// the next call.
+///
+/// The tuning is read when the chain is built, so this is the same swap the
+/// mode picker performs — and it goes through the same lazily-loaded chunk,
+/// which is why it is a call into `voice` rather than anything done here.
+fn restage(app: App) {
+    #[cfg(target_arch = "wasm32")]
+    crate::voice::set_suppression(app, app.suppress.get());
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = app;
+}
+
 /// Choose where suppression runs, and apply it to the call in progress.
 ///
 /// Two writes rather than one, because the setting and the running call are
@@ -209,6 +314,7 @@ fn settings_body(app: App) -> Element {
 /// line would still give the old value.
 fn pick(app: App, mode: Mode) {
     app.suppress.set(mode);
+    crate::prefs::set("suppress", mode.as_str());
     #[cfg(target_arch = "wasm32")]
     crate::voice::set_suppression(app, mode);
 }

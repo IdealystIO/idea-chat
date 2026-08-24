@@ -58,7 +58,13 @@ const runSocket = (page, room, beats) => page.evaluate(async ({ room, beats }) =
   ws.onmessage = e => { try { frames.push(JSON.parse(e.data)); } catch {} };
 
   const send = a => ws.send(JSON.stringify(a));
-  await sleep(500);                                     // let the snapshot land
+
+  // Wait for the snapshot rather than guessing at how long it takes. A fixed
+  // delay here made this suite flaky: on a loaded machine the join could be
+  // sent before the connection was serving, and the arrival it announced
+  // landed outside the window being counted.
+  const until = Date.now() + 10000;
+  while (!frames.some(f => f.t === 'snapshot') && Date.now() < until) await sleep(50);
   const beforeJoin = frames.length;
 
   send({ t: 'action', a: 'join_voice', channel_id: room });

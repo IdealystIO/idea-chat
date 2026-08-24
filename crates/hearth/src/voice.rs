@@ -221,7 +221,7 @@ pub fn engage(app: App) {
             }
         };
 
-        let prepared = match suppress::prepare(&mic, voice_dsp::Tuning::default()).await {
+        let prepared = match suppress::prepare(&mic, app.tuning()).await {
             Ok(prepared) => prepared,
             Err(e) => {
                 // Say so, and leave the call exactly as it was. A half-applied
@@ -322,6 +322,34 @@ fn still_wanted(generation: u64) -> bool {
     false
 }
 
+/// How often to read voice activity out of the audio path.
+///
+/// The audio callbacks decide this a hundred times a second and must never
+/// touch the reactive graph, so the decision is left in an atomic and collected
+/// here. 50 ms is well under the ~200 ms at which an indicator stops feeling
+/// attached to the voice, and the signal is only *written* when the answer
+/// changes — which for speech is a few times a second, not twenty.
+const ACTIVITY_MS: u32 = 50;
+
+/// Keep `app.speaking` current for as long as the app is running.
+///
+/// Started once at boot rather than per call: it costs one timer, it reads an
+/// atomic, and a loop that started and stopped with calls would be one more
+/// thing to get wrong at exactly the moment the indicator matters.
+pub fn watch_activity(app: App) {
+    spawn_async(async move {
+        loop {
+            sleep(ACTIVITY_MS).await;
+            // Only while a call is up. Otherwise the last value from the
+            // previous call would sit there lit.
+            let speaking = app.voice_live.get() && session::stats().speaking;
+            if speaking != app.speaking.get() {
+                app.speaking.set(speaking);
+            }
+        }
+    });
+}
+
 /// Say what happened to a setting that did not visibly do anything.
 ///
 /// Every path out of `set_suppression` that is not "it worked" is a case where
@@ -392,7 +420,7 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}"}}"#,
+        r#"{{"sent":{},"recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
         s.received,
         s.dropped,
@@ -404,6 +432,8 @@ fn stats_json() -> String {
         // asked for. A test that asserted the request would pass against a
         // relay that quietly refused it.
         s.suppression.as_str(),
+        s.speaking,
+        s.model_gain_db,
     )
 }
 

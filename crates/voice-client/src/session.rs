@@ -63,6 +63,22 @@ static NO_CAPACITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 static CONNECT_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// How many times this session was moved to another node.
 static REDIRECTS: AtomicU32 = AtomicU32::new(0);
+/// Whether this client is speaking right now.
+///
+/// Set from the capture chain — by the model's own verdict when there is a
+/// model, and by level when there is not. See `suppress::Prepared::install`.
+static SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How much the model changed the last block, in dB. Diagnostics: a call that
+/// sounds noisy and one where the model is doing nothing look identical from
+/// outside, and this is what tells them apart.
+static MODEL_GAIN_DB: AtomicU32 = AtomicU32::new(0);
+
+/// Report voice activity from a capture chain.
+pub fn report_activity(speaking: bool, model_gain_db: f32) {
+    SPEAKING.store(speaking, Ordering::Relaxed);
+    MODEL_GAIN_DB.store(model_gain_db.to_bits(), Ordering::Relaxed);
+}
+
 /// What conditioning the room is actually getting, as reported by the node.
 ///
 /// Stored as a `Mode` discriminant rather than the mode this client ASKED for,
@@ -126,6 +142,11 @@ pub struct Stats {
     /// The conditioning the room is actually getting — the node's answer, not
     /// this client's request.
     pub suppression: voice_dsp::Mode,
+    /// Whether this client is speaking, as the capture chain sees it.
+    pub speaking: bool,
+    /// How much the model changed the last block, in dB. Zero when there is no
+    /// model in the chain.
+    pub model_gain_db: f32,
 }
 
 /// Read the atomics. Cheap enough to call every frame.
@@ -143,6 +164,8 @@ pub fn stats() -> Stats {
         connect_failed: CONNECT_FAILED.load(Ordering::Relaxed),
         redirects: REDIRECTS.load(Ordering::Relaxed),
         suppression: mode_of(SUPPRESSION.load(Ordering::Relaxed)),
+        speaking: SPEAKING.load(Ordering::Relaxed),
+        model_gain_db: f32::from_bits(MODEL_GAIN_DB.load(Ordering::Relaxed)),
     }
 }
 
@@ -158,6 +181,8 @@ fn reset_stats() {
     CONNECT_FAILED.store(false, Ordering::Relaxed);
     REDIRECTS.store(0, Ordering::Relaxed);
     SUPPRESSION.store(0, Ordering::Relaxed);
+    SPEAKING.store(false, Ordering::Relaxed);
+    MODEL_GAIN_DB.store(0.0f32.to_bits(), Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

@@ -271,6 +271,18 @@ pub struct App {
     /// got is [`voice_effect`](App::voice_effect), read back from the live
     /// session rather than assumed from this.
     pub suppress: Signal<voice_dsp::Mode>,
+    /// How hard to chase keystrokes and other impulsive noise.
+    pub sup_transients: Signal<voice_dsp::Strength>,
+    /// How hard to chase what the model left behind.
+    pub sup_residual: Signal<voice_dsp::Strength>,
+    /// Whether to even out how loud everyone is.
+    pub sup_leveling: Signal<bool>,
+    /// Whether this client is speaking, as the capture chain sees it.
+    ///
+    /// Polled from the audio path rather than derived from anything reactive:
+    /// the decision is made 100 times a second on a callback that must never
+    /// touch the reactive graph. See `voice::watch_activity`.
+    pub speaking: Signal<bool>,
     /// The room whose conference view is open, or empty.
     ///
     /// Separate from [`in_voice`] because being *in* a call and *looking at*
@@ -356,8 +368,26 @@ impl App {
             // timid one: on-device costs an 8 MB model fetch, on-server costs
             // someone else's CPU, and neither should start happening because
             // an app was opened.
-            suppress: signal(voice_dsp::Mode::Off),
-            dark: signal(true),
+            // Remembered per device — see `crate::prefs` for why these and not
+            // the account-level ones.
+            suppress: signal(crate::prefs::parsed(
+                "suppress",
+                voice_dsp::Mode::parse,
+                voice_dsp::Mode::Off,
+            )),
+            sup_transients: signal(crate::prefs::parsed(
+                "suppress.transients",
+                voice_dsp::Strength::parse,
+                voice_dsp::Strength::Standard,
+            )),
+            sup_residual: signal(crate::prefs::parsed(
+                "suppress.residual",
+                voice_dsp::Strength::parse,
+                voice_dsp::Strength::Standard,
+            )),
+            sup_leveling: signal(crate::prefs::flag("suppress.leveling", true)),
+            speaking: signal(false),
+            dark: signal(crate::prefs::flag("dark", true)),
             accent: signal(crate::theme::Accent::Indigo),
             notify: signal(Notify::Mentions),
             quiet_hours: signal(true),
@@ -442,6 +472,16 @@ impl App {
         // Never mark the channel you are looking at: you are reading it.
         self.channel_id.get() != channel_id
             && self.unread.with(|u| u.iter().any(|c| c == channel_id))
+    }
+
+    /// The conditioning the capture chain should be running, from the choices
+    /// on the settings page.
+    pub fn tuning(&self) -> voice_dsp::Tuning {
+        voice_dsp::Tuning::from_choices(
+            self.sup_transients.get(),
+            self.sup_residual.get(),
+            self.sup_leveling.get(),
+        )
     }
 
     pub fn my_id(&self) -> String {

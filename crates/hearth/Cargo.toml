@@ -106,5 +106,9 @@ web-sys = { version = "0.3", features = [
     # Placeholder notification tones, synthesised — see `src/sound.rs`.
     "AudioContext", "BaseAudioContext", "AudioDestinationNode", "AudioNode",
     "AudioParam", "GainNode", "OscillatorNode", "OscillatorType",
+    # Per-device preferences — see `src/prefs.rs`.
+    "Storage",
+    # Where a silently-degraded setting says so — see `voice::note`.
+    "console",
 ] }
 js-sys = "0.3"

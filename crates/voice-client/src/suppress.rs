@@ -39,7 +39,9 @@ use std::cell::RefCell;
 
 use denoise::Denoiser;
 use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
-use voice_dsp::{Declicker, Leveler, Tuning};
+use std::sync::{Arc, Mutex};
+
+use voice_dsp::{Alignment, Declicker, Expander, Leveler, Tuning};
 
 /// Where the model is served from, relative to the app's origin.
 ///
@@ -115,13 +117,26 @@ enum Stage {
     /// the call, and 480 floats every 10 ms is a cheap price for being able to
     /// change your mind mid-call.
     Direct { _sub: AudioSubscription },
-    /// DeepFilterNet, then levelling.
-    Neural { _sub: AudioSubscription, _clean: AudioStream },
+    /// DeepFilterNet, then the stages that clean up after it.
+    Neural {
+        _sub: AudioSubscription,
+        /// The second measurement of the microphone, for the verdict.
+        _mic_sub: AudioSubscription,
+        _clean: AudioStream,
+    },
 }
 
 /// Forward the microphone to `out` untouched.
+///
+/// Still reports voice activity, by level — there is no model to ask, so the
+/// meter falls back to the only thing available. Worth doing rather than
+/// leaving the indicator dark: a speaking light that only works with
+/// suppression on is a speaking light nobody trusts.
 pub fn direct(mic: &AudioStream, out: AudioWriter) -> Chain {
+    // About -45 dBFS. Above any reasonable room, below any speech.
+    const SPEECH: f32 = 0.006;
     let sub = mic.subscribe(move |frame: &AudioFrame| {
+        crate::session::report_activity(voice_dsp::rms(frame.samples) > SPEECH, 0.0);
         out.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples);
     });
     Chain { _stage: Stage::Direct { _sub: sub } }
@@ -137,6 +152,9 @@ pub fn direct(mic: &AudioStream, out: AudioWriter) -> Chain {
 /// nothing between them.
 pub struct Prepared {
     clean: AudioStream,
+    /// Kept so `install` can take its own measurement of what went INTO the
+    /// model. The verdict is a ratio, and half of it is only available here.
+    mic: AudioStream,
     tuning: Tuning,
 }
 
@@ -153,7 +171,7 @@ pub async fn prepare(mic: &AudioStream, tuning: Tuning) -> Result<Prepared, Stri
         .await
         .map_err(|e| format!("noise suppression could not start: {e}"))?;
 
-    Ok(Prepared { clean, tuning })
+    Ok(Prepared { clean, mic: mic.clone(), tuning })
 }
 
 impl Prepared {
@@ -163,20 +181,58 @@ impl Prepared {
     /// samples: this copies once, works in place, and republishes. One extra
     /// copy per 10 ms hop, which is 480 floats.
     ///
-    /// Declicking before levelling, always. A keystroke is the loudest thing in
-    /// its frame, so a leveller that saw it first would duck the whole sentence
-    /// around it — and then let go, which is audible as a lurch on every
-    /// keypress.
+    /// Order is fixed and each step depends on the one before it:
+    ///
+    /// 1. **declick**, before levelling — a keystroke is the loudest thing in
+    ///    its frame, so a leveller that saw it first would duck the whole
+    ///    sentence around it and then let go, audible as a lurch per keypress.
+    /// 2. **level**, so everyone in the room arrives at a similar volume.
+    /// 3. **expand**, last, because nothing after it may amplify what it
+    ///    removed — and the leveller boosts by up to 18 dB.
+    ///
+    /// The expander is driven by the model's own verdict, which is why this
+    /// also measures what went *in*: see `voice_dsp::verdict`.
     pub fn install(self, out: AudioWriter) -> Chain {
-        let mut declicker =
-            self.tuning.transients.map(|cfg| Declicker::new(cfg, 48_000));
+        // Input energy since the last output hop. Accumulated rather than
+        // sampled, because the microphone's frame size is not the model's hop
+        // size and sampling the latest frame would drift out of alignment on
+        // any device that does not happen to deliver 10 ms at a time.
+        let input: Arc<Mutex<(f32, usize)>> = Arc::new(Mutex::new((0.0, 0)));
+        let mic_sub = {
+            let input = input.clone();
+            self.mic.subscribe(move |frame: &AudioFrame| {
+                if let Ok(mut acc) = input.lock() {
+                    acc.0 += frame.samples.iter().map(|s| s * s).sum::<f32>();
+                    acc.1 += frame.samples.len();
+                }
+            })
+        };
+
+        let mut declicker = self.tuning.transients.map(|cfg| Declicker::new(cfg, 48_000));
         let mut leveler = self.tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
+        let mut expander = self.tuning.residual.map(|cfg| Expander::new(cfg, 48_000));
+        let verdict_db = self.tuning.residual.map(|cfg| cfg.verdict_db).unwrap_or(-9.0);
+        let mut align = Alignment::new(voice_dsp::MODEL_HOPS);
         let mut scratch: Vec<f32> = Vec::new();
+
         let sub = self.clean.subscribe(move |frame: &AudioFrame| {
-            if declicker.is_none() && leveler.is_none() {
-                out.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples);
-                return;
-            }
+            // What the model did to this block, aligned across its latency.
+            let input_rms = match input.lock() {
+                Ok(mut acc) => {
+                    let rms = if acc.1 == 0 { 0.0 } else { (acc.0 / acc.1 as f32).sqrt() };
+                    *acc = (0.0, 0);
+                    rms
+                }
+                Err(_) => 0.0,
+            };
+            let aligned = align.delay(input_rms);
+            let gain_db = voice_dsp::model_gain_db(voice_dsp::rms(frame.samples), aligned);
+
+            // The model's verdict IS a voice-activity decision, and a much
+            // better one than a level threshold: it is what a speech model
+            // concluded, not what an envelope crossed.
+            crate::session::report_activity(gain_db > verdict_db, gain_db);
+
             scratch.clear();
             scratch.extend_from_slice(frame.samples);
             if let Some(declicker) = declicker.as_mut() {
@@ -185,9 +241,13 @@ impl Prepared {
             if let Some(leveler) = leveler.as_mut() {
                 leveler.process(&mut scratch);
             }
+            if let Some(expander) = expander.as_mut() {
+                expander.process(&mut scratch, Some(gain_db));
+            }
             out.write_pcm_f32(frame.sample_rate, frame.channels, &scratch);
         });
-        Chain { _stage: Stage::Neural { _sub: sub, _clean: self.clean } }
+
+        Chain { _stage: Stage::Neural { _sub: sub, _mic_sub: mic_sub, _clean: self.clean } }
     }
 }
 

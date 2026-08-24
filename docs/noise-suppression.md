@@ -127,6 +127,69 @@ previous value and the guard threw away the swap it was meant to protect. The
 setting silently did nothing, with no error anywhere. It is a thread-local
 generation counter now, bumped synchronously before anything can await.
 
+## Asking the model what it thought
+
+DeepFilterNet does not report a confidence, but it attenuates what it believes
+is noise and passes what it believes is speech — so **the ratio of what came out
+to what went in is its judgement on that block**, in dB, for free. A hop that
+came out 20 dB down was called noise; one that came out unchanged was called
+speech, at whatever volume.
+
+That is a far better signal than level, and it is what drives the last stage.
+The alternative — a tracked noise floor — could not be made to work, and not
+because it was badly tuned: a floor that learns during speech climbs until it
+swallows the speaker, a floor that only learns while the expander is closed can
+never open, and a floor primed from the first sample is primed from whatever
+that sample happened to be. Every variant traded ducking quiet speech against
+not working, because *a quietly-spoken word and a residual chirp are the same
+level* and level is all that measurement has.
+
+So `voice_dsp::Expander` takes the verdict, and where there is no verdict it
+passes audio through untouched rather than guessing.
+
+Two details that are easy to get wrong:
+
+- **Alignment.** The model has ~30 ms of latency, so the block coming out now
+  corresponds to audio that went in three hops ago. Comparing them as they
+  arrive puts a word's onset against the silence before it and reads a huge
+  attenuation exactly where speech is starting. `voice_dsp::Alignment` is a
+  delay line for the input measurement, sized in hops.
+- **The lookahead leads by more than one hop.** A word's first hop can still
+  read as rejected, because the model's own lookahead means its output has not
+  caught up yet. The expander's 12 ms delay is longer than one 10 ms hop for
+  exactly that reason: the audio leaving is from the previous block while the
+  verdict being applied is from the current one.
+
+The same verdict is the **voice-activity indicator** — the sidebar highlights
+your own row while you are talking. It is a neural speech decision rather than
+an energy threshold, and it is free, having already been computed. Without a
+model in the chain the indicator falls back to level, because a speaking light
+that only works with suppression on is a speaking light nobody trusts.
+
+## Every stage switches off on its own
+
+| stage | control | default |
+| --- | --- | --- |
+| neural model | Off / This device / Server | Off |
+| keystrokes and knocks | Off / Light / Standard / Strong | Standard |
+| residual hiss | Off / Light / Standard / Strong | Standard |
+| even out volume | On / Off | On |
+
+Presets rather than raw decibels, because the numbers underneath are not
+independent — a declicker's threshold and its depth have to move together or
+the setting means something different at each end of its range.
+
+Independently switchable is the point rather than a nicety: when a call sounds
+wrong the question is always *which stage*, and the only reliable way to answer
+it is to turn them off one at a time and listen. Changing any of them rebuilds
+the capture chain under the running call.
+
+The choices are remembered per device (`crate::prefs`), which is the right
+scope: whether to spend a machine's CPU on a model depends on that machine, and
+how hard to chase keystrokes depends on that keyboard. Account-level
+preferences — who may notify you, read receipts — are deliberately not stored
+this way and should be server-side when they are done properly.
+
 ## Transients — the keystroke half
 
 DeepFilterNet is a speech *enhancement* model and it is very good at what it was
@@ -180,6 +243,13 @@ enough, and a much larger one.
 | DeepFilterNet 3 | ~30 ms |
 | declicker lookahead | 3 ms |
 | leveller | 0 |
+| expander lookahead | 12 ms |
+| **total one-way** | **~45 ms** |
+
+Against a mouth-to-ear budget of about 150 ms, which leaves room for the
+network. Each stage's lookahead is the price of that stage being correct rather
+than merely present — both were built without one first, and both were
+measurably useless that way.
 
 ## Levelling
 

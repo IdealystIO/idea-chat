@@ -43,10 +43,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use denoise::Denoiser;
 use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
-use voice_dsp::{Declicker, Leveler, Tuning};
+use voice_dsp::{Alignment, Declicker, Expander, Leveler, Tuning};
 
 /// Environment variable that permits [`Mode::Server`](voice_dsp::Mode::Server).
 ///
@@ -78,12 +79,16 @@ pub const INFO_PREFIX: &str = "info:suppress=";
 /// replaces could claim (see `voice_proto`'s note on `pts_micros`).
 pub type Sink = Box<dyn FnMut(&[f32], u64) + Send + 'static>;
 
+/// What `open` hands back: the push end, and the accumulator the verdict is
+/// measured from.
+type Shared = (AudioWriter, Arc<Mutex<(f32, usize)>>);
+
 enum Cmd {
     Open {
         key: u64,
         tuning: Tuning,
         sink: Sink,
-        reply: tokio::sync::oneshot::Sender<Result<AudioWriter, String>>,
+        reply: tokio::sync::oneshot::Sender<Result<Shared, String>>,
     },
     Close {
         key: u64,
@@ -111,6 +116,12 @@ pub struct Feed {
     key: u64,
     writer: AudioWriter,
     host: mpsc::Sender<Cmd>,
+    /// Energy of everything pushed since the pipeline last emitted a block.
+    ///
+    /// The relay's half of the model's verdict — see `voice_dsp::verdict`. The
+    /// client measures this with a second microphone subscription; here the
+    /// packets are already being decoded, so it is free.
+    input: Arc<Mutex<(f32, usize)>>,
 }
 
 impl Feed {
@@ -120,6 +131,10 @@ impl Feed {
     /// downmixes and resamples to 48 kHz mono itself, so a client whose
     /// microphone runs at 44.1 kHz needs no special case here.
     pub fn push(&self, sample_rate: u32, channels: u16, samples: &[f32]) {
+        if let Ok(mut acc) = self.input.lock() {
+            acc.0 += samples.iter().map(|s| s * s).sum::<f32>();
+            acc.1 += samples.len();
+        }
         self.writer.write_pcm_f32(sample_rate, channels, samples);
     }
 }
@@ -163,8 +178,9 @@ impl Suppression {
         self.tx
             .send(Cmd::Open { key, tuning, sink, reply })
             .map_err(|_| "suppression host is not running".to_string())?;
-        let writer = answer.await.map_err(|_| "suppression host dropped the request".to_string())??;
-        Ok(Feed { key, writer, host: self.tx.clone() })
+        let (writer, input) =
+            answer.await.map_err(|_| "suppression host dropped the request".to_string())??;
+        Ok(Feed { key, writer, host: self.tx.clone(), input })
     }
 }
 
@@ -181,12 +197,12 @@ fn host(rx: mpsc::Receiver<Cmd>) {
         match cmd {
             Cmd::Open { key, tuning, sink, reply } => {
                 match open_pipeline(tuning, sink) {
-                    Ok((pipeline, writer)) => {
+                    Ok((pipeline, shared)) => {
                         live.insert(key, pipeline);
                         // A receiver that has gone away means the connection
                         // dropped during the build. Dropping the pipeline we
                         // just made is the right answer, not an error.
-                        if reply.send(Ok(writer)).is_err() {
+                        if reply.send(Ok(shared)).is_err() {
                             live.remove(&key);
                         }
                     }
@@ -203,7 +219,7 @@ fn host(rx: mpsc::Receiver<Cmd>) {
 }
 
 /// Build one sender's pipeline. Runs on the host thread, where `!Send` is fine.
-fn open_pipeline(tuning: Tuning, mut sink: Sink) -> Result<(Pipeline, AudioWriter), String> {
+fn open_pipeline(tuning: Tuning, mut sink: Sink) -> Result<(Pipeline, Shared), String> {
     let (input, writer) = AudioStream::new();
 
     let mut denoiser = Denoiser::new().post_filter(tuning.post_filter);
@@ -222,17 +238,30 @@ fn open_pipeline(tuning: Tuning, mut sink: Sink) -> Result<(Pipeline, AudioWrite
     // because this runs 100 times a second per talker and an allocation per
     // hop is a needless one.
     //
-    // Declicking before levelling, always — see the client's `Prepared::install`
-    // for why. Both sides run the same stages in the same order, so switching
-    // where suppression happens is the same experiment with the work moved.
+    // Declick, level, expand — the same three stages in the same order as the
+    // client (see `voice_client::suppress::Prepared::install` for why that
+    // order). Both sides run the identical chain, so switching where
+    // suppression happens is the same experiment with the work moved rather
+    // than two features that share a name.
+    let energy: Arc<Mutex<(f32, usize)>> = Arc::new(Mutex::new((0.0, 0)));
     let mut declicker = tuning.transients.map(|cfg| Declicker::new(cfg, 48_000));
     let mut leveler = tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
+    let mut expander = tuning.residual.map(|cfg| Expander::new(cfg, 48_000));
+    let mut align = Alignment::new(voice_dsp::MODEL_HOPS);
     let mut scratch: Vec<f32> = Vec::new();
+    let measured = energy.clone();
     let sub = clean.subscribe(move |frame: &AudioFrame| {
-        if declicker.is_none() && leveler.is_none() {
-            sink(frame.samples, frame.pts_micros);
-            return;
-        }
+        let input_rms = match measured.lock() {
+            Ok(mut acc) => {
+                let rms = if acc.1 == 0 { 0.0 } else { (acc.0 / acc.1 as f32).sqrt() };
+                *acc = (0.0, 0);
+                rms
+            }
+            Err(_) => 0.0,
+        };
+        let aligned = align.delay(input_rms);
+        let gain_db = voice_dsp::model_gain_db(voice_dsp::rms(frame.samples), aligned);
+
         scratch.clear();
         scratch.extend_from_slice(frame.samples);
         if let Some(declicker) = declicker.as_mut() {
@@ -241,10 +270,13 @@ fn open_pipeline(tuning: Tuning, mut sink: Sink) -> Result<(Pipeline, AudioWrite
         if let Some(leveler) = leveler.as_mut() {
             leveler.process(&mut scratch);
         }
+        if let Some(expander) = expander.as_mut() {
+            expander.process(&mut scratch, Some(gain_db));
+        }
         sink(&scratch, frame.pts_micros);
     });
 
-    Ok((Pipeline { _sub: sub, _clean: clean, _input: input }, writer))
+    Ok((Pipeline { _sub: sub, _clean: clean, _input: input }, (writer, energy)))
 }
 
 #[cfg(test)]

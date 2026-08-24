@@ -41,6 +41,10 @@ pub mod views;
 // module is absent and the UI says voice is not available on this build.
 #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
 pub mod voice;
+// Per-device preferences. Not gated: the settings page reads them on every
+// target, and the module already answers "nothing stored" everywhere there is
+// no storage to read.
+pub mod prefs;
 // The client's end of the live connection.
 #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
 pub mod livewire;
@@ -112,6 +116,9 @@ mod client {
         #[cfg(target_arch = "wasm32")]
         {
             crate::voice::install_stats_probe();
+            // Collects the capture chain's voice-activity decision into a
+            // signal the UI can read. See `voice::watch_activity`.
+            crate::voice::watch_activity(state);
             // One connection, held for the session. It serves the opening
             // state and every change after it.
             crate::livewire::start(state);

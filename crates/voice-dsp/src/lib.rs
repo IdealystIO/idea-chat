@@ -38,10 +38,14 @@
 #![forbid(unsafe_code)]
 
 mod level;
+mod residual;
 mod transient;
+mod verdict;
 
 pub use level::{Leveler, Leveling};
+pub use residual::{Expander, Residual};
 pub use transient::{Declicker, Transients};
+pub use verdict::{model_gain_db, rms, Alignment, MODEL_HOPS};
 
 /// Where neural noise suppression runs for a session.
 ///
@@ -105,6 +109,94 @@ impl Mode {
     }
 }
 
+/// How hard to run one stage.
+///
+/// Presets rather than raw decibels, because the numbers underneath are not
+/// independent — a declicker's threshold and its depth have to move together
+/// or the setting means something different at each end of its range. Four
+/// choices a person can pick by ear beat six numbers they have to model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Strength {
+    /// The stage does not run at all.
+    Off,
+    /// Audible only on the worst of it. The right answer when a stage is
+    /// causing artefacts and you want to know whether it was the culprit.
+    Light,
+    #[default]
+    /// The default. Tuned to be inaudible on speech.
+    Standard,
+    /// For a genuinely bad room. Trades some naturalness for quiet.
+    Strong,
+}
+
+impl Strength {
+    /// The stored spelling. Round-trips through [`parse`](Self::parse).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Strength::Off => "off",
+            Strength::Light => "light",
+            Strength::Standard => "standard",
+            Strength::Strong => "strong",
+        }
+    }
+
+    /// Parse a stored spelling. Anything unrecognised is the default rather
+    /// than an error: a preference written by a newer build should degrade to
+    /// something sensible, not refuse to load.
+    pub fn parse(s: &str) -> Strength {
+        match s {
+            "off" => Strength::Off,
+            "light" => Strength::Light,
+            "strong" => Strength::Strong,
+            _ => Strength::Standard,
+        }
+    }
+
+    /// What the user sees on the control.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Strength::Off => "Off",
+            Strength::Light => "Light",
+            Strength::Standard => "Standard",
+            Strength::Strong => "Strong",
+        }
+    }
+
+    /// Transient suppression at this strength.
+    ///
+    /// Threshold and depth move together: a lighter setting is both more
+    /// reluctant to call something a keystroke and gentler when it does, which
+    /// is what makes "Light" mean one thing rather than two.
+    pub fn transients(self) -> Option<Transients> {
+        let base = Transients::default();
+        match self {
+            Strength::Off => None,
+            Strength::Light => {
+                Some(Transients { onset_ratio: 6.0, max_reduction_db: 10.0, ..base })
+            }
+            Strength::Standard => Some(base),
+            Strength::Strong => {
+                Some(Transients { onset_ratio: 3.0, max_reduction_db: 24.0, ..base })
+            }
+        }
+    }
+
+    /// Residual suppression at this strength.
+    ///
+    /// `verdict_db` is the interesting one: a stricter threshold means more
+    /// blocks count as "the model rejected this", so Strong expands more of
+    /// what is left — and risks taking quiet speech the model was unsure about.
+    pub fn residual(self) -> Option<Residual> {
+        let base = Residual::default();
+        match self {
+            Strength::Off => None,
+            Strength::Light => Some(Residual { verdict_db: -14.0, depth_db: 8.0, ..base }),
+            Strength::Standard => Some(base),
+            Strength::Strong => Some(Residual { verdict_db: -6.0, depth_db: 20.0, ..base }),
+        }
+    }
+}
+
 /// How hard to suppress, and what to do afterwards.
 ///
 /// Shared by both stages so a client-side and a server-side call are the same
@@ -129,6 +221,10 @@ pub struct Tuning {
     /// DeepFilterNet's speech post-filter. Sharpens consonants at the cost of
     /// a little more attenuation.
     pub post_filter: bool,
+    /// Residual suppression, applied last — after the levelling, so nothing
+    /// downstream can amplify what it removed. `None` leaves the model's
+    /// residue alone.
+    pub residual: Option<Residual>,
     /// Transient suppression, applied between the model and the levelling.
     ///
     /// Before the leveller on purpose: a keystroke is the loudest thing in a
@@ -140,6 +236,23 @@ pub struct Tuning {
     pub leveling: Option<Leveling>,
 }
 
+impl Tuning {
+    /// Build a tuning from the choices a person actually made.
+    ///
+    /// Every stage is independently switchable, which is what makes this
+    /// debuggable: when a call sounds wrong the question is always *which
+    /// stage*, and the only reliable way to answer it is to turn them off one
+    /// at a time and listen.
+    pub fn from_choices(transients: Strength, residual: Strength, leveling: bool) -> Tuning {
+        Tuning {
+            transients: transients.transients(),
+            residual: residual.residual(),
+            leveling: if leveling { Some(Leveling::default()) } else { None },
+            ..Tuning::default()
+        }
+    }
+}
+
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
@@ -147,6 +260,7 @@ impl Default for Tuning {
             post_filter: true,
             transients: Some(Transients::default()),
             leveling: Some(Leveling::default()),
+            residual: Some(Residual::default()),
         }
     }
 }

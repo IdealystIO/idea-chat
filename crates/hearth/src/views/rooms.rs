@@ -45,6 +45,10 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
                 app.voice_error.get(),
                 // Who is standing in which room — see `App::presence_key`.
                 app.presence_key(),
+                // Whether YOU are talking. A style change, not a structural
+                // one — but the occupant rows are built inside this body, so
+                // the key has to carry it or the highlight never repaints.
+                app.speaking.get(),
             )
         },
         move |_| room_list_body(app),
@@ -213,17 +217,26 @@ fn live_room_row(app: App, channel: ChannelSummary) -> Element {
 fn occupant_row(app: App, person: MemberDto) -> Element {
     let id = person.id.clone();
     let me = app.my_id();
+    // Only your own row, for now: the capture chain knows whether YOU are
+    // talking, and nothing tells us that about anyone else. Lighting up the
+    // person whose audio is arriving needs a per-peer meter on the receive
+    // side — worth doing, and a different piece of work.
+    let mine = person.id == me;
+    let speaking = mine && app.speaking.get();
     press(
         vec![
             ui! { Face(name = person.display_name.clone(), id = person.id.clone(), size = AvatarSize::Xs) },
             text(person.display_name.clone())
                 .with_style(move || {
                     StyleApplication::new(styles::OccupantName::sheet())
-                        .with("you", if person.id == me { "on" } else { "off" })
+                        .with("you", if mine { "on" } else { "off" })
                 })
                 .into(),
         ],
-        || StyleApplication::new(styles::Occupant::sheet()),
+        move || {
+            StyleApplication::new(styles::Occupant::sheet())
+                .with("speaking", if speaking { "on" } else { "off" })
+        },
         move || app.profile.set(id.clone()),
     )
 }

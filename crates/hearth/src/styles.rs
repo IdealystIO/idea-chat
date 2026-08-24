@@ -73,6 +73,20 @@ stylesheet! {
         state hovered(t) {
             background: t.color.surface_alt(),
         }
+        // Who is talking, right now. Discord draws a ring; a row this small
+        // reads better with a filled left edge — a ring on a 20px avatar is
+        // two pixels of colour and is missed.
+        variant speaking {
+            #[default]
+            off(_t) {}
+            on(t) {
+                background: t.intent.primary.soft_bg(),
+                border_left_width: 2.0,
+                border_left_color: t.intent.primary.fg(),
+                padding_left: 28.0,
+            }
+        }
+        transitions { background: 120ms EaseOut }
     }
 }
 
