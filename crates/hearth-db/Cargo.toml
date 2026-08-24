@@ -1,0 +1,23 @@
+[package]
+name = "hearth-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hearth's data layer: schema, migrations, and the queries behind identity, spaces, membership and invites. Server-only — the client never links this."
+
+[dependencies]
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "macros", "migrate",
+] }
+uuid = { version = "1", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+# Password hashing. `argon2` is the reference implementation and `rand_core`
+# supplies the CSPRNG for salts and invite codes.
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["std"] }
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

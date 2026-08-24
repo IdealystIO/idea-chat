@@ -13,6 +13,7 @@ members = [
     "crates/voice-server",
     "crates/voice-client",
     "crates/hearth",
+    "crates/hearth-db",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ license = "MIT"
 [workspace.dependencies]
 voice-proto = { path = "crates/voice-proto" }
 voice-coord = { path = "crates/voice-coord" }
+hearth-db   = { path = "crates/hearth-db" }
 
 # Framework, by path. idea-chat is not part of the idealyst-native workspace;
 # cargo resolves each crate's own `workspace = true` inheritance from ITS root.
