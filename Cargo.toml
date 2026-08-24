@@ -37,3 +37,7 @@ icons-lucide       = { path = "../idealyst-native/crates/ui/icons-lucide" }
 microphone         = { path = "../idealyst-native/crates/sdk/client/microphone" }
 media-stream       = { path = "../idealyst-native/crates/sdk/client/media-stream" }
 net                = { path = "../idealyst-native/crates/sdk/client/net" }
+server             = { path = "../idealyst-native/crates/api/server" }
+server-kit         = { path = "../idealyst-native/crates/api/server-kit" }
+cache              = { path = "../idealyst-native/crates/sdk/server/cache" }
+credentials        = { path = "../idealyst-native/crates/sdk/client/credentials" }

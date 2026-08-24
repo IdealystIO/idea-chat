@@ -11,19 +11,54 @@ description = "Hearth — the idea-chat client. A small, quiet place to talk: sp
 [lib]
 crate-type = ["rlib"]
 
+[features]
+default = []
+# The server half: `#[server]` bodies, the database, the session store.
+# The wasm client build never turns this on, so none of it reaches the bundle.
+server = [
+    "server/server", "server-kit/server",
+    "dep:hearth-db", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand",
+]
+
 [dependencies]
 idealyst = { workspace = true }
+server = { workspace = true }
+server-kit = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+# Native session-token storage (Keychain / AndroidKeyStore). On web the
+# httpOnly cookie is the mechanism and this goes unused.
+credentials = { workspace = true }
+
+# --- server-only ---
+hearth-db = { workspace = true, optional = true }
+cache = { workspace = true, optional = true }
+# The Redis client is the app's to provide: `cache` and `server_kit`'s rate
+# limiter both read the one installed here, so they share a connection pool.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"], optional = true }
+rand = { version = "0.8", optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"], optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
 runtime-core = { workspace = true, features = ["async-driver"] }
 runtime-vocabulary = { workspace = true }
 runtime-scene = { workspace = true }
 idea-ui = { workspace = true }
 icons-lucide = { workspace = true }
 
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+required-features = ["server"]
+
 [package.metadata.idealyst.app]
 name      = "Hearth"
 bundle_id = "dev.ideachat.hearth"
 version   = "0.1.0"
 targets   = ["web"]
+# Run THIS crate's `server` bin for `idealyst dev --web`, so the API and the
+# bundle come from one origin and the session cookie actually applies.
+server_bin = "server"
 
 [package.metadata.idealyst.app.permissions]
 microphone = "Hearth uses your microphone in voice rooms."

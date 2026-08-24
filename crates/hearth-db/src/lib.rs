@@ -113,3 +113,21 @@ impl Db {
         &self.pool
     }
 }
+
+impl Db {
+    /// Append to the security trail. Callers treat a failure here as
+    /// non-fatal — see `hearth::srv::audit`.
+    pub async fn record_auth_event(
+        &self,
+        user_id: Option<uuid::Uuid>,
+        kind: &str,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO auth_events (id, user_id, kind) VALUES ($1, $2, $3)")
+            .bind(ids::new_id())
+            .bind(user_id)
+            .bind(kind)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}

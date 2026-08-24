@@ -62,12 +62,19 @@ impl Db {
         Ok(n > 0)
     }
 
-    pub async fn promote_to_instance_admin(&self, id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE users SET is_instance_admin = true WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Grant instance admin, returning the **updated** row.
+    ///
+    /// Returning it is the point. This used to return `()`, and the bootstrap
+    /// flow then built its session from the `User` it had fetched before the
+    /// promotion — so the first account was an admin in the database and a
+    /// plain member in its own session, until it signed out and back in.
+    pub async fn promote_to_instance_admin(&self, id: Uuid) -> Result<User> {
+        Ok(sqlx::query_as::<_, User>(&format!(
+            "UPDATE users SET is_instance_admin = true WHERE id = $1 RETURNING {COLS}"
+        ))
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Tombstone. Messages keep pointing at the row, so history is not

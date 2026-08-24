@@ -19,7 +19,10 @@
 //! `idea_ui::Modal`s, which is why they're siblings of the shell rather than
 //! children of whatever opened them.
 
+pub mod api;
 pub mod model;
+#[cfg(feature = "server")]
+pub mod srv;
 pub mod styles;
 pub mod theme;
 pub mod views;
