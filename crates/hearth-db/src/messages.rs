@@ -222,6 +222,29 @@ impl Db {
 
     /// Which space a channel belongs to, if any. DMs answer `None`, which is
     /// how a caller knows there is no moderator to appeal to.
+    /// Every channel this account can see: their spaces' channels, and their
+    /// DMs.
+    ///
+    /// For subscribing a live connection. It is the same rule
+    /// [`can_see_channel`](Self::can_see_channel) answers one at a time, asked
+    /// once — so what a connection is told about and what it may read cannot
+    /// come apart.
+    pub async fn visible_channels(&self, user_id: Uuid) -> Result<Vec<Uuid>> {
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT c.id FROM channels c
+               JOIN space_members m ON m.space_id = c.space_id
+              WHERE m.user_id = $1
+              UNION
+             SELECT c.id FROM channels c
+               JOIN channel_members cm ON cm.channel_id = c.id
+              WHERE cm.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     pub async fn channel_space(&self, channel_id: Uuid) -> Result<Option<Uuid>> {
         let row: Option<(Option<Uuid>,)> =
             sqlx::query_as("SELECT space_id FROM channels WHERE id = $1")

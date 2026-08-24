@@ -101,6 +101,14 @@ impl Topic {
     pub fn user(id: &str) -> Topic {
         Topic(format!("user:{id}"))
     }
+
+    /// A topic for one conversation and everyone who may read it.
+    ///
+    /// Finer than a space on purpose: a direct message has no space, and
+    /// publishing one to a space topic would deliver it to everybody in it.
+    pub fn channel(id: &str) -> Topic {
+        Topic(format!("channel:{id}"))
+    }
 }
 
 impl std::fmt::Display for Topic {

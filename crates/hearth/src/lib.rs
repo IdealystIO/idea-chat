@@ -44,6 +44,9 @@ pub mod voice;
 // The client's end of the live connection.
 #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
 pub mod livewire;
+// Placeholder notification tones.
+#[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+pub mod sound;
 
 /// SDK-handler registration seam the CLI-generated wrappers invoke after
 /// `runtime_vocabulary::register_builtins`. Hearth renders entirely from

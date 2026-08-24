@@ -62,6 +62,22 @@ fn socket_url() -> String {
     format!("{ws}/_srv/_ws/live")
 }
 
+/// Tell the server which channel this client is reading.
+///
+/// The server replies by restating the world with that channel's page in it,
+/// so switching channels is one round trip and no request — and every message
+/// posted there from then on arrives as an event.
+pub fn watch(channel_id: &str) -> bool {
+    WATCHED.with(|w| *w.borrow_mut() = Some(channel_id.to_string()));
+    send(Action::Watch { channel_id: channel_id.to_string() })
+}
+
+thread_local! {
+    /// The channel last asked for, shared with the receive loop so a snapshot
+    /// arriving after a navigation does not ask for it a second time.
+    static WATCHED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// Ask the server for something.
 ///
 /// Returns `false` if there is no connection right now. Callers treat that as
@@ -120,6 +136,14 @@ async fn run(app: App, mut sock: Sock) {
     LINK.with(|l| *l.borrow_mut() = Some(sock.sender()));
 
     let mut cursor = Cursor::default();
+    // What this connection has already asked to watch.
+    //
+    // Tracked explicitly rather than inferred from the transcript: an empty
+    // channel has an empty transcript, so inferring made "have I asked?" and
+    // "did it have anything in it?" the same question — and every snapshot for
+    // an empty channel asked again, which the server answered with another
+    // snapshot. A tight loop that presents as a UI that will not hold still.
+    WATCHED.with(|w| *w.borrow_mut() = None);
     while let Some(frame) = sock.recv().await {
         let Ok(frame) = frame else { continue };
         match frame {
@@ -128,11 +152,25 @@ async fn run(app: App, mut sock: Sock) {
                 // `seq`; merging it into whatever was there would preserve
                 // exactly the stale entries it exists to clear.
                 cursor = Cursor::at(seq);
-                app.voice_rooms.set(state.voice);
+                put(app, state);
                 app.live_up.set(true);
+                // A fresh connection does not know what this client is
+                // reading. Saying so is what fills the transcript, so it
+                // happens on every snapshot — including the one after a
+                // reconnect, which is exactly when the page has to come back.
+                let open = app.channel_id.get();
+                let asked = WATCHED.with(|w| w.borrow().clone());
+                if !open.is_empty() && asked.as_deref() != Some(open.as_str()) {
+                    watch(&open);
+                }
             }
             Down::Event { seq, event } => match cursor.step(seq) {
-                Step::Apply => fold(app, &event),
+                Step::Apply => {
+                    // Before folding, so "is this new to me" is still
+                    // answerable — afterwards the state already contains it.
+                    announce(app, &event);
+                    fold(app, &event);
+                }
                 // A resnapshot overlapped an event already folded in.
                 Step::Duplicate => {}
                 Step::Gap => {
@@ -150,10 +188,80 @@ async fn run(app: App, mut sock: Sock) {
 }
 
 /// Fold one event into the app's state, with the server's own reducer.
+///
+/// Read, apply, write. The signals are storage; [`Live::apply`] is the only
+/// thing that ever computes what they should hold — so there is no second
+/// place where "a message arrived" is turned into a change.
 fn fold(app: App, event: &Event) {
-    // Read, apply, write. The signal holds the projection the UI renders; the
-    // reducer is the only thing that ever computes it.
-    let mut state = State { voice: app.voice_rooms.with(|v| v.clone()) };
+    let before = take(app);
+    let mut state = before.clone();
     Live::apply(&mut state, event);
+    if state != before {
+        put(app, state);
+    }
+}
+
+/// Make a noise, if this event is one of the few that earns it.
+///
+/// The rules live here rather than in `sound` because they are about *this
+/// client's* situation — which room it is in, which channel it is reading, and
+/// who it is — and none of that is the tone's business.
+fn announce(app: App, event: &Event) {
+    use crate::sound::{play, Tone};
+
+    match event {
+        // Somebody else, in the channel being read. Your own message is not
+        // news to you, and a channel you are not looking at gets an unread
+        // pip, which is the quiet version of the same information.
+        Event::MessagePosted { channel_id, message } => {
+            let mine = message.author_id.as_deref() == Some(app.my_id().as_str());
+            if !mine && channel_id == &app.channel_id.get() {
+                play(Tone::Message);
+            }
+        }
+        // Only about the room you are standing in. Someone arriving somewhere
+        // else is not an interruption you agreed to.
+        Event::VoiceJoined { channel_id, .. } => {
+            if channel_id == &app.in_voice.get() {
+                play(Tone::Join);
+            }
+        }
+        Event::VoiceLeft { channel_id, user_id, .. } => {
+            // Your own departure is announced by the same event everyone else
+            // gets, and it should confirm the click — but by then `in_voice`
+            // has already been cleared locally, so it is matched on identity
+            // rather than on the room.
+            if channel_id == &app.in_voice.get() || user_id == &app.my_id() {
+                play(Tone::Leave);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Assemble the live state out of the signals that store it.
+fn take(app: App) -> State {
+    State {
+        voice: app.voice_rooms.with(|v| v.clone()),
+        unread: app.unread.with(|u| u.clone()),
+        // What this client is reading is a local fact the server is told, not
+        // one it is asked for — so it is read from the selection rather than
+        // held twice.
+        watching: Some(app.channel_id.get()).filter(|c| !c.is_empty()),
+        transcript: app.messages.with(|m| m.clone()),
+    }
+}
+
+/// Write it back out.
+fn put(app: App, state: State) {
     app.voice_rooms.set(state.voice);
+    app.unread.set(state.unread);
+    if let Some(watching) = state.watching {
+        // Only when it still describes what we are looking at: a snapshot for
+        // the previous channel must not paint itself over the current one.
+        if watching == app.channel_id.get() {
+            app.messages.set(state.transcript);
+        }
+    }
+    app.touch();
 }

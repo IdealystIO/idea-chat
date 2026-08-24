@@ -387,8 +387,17 @@ pub fn go_channel(app: App, channel_id: &str) {
     app.thread_root.set(String::new());
     app.search_open.set(false);
     app.draft.set(String::new());
-    // By id, not by reading the signal back — see `load_channel_by_id`.
-    load_channel_by_id(app, id);
+    // Tell the live connection what we are reading. It answers with the page,
+    // so the fetch below is only what happens while the socket is down.
+    #[cfg(target_arch = "wasm32")]
+    let live = crate::livewire::watch(&id);
+    #[cfg(not(target_arch = "wasm32"))]
+    let live = false;
+
+    if !live {
+        // By id, not by reading the signal back — see `load_channel_by_id`.
+        load_channel_by_id(app, id);
+    }
 }
 
 pub fn go_space(app: App, space_id: &str) {
@@ -457,6 +466,22 @@ pub fn send(app: App) {
         next
     });
     app.touch();
+
+    // Over the live connection when there is one: the server answers with a
+    // `MessagePosted` event that everyone in the channel gets, this client
+    // included, and the optimistic row is corrected when it arrives (same id).
+    // The HTTP path stays for the moment the socket is reconnecting — a
+    // message typed then should still be sent, not silently dropped.
+    #[cfg(target_arch = "wasm32")]
+    if crate::livewire::connected() {
+        crate::livewire::send(crate::live::Action::Post {
+            id,
+            channel_id: channel,
+            body,
+            thread_root_id: None,
+        });
+        return;
+    }
 
     spawn_async(async move {
         match api::send_message(id.clone(), channel, body, None).await {

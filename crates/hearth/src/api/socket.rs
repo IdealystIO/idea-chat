@@ -38,7 +38,7 @@ pub async fn live(
     // What this connection may see, resolved once. Everything downstream —
     // the snapshot and every event — is scoped by this list, so there is one
     // answer to "what can you see" rather than one per code path.
-    let topics: Vec<idea_state::Topic> = db
+    let mut topics: Vec<idea_state::Topic> = db
         .0
         .spaces_for_user(user)
         .await
@@ -46,6 +46,20 @@ pub async fn live(
         .into_iter()
         .map(|s| idea_state::Topic::space(&s.id.to_string()))
         .collect();
+    // Every channel this account can see, by the same rule that governs
+    // reading one. A message is published to its channel's topic, so a DM
+    // reaches its two participants and nobody else — a space topic would have
+    // been wrong for exactly the conversations that matter most.
+    topics.extend(
+        db.0
+            .visible_channels(user)
+            .await
+            .map_err(srv::internal)?
+            .into_iter()
+            .map(|c| idea_state::Topic::channel(&c.to_string())),
+    );
+    // Its own account, for things that concern this person and no one else.
+    topics.push(idea_state::Topic::user(&user.to_string()));
 
     let mut sub = hub.0.connect(&user.to_string(), topics);
 
@@ -54,6 +68,10 @@ pub async fn live(
     // nothing on its way out; without this the only thing removing them would
     // be the presence TTL, which is a backstop rather than a mechanism.
     let mut in_room: Option<String> = None;
+
+    // The channel this connection is reading. Held here rather than looked up,
+    // because it is a fact about this socket and nothing else knows it.
+    let mut watching: Option<uuid::Uuid> = None;
 
     let outcome = loop {
         // `select!` drops the unfinished futures when it completes, which is
@@ -85,18 +103,25 @@ pub async fn live(
                     break Ok(());
                 }
             }
-            Next::FromClient(Some(Ok(Up::Action(action)))) => {
-                match act(&db.0, &hub.0, user, &action).await {
-                    Ok(now_in) => in_room = now_in,
+            Next::FromClient(Some(Ok(Up::Action(Action::Watch { channel_id })))) => {
+                match watch(&db.0, &hub.0, &sub, user, &channel_id).await {
+                    Ok(ch) => watching = Some(ch),
                     Err(e) => {
-                        // A refusal is addressed to the one client that asked,
-                        // not published: nobody else needs to know what you
-                        // were not allowed to do.
-                        let reason = match e {
-                            ServerError::Failed(m) => m,
-                            other => other.to_string(),
-                        };
-                        if ch.send(Down::Refused { reason }).await.is_err() {
+                        if send_refusal(&mut ch, e).await.is_err() {
+                            break Ok(());
+                        }
+                    }
+                }
+            }
+            Next::FromClient(Some(Ok(Up::Action(action)))) => {
+                match act(&db.0, &hub.0, user, watching, &action).await {
+                    Ok(now_in) => {
+                        if let Some(room) = now_in {
+                            in_room = Some(room);
+                        }
+                    }
+                    Err(e) => {
+                        if send_refusal(&mut ch, e).await.is_err() {
                             break Ok(());
                         }
                     }
@@ -117,6 +142,59 @@ pub async fn live(
     outcome
 }
 
+/// Tell one client what a channel currently holds.
+///
+/// Answered as a restatement rather than an event, because "here is a
+/// different channel's page" is not a change to what the client had — it is a
+/// different subject. Numbering stays dense, so the next event still applies.
+#[cfg(feature = "server")]
+async fn watch(
+    db: &hearth_db::Db,
+    hub: &srv::LiveHub,
+    sub: &idea_state::hub::Subscription<crate::live::Live>,
+    user: uuid::Uuid,
+    channel_id: &str,
+) -> Result<uuid::Uuid, ServerError> {
+    let channel = srv::parse_id(channel_id)?;
+    srv::require_channel_access(db, channel, user).await?;
+
+    let rows = db.channel_page(channel, None).await.map_err(srv::internal)?;
+    let transcript = srv::to_dtos(db, rows).await?;
+
+    // Everything else in the state is unchanged, so it is read back out rather
+    // than recomputed — the snapshot has to describe the whole world, not just
+    // the part that moved.
+    let mut state = hub.snapshot(&user.to_string(), sub.topics());
+    state.watching = Some(channel_id.to_string());
+    state.transcript = transcript;
+    state.unread = db
+        .unread_channels(user)
+        .await
+        .map_err(srv::internal)?
+        .into_iter()
+        .map(|c| c.to_string())
+        .filter(|c| c != channel_id)
+        .collect();
+
+    hub.resnapshot(sub.id(), state);
+    Ok(channel)
+}
+
+/// Send a refusal to the one client that asked.
+///
+/// Never published: nobody else needs to know what you were not allowed to do.
+#[cfg(feature = "server")]
+async fn send_refusal(
+    ch: &mut Socket<Up<Action>, Frames>,
+    e: ServerError,
+) -> Result<(), server::SocketError> {
+    let reason = match e {
+        ServerError::Failed(m) => m,
+        other => other.to_string(),
+    };
+    ch.send(Down::Refused { reason }).await
+}
+
 /// Authorize an action, make it true, and tell everyone who can see it.
 ///
 /// Returns which voice room this connection is now in, so the socket can undo
@@ -126,9 +204,44 @@ async fn act(
     db: &hearth_db::Db,
     hub: &srv::LiveHub,
     user: uuid::Uuid,
+    watching: Option<uuid::Uuid>,
     action: &Action,
 ) -> Result<Option<String>, ServerError> {
     match action {
+        // Handled by the caller, which owns the subscription it answers on.
+        Action::Watch { .. } => Ok(None),
+
+        Action::Post { id, channel_id, body, thread_root_id } => {
+            let channel = srv::parse_id(channel_id)?;
+            srv::require_channel_access(db, channel, user).await?;
+            let message = db
+                .post_message(
+                    srv::parse_id(id)?,
+                    channel,
+                    user,
+                    body,
+                    thread_root_id.as_deref().map(srv::parse_id).transpose()?,
+                )
+                .await
+                .map_err(srv::user_facing)?;
+            let dto = srv::to_dtos(db, vec![message]).await?.pop().ok_or_else(|| {
+                ServerError::failed("that message could not be read back")
+            })?;
+
+            // Reading a channel is what marks it read, and posting into one is
+            // reading it — so the author's own pip never lights up for their
+            // own message.
+            if watching == Some(channel) {
+                let _ = db.mark_read(user, channel, srv::parse_id(id)?).await;
+            }
+
+            hub.publish(
+                &idea_state::Topic::channel(channel_id),
+                Event::MessagePosted { channel_id: channel_id.clone(), message: dto },
+            );
+            Ok(None)
+        }
+
         Action::JoinVoice { channel_id } | Action::StillHere { channel_id } => {
             let channel = srv::parse_id(channel_id)?;
             // The same gate as everywhere else. A socket is not a way around

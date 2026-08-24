@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::types::{MemberDto, RoomPresence};
+use crate::api::types::{MemberDto, MessageDto, RoomPresence};
 
 /// The model. See [`idea_state::Model`].
 pub struct Live;
@@ -37,6 +37,20 @@ pub struct Live;
 pub struct State {
     /// Who is in which voice room, across the spaces this connection can see.
     pub voice: Vec<RoomPresence>,
+    /// Channels with something in them you have not read.
+    pub unread: Vec<String>,
+    /// The channel this connection is reading, if any.
+    ///
+    /// Part of the state rather than a client-side detail because it decides
+    /// what `transcript` holds — and the server is the one that fills it.
+    pub watching: Option<String>,
+    /// The messages of the watched channel.
+    ///
+    /// One page, not all of history: a snapshot has to be a bounded thing, and
+    /// scrollback is unbounded by definition. Paging further back is still a
+    /// request; everything from the moment you started watching arrives as
+    /// events.
+    pub transcript: Vec<MessageDto>,
 }
 
 /// Something that happened.
@@ -66,6 +80,46 @@ pub enum Event {
         /// Who left.
         user_id: String,
     },
+    /// Somebody said something.
+    ///
+    /// Sent to everyone who can see the channel, whether or not they are
+    /// reading it — the ones who are get it in their transcript, the ones who
+    /// are not get an unread mark. One event, because it is one fact.
+    MessagePosted {
+        /// Where.
+        channel_id: String,
+        /// The message, exactly as a page of history would describe it.
+        message: MessageDto,
+    },
+    /// A message was edited.
+    MessageEdited {
+        /// Where.
+        channel_id: String,
+        /// Which one.
+        message_id: String,
+        /// The new body.
+        body: String,
+    },
+    /// A message was withdrawn.
+    ///
+    /// A tombstone, not a hole: the message keeps its place and says it was
+    /// deleted, so a conversation does not silently rearrange itself around
+    /// the gap.
+    MessageDeleted {
+        /// Where.
+        channel_id: String,
+        /// Which one.
+        message_id: String,
+    },
+    /// This account has read a channel up to a point.
+    ///
+    /// Addressed to the account rather than the space: it is nobody else's
+    /// business, and it exists so a second device stops showing a pip for
+    /// something you read on the first.
+    ReadUpTo {
+        /// Where.
+        channel_id: String,
+    },
 }
 
 /// Something a client would like to happen.
@@ -91,6 +145,28 @@ pub enum Action {
     StillHere {
         /// The room.
         channel_id: String,
+    },
+    /// I am reading this channel now.
+    ///
+    /// The server answers by restating the world with that channel's page in
+    /// it. Switching channels is therefore one round trip and no request.
+    Watch {
+        /// The channel.
+        channel_id: String,
+    },
+    /// Post this.
+    ///
+    /// The id is minted by the client so a retry is idempotent — the same
+    /// contract the HTTP endpoint has, for the same reason.
+    Post {
+        /// The message's id, chosen here.
+        id: String,
+        /// Where.
+        channel_id: String,
+        /// What.
+        body: String,
+        /// The message this replies to, for a thread.
+        thread_root_id: Option<String>,
     },
 }
 
@@ -131,6 +207,47 @@ impl idea_state::Model for Live {
                 // An empty room is absence, not a room with nobody in it — so
                 // the two representations cannot disagree.
                 state.voice.retain(|r| !r.people.is_empty());
+            }
+
+            Event::MessagePosted { channel_id, message } => {
+                if state.watching.as_deref() == Some(channel_id.as_str()) {
+                    // Reading it, so it belongs in the transcript — and reading
+                    // it is what makes it read.
+                    if !state.transcript.iter().any(|m| m.id == message.id) {
+                        state.transcript.push(message.clone());
+                        // Ids are UUIDv7, so lexical order IS arrival order.
+                        // Sorting rather than trusting the push handles the one
+                        // case that matters: a message that raced the page it
+                        // belongs after.
+                        state.transcript.sort_by(|a, b| a.id.cmp(&b.id));
+                    }
+                    state.unread.retain(|c| c != channel_id);
+                } else if !state.unread.contains(channel_id) {
+                    state.unread.push(channel_id.clone());
+                }
+            }
+
+            Event::MessageEdited { channel_id, message_id, body } => {
+                if state.watching.as_deref() == Some(channel_id.as_str()) {
+                    if let Some(m) = state.transcript.iter_mut().find(|m| &m.id == message_id) {
+                        m.body = Some(body.clone());
+                    }
+                }
+            }
+
+            Event::MessageDeleted { channel_id, message_id } => {
+                if state.watching.as_deref() == Some(channel_id.as_str()) {
+                    if let Some(m) = state.transcript.iter_mut().find(|m| &m.id == message_id) {
+                        // A tombstone keeps its place. Removing the row would
+                        // rearrange the conversation around the gap and orphan
+                        // anything replying to it.
+                        m.body = None;
+                    }
+                }
+            }
+
+            Event::ReadUpTo { channel_id } => {
+                state.unread.retain(|c| c != channel_id);
             }
         }
     }
@@ -252,6 +369,137 @@ mod tests {
             },
         );
         assert_eq!(s, before);
+    }
+
+    fn msg(id: &str, channel: &str, author: &str, body: &str) -> MessageDto {
+        MessageDto {
+            id: id.to_string(),
+            channel_id: channel.to_string(),
+            author_name: author.to_uppercase(),
+            author_id: Some(author.to_string()),
+            thread_root_id: None,
+            body: Some(body.to_string()),
+            reply_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            edited_at: None,
+        }
+    }
+
+    fn watching(channel: &str) -> State {
+        State { watching: Some(channel.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_message_in_the_channel_you_are_reading_joins_the_transcript() {
+        let mut s = watching("general");
+        Live::apply(
+            &mut s,
+            &Event::MessagePosted {
+                channel_id: "general".into(),
+                message: msg("01", "general", "ana", "hello"),
+            },
+        );
+        assert_eq!(s.transcript.len(), 1);
+        assert!(s.unread.is_empty(), "the channel you are reading is not unread");
+    }
+
+    /// The same event, two outcomes, decided by what this client is doing —
+    /// which is exactly why it is one event and not two.
+    #[test]
+    fn a_message_in_another_channel_marks_it_unread_instead() {
+        let mut s = watching("general");
+        Live::apply(
+            &mut s,
+            &Event::MessagePosted {
+                channel_id: "random".into(),
+                message: msg("01", "random", "theo", "hello"),
+            },
+        );
+        assert!(s.transcript.is_empty());
+        assert_eq!(s.unread, vec!["random".to_string()]);
+    }
+
+    /// The optimistic row and the server's copy share an id, so the arriving
+    /// event is a correction rather than a second line.
+    #[test]
+    fn a_message_already_in_the_transcript_is_not_added_twice() {
+        let mut s = watching("general");
+        let m = msg("01", "general", "ana", "hello");
+        Live::apply(&mut s, &Event::MessagePosted { channel_id: "general".into(), message: m.clone() });
+        Live::apply(&mut s, &Event::MessagePosted { channel_id: "general".into(), message: m });
+        assert_eq!(s.transcript.len(), 1);
+    }
+
+    /// Ids are UUIDv7, so lexical order is arrival order — a message that
+    /// races the page it belongs after still lands in the right place.
+    #[test]
+    fn the_transcript_stays_in_order() {
+        let mut s = watching("general");
+        for id in ["03", "01", "02"] {
+            Live::apply(
+                &mut s,
+                &Event::MessagePosted {
+                    channel_id: "general".into(),
+                    message: msg(id, "general", "ana", id),
+                },
+            );
+        }
+        let ids: Vec<&str> = s.transcript.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["01", "02", "03"]);
+    }
+
+    #[test]
+    fn a_deleted_message_keeps_its_place_as_a_tombstone() {
+        let mut s = watching("general");
+        Live::apply(
+            &mut s,
+            &Event::MessagePosted {
+                channel_id: "general".into(),
+                message: msg("01", "general", "ana", "hello"),
+            },
+        );
+        Live::apply(
+            &mut s,
+            &Event::MessageDeleted { channel_id: "general".into(), message_id: "01".into() },
+        );
+        assert_eq!(s.transcript.len(), 1, "the row was removed instead of tombstoned");
+        assert_eq!(s.transcript[0].body, None);
+    }
+
+    #[test]
+    fn an_edit_changes_the_body_and_nothing_else() {
+        let mut s = watching("general");
+        Live::apply(
+            &mut s,
+            &Event::MessagePosted {
+                channel_id: "general".into(),
+                message: msg("01", "general", "ana", "frist"),
+            },
+        );
+        Live::apply(
+            &mut s,
+            &Event::MessageEdited {
+                channel_id: "general".into(),
+                message_id: "01".into(),
+                body: "first".into(),
+            },
+        );
+        assert_eq!(s.transcript[0].body.as_deref(), Some("first"));
+        assert_eq!(s.transcript[0].author_name, "ANA");
+    }
+
+    #[test]
+    fn reading_a_channel_clears_its_mark() {
+        let mut s = watching("general");
+        Live::apply(
+            &mut s,
+            &Event::MessagePosted {
+                channel_id: "random".into(),
+                message: msg("01", "random", "theo", "hi"),
+            },
+        );
+        Live::apply(&mut s, &Event::ReadUpTo { channel_id: "random".into() });
+        assert!(s.unread.is_empty());
     }
 
     /// The property the whole design rests on: replaying a history and

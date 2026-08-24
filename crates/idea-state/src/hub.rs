@@ -44,7 +44,24 @@ pub struct Subscription<M: Model> {
     /// Frames for this client, in order.
     pub rx: mpsc::Receiver<Down<M::State, M::Event>>,
     id: u64,
+    topics: Vec<Topic>,
     hub: Hub<M>,
+}
+
+impl<M: Model> Subscription<M> {
+    /// This connection's id, for addressing it directly — see
+    /// [`Hub::resnapshot`].
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// What this connection is subscribed to.
+    ///
+    /// So a restatement can be scoped by the same list the original snapshot
+    /// was, without the caller keeping a second copy that could drift.
+    pub fn topics(&self) -> &[Topic] {
+        &self.topics
+    }
 }
 
 impl<M: Model> Drop for Subscription<M> {
@@ -104,10 +121,10 @@ impl<M: Model> Hub<M> {
         // Cannot fail: nothing else holds this sender yet and the channel is
         // empty.
         let _ = tx.try_send(Down::Snapshot { seq: 0, state });
-        conns.insert(id, Conn { tx, seq: AtomicU64::new(0), topics });
+        conns.insert(id, Conn { tx, seq: AtomicU64::new(0), topics: topics.clone() });
         drop(conns);
 
-        Subscription { rx, id, hub: self.clone() }
+        Subscription { rx, id, topics, hub: self.clone() }
     }
 
     /// Commit an event and send it to everyone subscribed to `topic`.
@@ -139,6 +156,23 @@ impl<M: Model> Hub<M> {
             self.remove(id);
         }
         sent
+    }
+
+    /// Restate everything to one connection.
+    ///
+    /// For when the server would rather say what the world *is* than explain
+    /// how it changed — the case here is a client switching to another channel,
+    /// where the alternative is an event meaning "replace the part of your
+    /// state I am about to describe", which is a snapshot wearing a hat.
+    ///
+    /// Numbered with the connection's **current** sequence, not a new one, so
+    /// the next event is still `seq + 1` and the receiving cursor stays dense.
+    /// Returns `false` if the connection has gone.
+    pub fn resnapshot(&self, conn_id: u64, state: M::State) -> bool {
+        let conns = self.inner.conns.lock().expect("hub lock");
+        let Some(conn) = conns.get(&conn_id) else { return false };
+        let seq = conn.seq.load(Ordering::Relaxed);
+        conn.tx.try_send(Down::Snapshot { seq, state }).is_ok()
     }
 
     /// The state as `viewer` sees it, without connecting.
@@ -298,6 +332,41 @@ mod tests {
             Down::Event { seq, .. } => assert_eq!(seq, 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A restatement must not create a gap: the next event still has to be the
+    /// one after the snapshot, or every client would resync on every switch.
+    #[tokio::test]
+    async fn a_resnapshot_keeps_the_sequence_dense() {
+        let hub = hub();
+        let mut sub = hub.connect("ana", vec![Topic::space("s")]);
+        let _ = sub.rx.recv().await;
+        hub.publish(&Topic::space("s"), Ev::Added(1));
+        assert!(matches!(sub.rx.recv().await, Some(Down::Event { seq: 1, .. })));
+
+        assert!(hub.resnapshot(sub.id(), Counter { n: 99, who: vec![] }));
+        match sub.rx.recv().await.expect("a snapshot") {
+            Down::Snapshot { seq, state } => {
+                assert_eq!(seq, 1, "a restatement must carry the sequence it is current as of");
+                assert_eq!(state.n, 99);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        hub.publish(&Topic::space("s"), Ev::Added(1));
+        match sub.rx.recv().await.expect("an event") {
+            Down::Event { seq, .. } => assert_eq!(seq, 2, "the sequence restarted or skipped"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn restating_to_a_connection_that_left_is_not_an_error() {
+        let hub = hub();
+        let sub = hub.connect("ana", vec![Topic::space("s")]);
+        let id = sub.id();
+        drop(sub);
+        assert!(!hub.resnapshot(id, Counter::default()));
     }
 
     #[tokio::test]

@@ -95,5 +95,10 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 wasm-bindgen = "0.2"
 # The page origin, so server-fn calls are same-origin and the browser attaches
 # the session cookie; and a clock for optimistic timestamps.
-web-sys = { version = "0.3", features = ["Window", "Location"] }
+web-sys = { version = "0.3", features = [
+    "Window", "Location",
+    # Placeholder notification tones, synthesised — see `src/sound.rs`.
+    "AudioContext", "BaseAudioContext", "AudioDestinationNode", "AudioNode",
+    "AudioParam", "GainNode", "OscillatorNode", "OscillatorType",
+] }
 js-sys = "0.3"

@@ -165,7 +165,16 @@ impl LiveStore {
     /// Start from what the database already knows.
     pub async fn load(db: &Db) -> LiveStore {
         let rows = db.voice_everywhere().await.unwrap_or_default();
-        LiveStore { all: std::sync::Mutex::new(crate::live::State { voice: group_presence(rows) }) }
+        LiveStore {
+            all: std::sync::Mutex::new(crate::live::State {
+                voice: group_presence(rows),
+                // The projection holds only what is shared. Unread marks and a
+                // transcript are per-connection — the socket fills them in when
+                // it answers, because they are answers to "who is asking" and
+                // "what are you reading", not facts about the world.
+                ..Default::default()
+            }),
+        }
     }
 }
 
@@ -183,6 +192,7 @@ impl idea_state::Store<crate::live::Live> for LiveStore {
                 .filter(|room| topics.contains(&idea_state::Topic::space(&room.space_id)))
                 .cloned()
                 .collect(),
+            ..Default::default()
         }
     }
 

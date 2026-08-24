@@ -142,7 +142,16 @@ const clickText = async (p, label) => {
   await ana.keyboard.press('Enter');
   await ana.waitForTimeout(1500);
   check('a message posts', await has(ana, 'First message in a real database.'));
-  check('and went to the server', calls.includes('send_message'));
+  // Not "did it call send_message" — messages go over the live socket now, and
+  // asserting the transport made this fail the day it changed while the thing
+  // it cared about still worked. What matters is that the server has it, which
+  // the reload below proves.
+  check('and the composer clears once it is away',
+    await ana.evaluate(() => {
+      const i = [...document.querySelectorAll('input')]
+        .find(x => (x.placeholder || '').startsWith('Message'));
+      return !!i && i.value === '';
+    }));
   await shot(ana, '04-posted');
 
   // Voice-room behaviour lives in `voice-flows.js`: joining opens a real
@@ -191,18 +200,36 @@ const clickText = async (p, label) => {
   check('and the new member sees the existing history', await has(theo, 'First message in a real database.'));
   await shot(theo, '06-invited');
 
-  // --- two people, one channel ---
-  const tc = await theo.$('input[placeholder^="Message"]');
-  await tc.click();
-  await tc.type('Theo, arriving.', { delay: 5 });
-  await theo.keyboard.press('Enter');
-  await theo.waitForTimeout(1500);
-  check("the second person can post", await has(theo, 'Theo, arriving.'));
+  // --- two people, one channel, no reload ---
+  // The claim the reducer exists for. Ana is signed in on the same channel and
+  // does not refresh anything; what she sees arrives as an event.
+  //
+  // The transcript re-renders when the socket answers, so a handle grabbed a
+  // moment too early is detached by the time it is used — hence the retry.
+  const typeInto = async (page, text) => {
+    for (let i = 0; i < 10; i++) {
+      try {
+        const el = await page.$('input[placeholder^="Message"]');
+        await el.click();
+        await el.type(text, { delay: 4 });
+        return true;
+      } catch { await page.waitForTimeout(300); }
+    }
+    return false;
+  };
+  check('the second person can type', await typeInto(theo, 'Theo, arriving.'));
 
-  await ana.reload({ waitUntil: 'load' });
-  await ana.waitForTimeout(3500);
-  await clickText(ana, 'general');
-  check("and the first person sees it", await has(ana, 'Theo, arriving.'));
+  const sentAt = Date.now();
+  await theo.keyboard.press('Enter');
+  let arrived = null;
+  while (Date.now() - sentAt < 5000) {
+    if (await has(ana, 'Theo, arriving.')) { arrived = Date.now() - sentAt; break; }
+    await ana.waitForTimeout(25);
+  }
+  console.log(`        reached the other client in ${arrived === null ? 'never' : arrived + 'ms'}`);
+  check("the second person can post", await has(theo, 'Theo, arriving.'));
+  check("and the first person sees it without reloading", arrived !== null);
+  check('quickly enough to feel live', arrived !== null && arrived < 2000, `took ${arrived}ms`);
   check('with the right author', await has(ana, 'Theo Lang'));
   await shot(ana, '07-two-people');
 
