@@ -58,8 +58,18 @@ async fn main() {
     // Defense in depth over the SameSite=Lax cookie. Set HEARTH_ORIGINS to
     // your real web origin(s) in production — a wrong list here is a rejected
     // login, which is at least loud.
+    //
+    // The default allows every spelling of the loopback address on the port we
+    // actually bound. `localhost`, `127.0.0.1` and `[::1]` reach the same
+    // socket but are three *different* origins, and the browser sends whichever
+    // one is in the address bar. Allowing only the one the operator happened to
+    // type into HEARTH_BIND makes the app work or 403 based on how they later
+    // typed the URL, which reads as "the server is down".
     let origins: Vec<String> = std::env::var("HEARTH_ORIGINS")
-        .unwrap_or_else(|_| format!("http://{bind},http://localhost:8080,http://127.0.0.1:8080"))
+        .unwrap_or_else(|_| {
+            let port = bind.rsplit(':').next().unwrap_or("8080");
+            format!("http://localhost:{port},http://127.0.0.1:{port},http://[::1]:{port}")
+        })
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -83,6 +93,10 @@ async fn main() {
     println!("Hearth is running.");
     println!("  UI  → http://{bind}/");
     println!("  API → http://{bind}/_srv/<fn>");
+    // Printed because a mismatch here is invisible from the browser: the
+    // request 403s with no body, and the app reports that it cannot reach the
+    // server. Seeing the list next to the URL you typed is the whole diagnosis.
+    println!("  Browser origins allowed: {}", origins.join(" "));
     if let Some(token) = claim {
         println!();
         println!("This instance has no accounts yet.");

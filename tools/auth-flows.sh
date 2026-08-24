@@ -113,6 +113,17 @@ echo "--- csrf ---"
 R=$(curl -sS -X POST "$API/me" -H 'Content-Type: application/json' -H "Origin: https://evil.example" -b $JAR -d 'null')
 no "a cross-origin request cannot use the cookie" "$R" '"handle":"ana"'
 
+# `localhost` and `127.0.0.1` are the same socket but different origins, and
+# the browser sends whichever the operator typed. Allowing only one of them
+# 403s half the ways of opening the app, which the client can only report as
+# "the server is down" — so assert every loopback spelling of our own port.
+PORT=${API##*:}; PORT=${PORT%%/*}
+for SPELLING in "http://localhost:$PORT" "http://127.0.0.1:$PORT" "http://[::1]:$PORT"; do
+  R=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/instance_status" \
+        -H 'Content-Type: application/json' -H "Origin: $SPELLING" -d 'null')
+  ok "$SPELLING is a permitted origin" "$R" "200"
+done
+
 echo "--- logout ---"
 curl -sS -X POST "$API/logout" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -b $JAR -c $JAR -d 'null' >/dev/null
 R=$(curl -sS -X POST "$API/me" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -b $JAR -d 'null')
