@@ -86,6 +86,9 @@ uuid = { version = "1", features = ["v7", "serde", "js"] }
 # `audio-output` SDK (docs/framework-gap-analysis.md §9); the UI degrades to
 # saying so rather than pretending to connect.
 voice-client = { path = "../voice-client" }
+# Timers. The runtime driver can spawn a future but has nothing that waits, and
+# presence needs a heartbeat — see `voice::HEARTBEAT_MS`.
+gloo-timers = { version = "0.3", features = ["futures"] }
 # For the voice stats seam in `voice.rs` — see `install_stats_probe`.
 wasm-bindgen = "0.2"
 # The page origin, so server-fn calls are same-origin and the browser attaches

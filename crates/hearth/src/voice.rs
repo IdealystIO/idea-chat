@@ -29,6 +29,15 @@ use voice_client::session::{self, Capture, Session};
 use crate::api;
 use crate::model::App;
 
+/// Wait, on the one target that has voice.
+///
+/// `runtime_core::driver` can spawn a future but has nothing that waits, so
+/// this is the browser's timer. A framework gap worth noting rather than
+/// working around silently — anything that polls or retries needs it.
+async fn sleep(ms: u32) {
+    gloo_timers::future::TimeoutFuture::new(ms).await;
+}
+
 thread_local! {
     /// The one live call. Replaced on join, cleared on leave — and dropping the
     /// old value is what actually closes the previous socket, so switching
@@ -87,6 +96,10 @@ pub fn join_room(app: App, channel_id: &str) {
             Ok(session) => {
                 LIVE.with(|slot| *slot.borrow_mut() = Some(session));
                 app.voice_live.set(true);
+                // Only now — presence claimed at the moment of ASKING to join
+                // would show people in rooms they never reached.
+                announce(app, room);
+                refresh_presence(app);
             }
             Err(e) => {
                 app.voice_error.set(e);
@@ -100,8 +113,56 @@ pub fn join_room(app: App, channel_id: &str) {
 /// Hang up. Idempotent — leaving a room you are not in is not an error.
 pub fn leave_room(app: App) {
     LIVE.with(|slot| slot.borrow_mut().take());
+    let was = app.in_voice.get();
     app.voice_live.set(false);
     app.voice_error.set(String::new());
+    if !was.is_empty() {
+        // Best-effort: a tab that dies says nothing, which is what the server's
+        // freshness window is for. This only makes the ordinary case immediate.
+        spawn_async(async move {
+            let _ = api::voice_gone(was).await;
+            refresh_presence(app);
+        });
+    }
+}
+
+/// How often to tell the server we are still in the room.
+///
+/// Comfortably inside the server's freshness window (`PRESENCE_TTL_SECS`), so
+/// a single dropped request does not blink someone out of the sidebar. The gap
+/// between the two is the whole tolerance budget — closing it would make every
+/// slow request a disappearance.
+const HEARTBEAT_MS: u32 = 15_000;
+
+/// Keep saying "still here" until the room changes or the call ends.
+///
+/// A loop rather than an interval so it cannot outlive its own room: every tick
+/// re-reads `in_voice` and stops the moment it is something else, which is what
+/// makes switching rooms safe — the old loop retires instead of racing the new
+/// one to write presence.
+fn announce(app: App, room: String) {
+    spawn_async(async move {
+        loop {
+            // Send BEFORE reading anything back. `Signal::set` stages: the
+            // caller set `voice_live` true on the line that reached here, and
+            // reads return the committed value until the world flushes — so a
+            // loop that checked liveness first would see `false`, exit, and
+            // never send a single heartbeat. The room is the argument for the
+            // same reason: it does not have to be read out of a signal.
+            //
+            // A failure is not worth reporting. The next tick tries again, and
+            // if they all fail the server drops us on its own.
+            let _ = api::voice_here(room.clone()).await;
+            sleep(HEARTBEAT_MS).await;
+
+            // By now those writes are long committed, so this is a real
+            // question: are we still in this room? Leaving, or moving to
+            // another, retires this loop rather than racing the new one.
+            if app.in_voice.get() != room {
+                return;
+            }
+        }
+    });
 }
 
 /// Live transport counters, as JSON.
@@ -143,4 +204,59 @@ pub fn install_stats_probe() {
     // Handed to JS for the life of the page; dropping it would leave a dead
     // function object behind that throws when called.
     cb.forget();
+}
+
+/// How often to ask who is in this space's rooms.
+///
+/// Polling because there is no live socket yet. Slower than the heartbeat on
+/// purpose: presence is a thing you glance at, and a sidebar that redraws
+/// every second costs more than it tells anyone. When the socket lands, this
+/// becomes a subscription and the interval goes away.
+const PRESENCE_POLL_MS: u32 = 8_000;
+
+/// Keep the sidebar's occupant lists current for whichever space is open.
+///
+/// Started once, lives as long as the page. It follows the selection rather
+/// than being restarted on every change, so switching spaces does not leave a
+/// second poller running against the old one.
+pub fn watch_presence(app: App) {
+    spawn_async(async move {
+        loop {
+            let space = app.space_id.get();
+            if !space.is_empty() {
+                match api::voice_presence(space.clone()).await {
+                    // Only apply if the selection has not moved on while the
+                    // request was in flight — otherwise a slow answer for the
+                    // previous space paints itself over the current one.
+                    Ok(rooms) if app.space_id.get() == space => app.voice_rooms.set(rooms),
+                    Ok(_) => {}
+                    // Silent: presence is decoration on top of a working app,
+                    // and an error banner for it would be noise. The next poll
+                    // tries again.
+                    Err(_) => {}
+                }
+            } else if !app.voice_rooms.with(|r| r.is_empty()) {
+                app.voice_rooms.set(Vec::new());
+            }
+            sleep(PRESENCE_POLL_MS).await;
+        }
+    });
+}
+
+/// Ask again now, without waiting for the next tick.
+///
+/// Called when this client changes a room, so your own avatar appears where
+/// you just went instead of up to a poll later.
+pub fn refresh_presence(app: App) {
+    spawn_async(async move {
+        let space = app.space_id.get();
+        if space.is_empty() {
+            return;
+        }
+        if let Ok(rooms) = api::voice_presence(space.clone()).await {
+            if app.space_id.get() == space {
+                app.voice_rooms.set(rooms);
+            }
+        }
+    });
 }

@@ -46,6 +46,54 @@ stylesheet! {
 // Spaces rail — the 70px column of space buttons
 // =============================================================================
 
+// A voice room and whoever is standing in it, as one block — so the occupant
+// list travels with its room when the list reorders.
+stylesheet! {
+    pub RoomGroup<()> {
+        base(_t) {
+            flex_direction: FlexDirection::Column,
+        }
+    }
+}
+
+// One person under a room. Indented past the room's own icon so the hierarchy
+// reads without a rule or a bullet, and quieter than a room row because it is
+// a fact about the room rather than somewhere you can go.
+stylesheet! {
+    pub Occupant<IdeaThemeRef> {
+        base(t) {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            gap: t.spacing.xs(),
+            padding_vertical: 3.0,
+            padding_left: 30.0,
+            padding_right: t.spacing.sm(),
+            border_radius: t.radius.sm(),
+        }
+        state hovered(t) {
+            background: t.color.surface_alt(),
+        }
+    }
+}
+
+stylesheet! {
+    pub OccupantName<IdeaThemeRef> {
+        base(t) {
+            color: t.color.text_muted(),
+            font_size: 12.0,
+            overflow: Overflow::Hidden,
+        }
+        variant you {
+            #[default]
+            off(_t) {}
+            // Your own name, so a room full of people still answers "am I in
+            // this one?" without counting avatars.
+            on(t) { color: t.color.text() }
+        }
+        transitions { color: 220ms EaseInOut }
+    }
+}
+
 // The navigation surface — rail beside room list — as one panel. AppShell
 // pins this in-flow on desktop and slides it in as a drawer below Lg, so it
 // has to fill whatever it is given rather than set a width of its own.

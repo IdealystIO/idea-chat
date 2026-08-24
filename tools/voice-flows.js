@@ -91,6 +91,46 @@ const clickRoom = async (p, label) => {
   return !!at;
 };
 
+/// The names listed under a voice room in the sidebar.
+///
+/// Read by geometry rather than by class, because the claim under test is a
+/// visual one: these names appear beneath that room. Occupant rows are
+/// indented past the room's icon, so they are the rows below it that start
+/// further right — the next thing at the room's own indent ends the group.
+const occupantsUnder = async (p, room) => p.evaluate(({ room }) => {
+  // Read the room's own group, not "rows below it": occupants are indented
+  // with padding, which does not move the element's x, so geometry cannot tell
+  // where the group ends. The DOM can — a room and its occupants are one box.
+  //
+  // Rows carry more than one line: a room row is "The Porch\n2" (name plus
+  // occupant count) and an occupant row is "SA\nSam" (initials plus name).
+  const first = l => (l.innerText || '').trim().split('\n')[0].trim();
+  const head = [...document.querySelectorAll('div')].find(d => {
+    const r = d.getBoundingClientRect();
+    return r.x < 320 && r.width > 0 && r.height > 0 && r.height < 40 && first(d) === room;
+  });
+  if (!head) return null;
+
+  // Up from the row to the box that holds the row AND anyone under it.
+  let group = head;
+  for (let i = 0; i < 4 && group.parentElement; i++) {
+    group = group.parentElement;
+    if (group.children.length > 1 && group.children[0].contains(head)) break;
+  }
+  // An occupant row is exactly "initials, name" — two lines, the first of them
+  // an avatar's one or two letters. Matching that shape rather than "any child
+  // after the first" matters for the LAST room in the list, where climbing for
+  // the group can otherwise reach far enough to pick up the tray below it.
+  const out = [];
+  for (let i = 1; i < group.children.length; i++) {
+    const lines = (group.children[i].innerText || '').trim().split('\n')
+      .map(x => x.trim()).filter(Boolean);
+    if (lines.length !== 2 || lines[0].length > 2) continue;
+    if (!out.includes(lines[1])) out.push(lines[1]);
+  }
+  return out;
+}, { room });
+
 const text = p => p.evaluate(() => document.body.innerText);
 const has = async (p, s) => (await text(p)).includes(s);
 const stats = p => p.evaluate(() => {
@@ -137,6 +177,13 @@ const peakOver = async (pages, ms) => {
     [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'another passphrase' }]);
   const theoJar = theo.cookie;
   check('a second person joins the space', !!theoJar);
+
+  // A third member who never joins a call — presence has to be visible to
+  // someone standing outside it, which is the whole point of tracking it in
+  // the chat server rather than reading it off the relay.
+  const wren = await call('register',
+    [{ invite_code: invite, handle: 'wren', display_name: 'Wren Idris', email: null, password: 'a third passphrase' }]);
+  check('a third person joins the space', !!wren.cookie);
 
   // --- the ticket is an authorization decision, not a formality ---
   const outsider = await call('claim_instance', [{ token: 'nope', handle: 'x', display_name: 'x', email: null, password: 'x' }]);
@@ -214,6 +261,37 @@ const peakOver = async (pages, ms) => {
   // The claim that matters: a real signal came out the far end, not just bytes.
   check('ana HEARD theo', sa.remote > 0, JSON.stringify(sa));
   check('theo HEARD ana', st.remote > 0, JSON.stringify(st));
+
+  // --- presence: who the sidebar says is in a room ---
+  // The claim is that this works for people who are NOT in the call — you
+  // should be able to see three people talking before deciding to join them.
+  // So the third browser watches without joining anything.
+  const w = await open('wren', 'a third passphrase');
+  await w.waitForTimeout(1000);
+  check('a watcher is signed in and in no call', !(await has(w, 'Voice connected')));
+
+  await w.waitForTimeout(10000);
+  const seen = await occupantsUnder(w, 'The Porch');
+  console.log(`        watcher sees under The Porch: ${JSON.stringify(seen)}`);
+  check('the sidebar lists the people in the room, to someone not in it',
+    !!seen && seen.includes('Ana Ruiz') && seen.includes('Theo Lang'), JSON.stringify(seen));
+  check('and an empty room lists nobody',
+    JSON.stringify(await occupantsUnder(w, 'Movie Night')) === '[]',
+    JSON.stringify(await occupantsUnder(w, 'Movie Night')));
+
+  // Moving rooms must move you, not clone you.
+  await clickRoom(t, 'Movie Night');
+  await t.waitForTimeout(3000);
+  await w.waitForTimeout(11000);
+  const porchNow = await occupantsUnder(w, 'The Porch');
+  const movieNow = await occupantsUnder(w, 'Movie Night');
+  console.log(`        after Theo moves — Porch: ${JSON.stringify(porchNow)}  Movie: ${JSON.stringify(movieNow)}`);
+  check('moving rooms leaves no ghost in the old one',
+    !!porchNow && !porchNow.includes('Theo Lang'), JSON.stringify(porchNow));
+  check('and shows them in the new one',
+    !!movieNow && movieNow.includes('Theo Lang'), JSON.stringify(movieNow));
+  await clickRoom(t, 'The Porch');
+  await t.waitForTimeout(3000);
 
   // --- leaving actually hangs up ---
   // The hang-up is the last control in the tray strip — an icon, so it is

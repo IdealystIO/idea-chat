@@ -100,7 +100,10 @@ mod client {
         net::configure();
         // Test seam for the voice end-to-end run; see `voice::install_stats_probe`.
         #[cfg(target_arch = "wasm32")]
-        crate::voice::install_stats_probe();
+        {
+            crate::voice::install_stats_probe();
+            crate::voice::watch_presence(state);
+        }
         effect!({
             net::start(state);
         });

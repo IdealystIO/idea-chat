@@ -182,3 +182,13 @@ pub struct InstanceSettings {
     pub registration_mode: RegistrationMode,
     pub instance_name: String,
 }
+
+/// One person, in one voice room, right now.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct VoiceOccupant {
+    pub channel_id: Uuid,
+    pub user_id: Uuid,
+    pub handle: String,
+    pub display_name: String,
+    pub role: Role,
+}

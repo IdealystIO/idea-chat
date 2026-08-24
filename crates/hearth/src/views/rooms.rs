@@ -43,6 +43,8 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
                 app.in_voice.get(),
                 app.voice_live.get(),
                 app.voice_error.get(),
+                // Who is standing in which room — see `App::presence_key`.
+                app.presence_key(),
             )
         },
         move |_| room_list_body(app),
@@ -166,12 +168,15 @@ fn live_room_row(app: App, channel: ChannelSummary) -> Element {
     let label: Element = text(channel.name.clone())
         .with_style(|| StyleApplication::new(styles::RoomRowName::sheet()))
         .into();
+    let people = app.people_in_room(&id);
     let mut children = vec![icon(channel_icon(kind)).size(15.0).into(), label];
-    if app.in_voice.get() == id {
-        children.push(ui! { Muted(label = "1".to_string(), kind = typography_kind::Caption) });
+    if !people.is_empty() {
+        children.push(ui! {
+            Muted(label = people.len().to_string(), kind = typography_kind::Caption)
+        });
     }
 
-    press(
+    let row = press(
         children,
         move || {
             StyleApplication::new(styles::RoomRow::sheet())
@@ -185,6 +190,41 @@ fn live_room_row(app: App, channel: ChannelSummary) -> Element {
                 app.join_voice(&for_click);
             }
         },
+    );
+
+    // Who is in there, under the room. Everyone — not just when you are in it
+    // yourself: seeing that people are already talking is most of the reason
+    // to join them.
+    let occupants: Vec<Element> = people.into_iter().map(|p| occupant_row(app, p)).collect();
+
+    ui! {
+        view(style = || StyleApplication::new(styles::RoomGroup::sheet())) {
+            row
+            occupants
+        }
+    }
+}
+
+/// One person standing in a voice room.
+///
+/// Indented under the room and quieter than a channel: this is a fact about
+/// the room, not another place you can go. Clicking opens their profile, the
+/// same as clicking them in the roster — one person, one behaviour.
+fn occupant_row(app: App, person: MemberDto) -> Element {
+    let id = person.id.clone();
+    let me = app.my_id();
+    press(
+        vec![
+            ui! { Face(name = person.display_name.clone(), id = person.id.clone(), size = AvatarSize::Xs) },
+            text(person.display_name.clone())
+                .with_style(move || {
+                    StyleApplication::new(styles::OccupantName::sheet())
+                        .with("you", if person.id == me { "on" } else { "off" })
+                })
+                .into(),
+        ],
+        || StyleApplication::new(styles::Occupant::sheet()),
+        move || app.profile.set(id.clone()),
     )
 }
 

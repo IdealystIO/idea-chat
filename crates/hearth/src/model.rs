@@ -256,6 +256,12 @@ pub struct App {
     pub voice_live: Signal<bool>,
     /// Why the last join failed, if it did.
     pub voice_error: Signal<String>,
+    /// Who is in each of this space's voice rooms, as the server sees it.
+    ///
+    /// Not derived from `in_voice`: this is everyone, including people in
+    /// rooms you are not in. Seeing that three people are already talking is
+    /// most of the reason to join them.
+    pub voice_rooms: Signal<Vec<crate::api::types::RoomPresence>>,
     /// The room whose conference view is open, or empty.
     ///
     /// Separate from [`in_voice`] because being *in* a call and *looking at*
@@ -333,6 +339,7 @@ impl App {
             in_voice: signal(String::new()),
             voice_live: signal(false),
             voice_error: signal(String::new()),
+            voice_rooms: signal(Vec::new()),
             stage: signal(String::new()),
 
             dark: signal(true),
@@ -567,6 +574,37 @@ impl App {
     /// Put the main column back on the channel you were reading.
     pub fn close_stage(&self) {
         self.stage.set(String::new());
+    }
+
+    /// A fingerprint of who is where, for a `switch` key.
+    ///
+    /// Counts alone would not do: two people swapping rooms leaves every count
+    /// unchanged, and the sidebar would keep drawing the wrong names. This
+    /// includes identity, so any movement is a different key.
+    pub fn presence_key(&self) -> String {
+        self.voice_rooms.with(|rooms| {
+            let mut key = String::new();
+            for room in rooms {
+                key.push_str(&room.channel_id);
+                for p in &room.people {
+                    key.push(',');
+                    key.push_str(&p.id);
+                }
+                key.push(';');
+            }
+            key
+        })
+    }
+
+    /// Who is in `channel`, for the row under a voice room.
+    pub fn people_in_room(&self, channel: &str) -> Vec<crate::api::types::MemberDto> {
+        self.voice_rooms.with(|rooms| {
+            rooms
+                .iter()
+                .find(|r| r.channel_id == channel)
+                .map(|r| r.people.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// The name of the room you are connected to, for the tray and the header.

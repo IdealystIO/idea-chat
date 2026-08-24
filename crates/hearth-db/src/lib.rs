@@ -38,6 +38,7 @@ pub mod messages;
 pub mod model;
 pub mod spaces;
 pub mod users;
+pub mod voice;
 
 pub use model::*;
 

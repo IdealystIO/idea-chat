@@ -200,3 +200,13 @@ pub struct VoiceTicket {
     /// The signed ticket, presented on connect.
     pub token: String,
 }
+
+/// Who is in one voice room, right now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomPresence {
+    pub channel_id: String,
+    /// The people connected, as the roster already describes them — so the
+    /// sidebar draws the same name and the same avatar colour it does
+    /// everywhere else, rather than a second rendering of the same person.
+    pub people: Vec<MemberDto>,
+}
