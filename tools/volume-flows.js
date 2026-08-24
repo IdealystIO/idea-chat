@@ -119,6 +119,30 @@ const listen = (p, seconds) => p.evaluate(async (seconds) => {
   return { peak, ticks, packets: (last ?? 0) - (first ?? 0) };
 }, seconds);
 
+/// Wait until packets are actually arriving, up to `seconds`.
+///
+/// A fixed sleep is the wrong tool for "is the call back": joining is a ticket,
+/// a microphone, and a socket, and how long that takes varies with what else
+/// the machine is doing. A too-short sleep reports the mute as still in force
+/// on a tab that had simply not finished rejoining — the wrong bug to go
+/// looking for. Returns the last stats seen either way, so a genuine failure
+/// says what the client thought was happening.
+const awaitCall = (p, seconds) => p.evaluate(async (seconds) => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const deadline = Date.now() + seconds * 1000;
+  let first = null, last = null;
+  while (Date.now() < deadline) {
+    let s; try { s = JSON.parse(window.__hearthVoiceStats()); } catch { s = null; }
+    if (s) {
+      last = s;
+      if (first === null) first = s.recv;
+      if (s.recv > first) return { live: true, stats: s };
+    }
+    await sleep(200);
+  }
+  return { live: false, stats: last };
+}, seconds);
+
 /// Open a person's menu and press one of its items.
 ///
 /// Retried rather than pressed once, because the roster is a live region: it
@@ -231,10 +255,19 @@ const menuAction = async (p, person, item) => {
     await a.close(); await t.close();
   }
 
-  // --- and live, mid-call, from the menu --------------------------------
+  // --- mute is a lease over the level, not a value written into it ------
+  //
+  // Ana starts at HALF volume, and that is the whole point of the section:
+  // after a mute and an unmute she has to come back to half, not to full. A
+  // mute implemented by writing zero into the slider passes every check that
+  // only asks "is there sound again".
   {
-    const { a, t, heard } = await room({ 'voice.volume': '1' }, 4);
+    const { a, t, heard } = await room({ 'voice.volume': '1', [`voice.volume.${ana.id}`]: '0.5' }, 4);
+    console.log(`        ana at 50%:  peak ${heard.peak}, ${heard.packets} packets`);
     check('before muting, theo hears ana', heard.peak > 0, JSON.stringify(heard));
+    check('and at her set level, not at full',
+      heard.peak < loud.peak * 0.6, `${heard.peak} against ${loud.peak} at full`);
+    const level = heard.peak;
 
     const muted = await menuAction(t, 'Ana Ruiz', 'Mute for me');
     await t.waitForTimeout(1500);
@@ -247,11 +280,30 @@ const menuAction = async (p, person, item) => {
     check('and they are still connected', after.packets > 0, JSON.stringify(after));
     check('the roster says so', (await t.innerText('body')).includes('Muted for you'));
 
+    // Muting must survive a reload: you silence somebody because of something
+    // that is still true afterwards, and un-muting makes no sound, so there
+    // would be nothing to notice.
+    await t.reload({ waitUntil: 'load' });
+    await t.waitForTimeout(6000);
+    check('and it survives a refresh', (await t.innerText('body')).includes('Muted for you'));
+    check('theo can get back into the room', await clickRoom(t, 'The Porch'));
+    const relive = await awaitCall(t, 25);
+    // Two claims, two checks. Folded into one they report "still silenced"
+    // for a tab that had simply not finished rejoining.
+    check('the call comes back after the refresh', relive.live, JSON.stringify(relive.stats));
+    const rejoined = await listen(t, 5);
+    console.log(`        rejoined:    peak ${rejoined.peak}, ${rejoined.packets} packets`);
+    check('and the mute is still in force on it', rejoined.peak === 0, JSON.stringify(rejoined));
+
     await menuAction(t, 'Ana Ruiz', 'Unmute for me');
     await t.waitForTimeout(1500);
     const back = await listen(t, 5);
-    console.log(`        unmuted:     peak ${back.peak}, ${back.packets} packets`);
+    console.log(`        unmuted:     peak ${back.peak} (was ${level} before the mute)`);
     check('and unmuting brings them back', back.peak > 0, JSON.stringify(back));
+    // The assertion this section exists for.
+    check('to the level they were at, not to full',
+      back.peak <= level * 1.5 && back.peak >= level * 0.5,
+      `${back.peak} against ${level} before the mute, and ${loud.peak} at full`);
     await a.close(); await t.close();
   }
 

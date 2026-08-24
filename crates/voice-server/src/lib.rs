@@ -23,7 +23,7 @@
 pub mod coord;
 pub mod suppress;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub mod gateway;
@@ -65,9 +65,15 @@ type Relayed = (u32, Arc<Vec<u8>>);
 
 struct RoomState {
     tx: broadcast::Sender<Relayed>,
-    /// Ids currently connected, so a collision can be reported rather than
-    /// silently swallowed by the self-echo filter.
-    ids: HashSet<u32>,
+    /// Id -> how many live sockets are claiming it.
+    ///
+    /// A COUNT, not a set, and the difference is the whole reason this type
+    /// changed. A refresh means one id is briefly claimed twice: the browser
+    /// opens the new socket before the node has finished reaping the old one.
+    /// With a set, the stale socket's departure removed the id the *live* one
+    /// depends on — and when that emptied the set it deleted the room out from
+    /// under everybody still in it. See [`Rooms::detach`].
+    ids: HashMap<u32, u32>,
     /// Assignment generation this room is being served under.
     epoch: Epoch,
 }
@@ -99,7 +105,7 @@ impl Rooms {
         let mut map = self.lock();
         let state = map.entry(room.to_string()).or_insert_with(|| RoomState {
             tx: broadcast::channel(ROOM_BACKLOG).0,
-            ids: HashSet::new(),
+            ids: HashMap::new(),
             epoch,
         });
         if epoch > state.epoch {
@@ -109,20 +115,37 @@ impl Rooms {
             );
             *state = RoomState {
                 tx: broadcast::channel(ROOM_BACKLOG).0,
-                ids: HashSet::new(),
+                ids: HashMap::new(),
                 epoch,
             };
         }
-        let duplicate = !state.ids.insert(id);
+        let claims = state.ids.entry(id).or_insert(0);
+        *claims += 1;
+        let duplicate = *claims > 1;
         (state.tx.clone(), state.tx.subscribe(), duplicate)
     }
 
-    /// Release `id`, dropping the room when it empties so a reconnect with the
-    /// same id is not reported as a collision against its own stale entry.
+    /// Release one socket's claim on `id`, dropping the room only once no
+    /// socket is attached to it at all.
+    ///
+    /// The count is what makes that safe. A refresh puts two sockets on one id
+    /// for as long as it takes the node to notice the first one is gone, and
+    /// when this removed by id instead of by claim, the stale socket's
+    /// departure deleted the room while the live one was still in it. The next
+    /// person to join then built a **fresh** room under the same name, with a
+    /// fresh broadcast channel — so the room silently split in two and the two
+    /// halves could not hear each other. It presents as one person refreshing
+    /// and coming back to a call where everybody else has gone quiet, while
+    /// their own microphone still shows as sending.
     fn detach(&self, room: &str, id: u32) {
         let mut map = self.lock();
         if let Some(state) = map.get_mut(room) {
-            state.ids.remove(&id);
+            if let Some(claims) = state.ids.get_mut(&id) {
+                *claims -= 1;
+                if *claims == 0 {
+                    state.ids.remove(&id);
+                }
+            }
             if state.ids.is_empty() {
                 map.remove(room);
             }
@@ -136,7 +159,9 @@ impl Rooms {
         let map = self.lock();
         NodeLoad {
             rooms: map.len() as u32,
-            participants: map.values().map(|r| r.ids.len() as u32).sum(),
+            // Sockets, not ids: a refresh in progress really is two, and the
+            // capacity this feeds is about sockets.
+            participants: map.values().map(|r| r.ids.values().sum::<u32>()).sum(),
         }
     }
 }
@@ -420,4 +445,89 @@ pub fn router(coord: Option<NodeCoord>) -> Router {
         // so the relay has to be reachable cross-origin.
         .layer(CorsLayer::permissive())
         .with_state(NodeState { rooms, coord, suppress: suppress::Suppression::start() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPOCH: Epoch = 1;
+
+    /// The bug this file's `detach` was rewritten for.
+    ///
+    /// The order below is not contrived — it is what a browser test does
+    /// between two runs, and what two people rejoining a room after a blip
+    /// do. Everybody reconnects before the node has finished noticing the old
+    /// sockets are gone, so every id is claimed twice; then the stale claims
+    /// drain, and under a set-of-ids the LAST of them emptied the set and
+    /// deleted the room while both live sockets were still in it.
+    ///
+    /// Nothing looked wrong at that moment — the two who were already there
+    /// still shared their channel and could still hear each other. The damage
+    /// landed on the next person to attach, who found no room, built a fresh
+    /// one under the same name with a fresh channel, and was inaudible in both
+    /// directions. It presents as one person refreshing and coming back to a
+    /// call where everyone has gone silent, while their own microphone still
+    /// reports as sending.
+    #[test]
+    fn draining_stale_sockets_does_not_delete_a_room_people_are_in() {
+        let rooms = Rooms::default();
+        // The previous connections, not yet reaped.
+        let (_ana_stale, _r1, _) = rooms.attach("porch", 1, EPOCH);
+        let (_theo_stale, _r2, _) = rooms.attach("porch", 2, EPOCH);
+        // Both reconnect before either departure is noticed.
+        let (ana, _r3, dup) = rooms.attach("porch", 1, EPOCH);
+        assert!(dup, "a second socket on one id is still worth reporting");
+        let (_theo, _r4, _) = rooms.attach("porch", 2, EPOCH);
+        // Now the stale pair drains.
+        rooms.detach("porch", 1);
+        rooms.detach("porch", 2);
+
+        // Somebody else arrives. They must land in the room the other two are
+        // already in — proved by sending, because two RoomStates with the same
+        // name look identical and route nowhere near each other.
+        let (_ren, mut ren_rx, _) = rooms.attach("porch", 3, EPOCH);
+        ana.send((1, Arc::new(vec![0xAB]))).expect("ana still has listeners");
+        assert_eq!(
+            ren_rx.try_recv().expect("the newcomer is in the same room").0,
+            1,
+        );
+    }
+
+    /// The room still has to go away when everyone really has left, or a node
+    /// accumulates a channel per room it has ever served.
+    #[test]
+    fn the_room_goes_when_the_last_socket_does() {
+        let rooms = Rooms::default();
+        let (_a, _arx, _) = rooms.attach("porch", 1, EPOCH);
+        let (_b, _brx, _) = rooms.attach("porch", 2, EPOCH);
+        rooms.detach("porch", 1);
+        assert_eq!(rooms.load().rooms, 1);
+        rooms.detach("porch", 2);
+        assert_eq!(rooms.load().rooms, 0, "an empty room must not be kept");
+    }
+
+    /// Load is reported in sockets, because that is what the machine is
+    /// actually carrying — a refresh in progress genuinely is two.
+    #[test]
+    fn load_counts_sockets() {
+        let rooms = Rooms::default();
+        let (_a, _arx, _) = rooms.attach("porch", 1, EPOCH);
+        let (_b, _brx, _) = rooms.attach("porch", 1, EPOCH);
+        assert_eq!(rooms.load().participants, 2);
+        rooms.detach("porch", 1);
+        assert_eq!(rooms.load().participants, 1);
+    }
+
+    /// Detaching an id that was never attached must not underflow the count —
+    /// a `u32` going below zero would panic in debug and wrap in release,
+    /// which would make the room immortal.
+    #[test]
+    fn an_unknown_detach_is_ignored() {
+        let rooms = Rooms::default();
+        let (_a, _arx, _) = rooms.attach("porch", 1, EPOCH);
+        rooms.detach("porch", 99);
+        rooms.detach("nowhere", 1);
+        assert_eq!(rooms.load().participants, 1);
+    }
 }

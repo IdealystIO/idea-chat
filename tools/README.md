@@ -96,11 +96,25 @@ in ways nothing else would notice:
 - **Still connected.** Every silence check is paired with a packet count. A
   volume control implemented by dropping packets, muting a track, or closing a
   sink would pass "it got quieter" and fail this.
+- **Unmuting returns the LEVEL.** Ana is set to half volume before she is
+  muted, so coming back at full is a failure. A mute implemented by writing
+  zero into the slider passes every check that only asks "is there sound
+  again", and loses the level the first time anyone uses it.
 
 ```bash
 bash tools/reset-dev.sh
-node tools/volume-flows.js       # 11 assertions, two browsers
+node tools/volume-flows.js       # 18 assertions, two browsers
 ```
+
+The refresh check found a **relay** bug, not a volume one, and it is the reason
+that check is here. A participant id is derived from an account and so survives
+a reload, and the browser opens the new socket before the node has reaped the
+old — so one id is claimed twice for a moment. The node kept a *set* of ids and
+dropped the room when it emptied, so the stale claims draining deleted the room
+out from under the people still in it; the next person to attach built a fresh
+one under the same name and was inaudible in both directions. One name, two
+rooms. Every other voice suite joins fresh and leaves, so none of them could
+see it.
 
 The menu interactions retry, and the reason is worth keeping: the roster and
 the room list are live regions, and both used to rebuild several times a second

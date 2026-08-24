@@ -321,9 +321,22 @@ per-person control can only ever go down. Slider position maps to gain as
 `position²`, so 100% is exactly "as it arrived" and the bottom of the travel is
 not a cliff.
 
-Mute-for-me is this control at zero, not a second mechanism. Two paths to
-silence eventually disagree about which one wins, and the report is "unmute is
-broken" from somebody whose slider was still down.
+**Mute is a separate toggle**, and separate *state* — a lease over the level
+rather than a value written into it. Unmuting returns somebody to exactly where
+their slider was, which is the whole reason both exist: a mute implemented by
+setting the volume to zero works once and loses the level the first time anyone
+uses it. The two meet in one place only, `volume::person_gain`, which is the
+single number the audio path ever sees.
+
+The slider stays live while somebody is muted. It is not the mute control, it
+is the level they come back to, and a slider that refused to move would teach
+people the two are the same thing. The menu says which state it is in
+("Muted — volume kept") because a level of 40% and a level of 40% behind a mute
+look identical and only one of them makes a sound.
+
+Both persist per device, for the same reason: you mute somebody because of
+something that is still true after a refresh, and un-muting makes no sound, so
+a setting that forgot itself on reload would have nothing to notice.
 
 ### Why not the `<audio>` element's volume
 
@@ -348,7 +361,13 @@ tickets and the client setting gains. A second spelling of it would present as
 a slider that turns down somebody else — which is why `volume-flows.js` asserts
 silence for a *named* speaker rather than just "quieter than before".
 
-### One thing this found
+### Two things this found
+
+A refresh mid-call came back to a room where everybody had gone quiet, while
+the refresher's own microphone still reported as sending. That is a **relay**
+bug, not a volume one — the node counted participant ids rather than sockets,
+and a reload legitimately claims one id twice for a moment. See
+[data-model.md §9](data-model.md#a-relay-room-outlives-a-socket-not-an-id).
 
 The roster is a live region keyed on a revision counter, and every VAD
 start/stop bumped it — so during a call the people list rebuilt several times a
@@ -415,7 +434,7 @@ visit, exactly one after the setting is chosen.
 bash tools/voice-fleet.sh                 # sets VOICE_DENOISE=on
 node tools/suppression-flows.js           # 21 assertions, both modes, two browsers
 NODE_ALLOWS=0 node tools/suppression-flows.js   # against a fleet started with VOICE_DENOISE=off
-node tools/volume-flows.js                # 9 assertions, listener-side gain
+node tools/volume-flows.js                # 18 assertions, listener-side gain
 node tools/denoise-bench.js               # what the model costs in this browser
 cargo run --release -p voice-server --bin dfn-bench
 ```

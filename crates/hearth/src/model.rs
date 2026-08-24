@@ -420,7 +420,7 @@ impl App {
             volume: signal(crate::volume::master()),
             person_volume: signal(crate::volume::PERSON_DEFAULT),
 
-            muted: signal(Vec::new()),
+            muted: signal(crate::volume::muted()),
         }
     }
 
@@ -572,18 +572,30 @@ impl App {
 
     // --- commands --------------------------------------------------------
 
-    pub fn toggle_in(&self, list: Signal<Vec<String>>, value: &str) {
-        let value = value.to_string();
-        list.update(|prev| {
-            let mut next = prev.clone();
-            match next.iter().position(|v| *v == value) {
-                Some(i) => {
-                    next.remove(i);
-                }
-                None => next.push(value.clone()),
+    /// Silence somebody for yourself, or stop.
+    ///
+    /// Returns the state being moved TO, because `Signal::set` stages: a
+    /// caller that has to act on the new value — the voice path does — would
+    /// read back the one it just replaced.
+    ///
+    /// Deliberately does not touch their volume. Mute is a lease over the
+    /// level, so unmuting returns them to exactly where they were; writing
+    /// zero into the slider would lose that the first time anyone used it.
+    pub fn toggle_mute(&self, user_id: &str) -> bool {
+        let mut next = self.muted.with(|m| m.clone());
+        let muted = match next.iter().position(|v| v == user_id) {
+            Some(i) => {
+                next.remove(i);
+                false
             }
-            next
-        });
+            None => {
+                next.push(user_id.to_string());
+                true
+            }
+        };
+        crate::volume::set_muted(&next);
+        self.muted.set(next);
+        muted
     }
 
     pub fn open_profile(&self, user_id: &str) {

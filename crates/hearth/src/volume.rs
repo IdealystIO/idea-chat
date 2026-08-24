@@ -56,6 +56,10 @@ pub const PERSON_PREFIX: &str = "voice.volume.";
 
 const MASTER_KEY: &str = "voice.volume";
 
+/// Who is silenced, as one comma-joined list. Account ids are UUIDs, so a
+/// comma cannot appear inside one.
+const MUTED_KEY: &str = "voice.muted";
+
 /// The stored master position.
 pub fn master() -> f32 {
     prefs::number(MASTER_KEY, MASTER_DEFAULT).clamp(0.0, 1.0)
@@ -101,11 +105,39 @@ fn key(user_id: &str) -> String {
     format!("{PERSON_PREFIX}{user_id}")
 }
 
+/// Everyone silenced on this device.
+///
+/// Stored, like the volumes, and for the same reason: you mute somebody
+/// because of something that is still true after a refresh — a bad microphone,
+/// a noisy room, a person you would rather read than hear. Forgetting it on
+/// reload would be a setting that quietly undoes itself, and the un-muting
+/// happens without a sound, so there is nothing to notice.
+pub fn muted() -> Vec<String> {
+    prefs::get(MUTED_KEY)
+        .unwrap_or_default()
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Remember who is silenced.
+pub fn set_muted(ids: &[String]) {
+    if ids.is_empty() {
+        prefs::clear(MUTED_KEY);
+    } else {
+        prefs::set(MUTED_KEY, &ids.join(","));
+    }
+}
+
 /// What the audio path should actually apply for one person.
 ///
-/// Mute is not a separate mechanism, it is this control at zero. Two paths to
-/// silence would eventually disagree about which one wins — someone unmutes a
-/// person whose slider is still at zero and reports that unmute is broken.
+/// Mute and volume are separate STATE and meet only here, in the one number
+/// the audio path gets. That separation is the point of having both: mute is a
+/// lease over the level, not a value written into it, so unmuting returns
+/// somebody to exactly where they were rather than to a default. Writing zero
+/// into the slider instead would work once and lose the level the first time
+/// anyone used it.
 pub fn person_gain(position: f32, muted: bool) -> f32 {
     if muted {
         0.0
@@ -131,6 +163,17 @@ mod tests {
     #[test]
     fn the_default_person_is_untouched() {
         assert_eq!(person_gain(PERSON_DEFAULT, false), 1.0);
+    }
+
+    /// Mute is a lease over the level, not a value written into it: whatever
+    /// the slider said before the mute is what comes back after it. This is
+    /// the whole reason the two are separate state.
+    #[test]
+    fn unmuting_returns_the_level_that_was_there() {
+        for position in [0.4_f32, 1.0, 1.7] {
+            assert_eq!(person_gain(position, true), 0.0);
+            assert_eq!(person_gain(position, false), voice_dsp::taper(position));
+        }
     }
 
     /// The master is headroom: boosting somebody past unity has to be

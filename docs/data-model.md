@@ -582,6 +582,32 @@ to be in. A short-lived capability token bridges the two:
 The chat tier stays the only thing that knows about membership; the voice tier
 stays the only thing that knows about audio. The token is the entire contract.
 
+### A relay room outlives a socket, not an id
+
+The node keeps a broadcast channel per room and, until recently, a set of the
+participant ids in it — dropping the whole room when that set emptied. The set
+was the wrong unit, and a refresh is what exposes it.
+
+A participant id is derived from an account, so it is stable across a reload.
+The browser opens the new socket before the node has finished noticing the old
+one is gone, which means one id is legitimately claimed **twice** for a moment.
+A set cannot hold that. When the stale claims drained, the last of them emptied
+the set and deleted the room — with both live sockets still in it.
+
+Nothing looked wrong at that instant: the two who were already there still
+shared their channel and could still hear each other. The damage landed on the
+*next* attach, which found no room, built a fresh one under the same name with
+a fresh channel, and was inaudible in both directions. One name, two rooms.
+
+It presents as one person refreshing and coming back to a call where everybody
+has gone quiet, while their own microphone still reports as sending — and it is
+invisible to any test that joins fresh and leaves, which is every voice suite
+except the one that refreshes mid-call.
+
+The unit is a socket. `ids` is `id -> live socket count`: a stale socket
+releases its own claim, a duplicate is still reported, and the room goes only
+when nothing is attached to it at all.
+
 ## 10. Client model, and what changes in the app
 
 Today `crates/hearth/src/model.rs` is a presentation model over the design's

@@ -99,16 +99,23 @@ fn person_menu(app: App, user_id: &str, anchor: Ref<ViewHandle>) -> Element {
             )
 
             MenuSeparator()
-            MenuLabel(text = "Volume for me".to_string())
+            // Says which of the two states this person is in, because the
+            // slider alone cannot: a level of 40% and a level of 40% behind a
+            // mute look identical, and only one of them makes a sound.
+            MenuLabel(text = if muted_for_me {
+                "Muted — volume kept".to_string()
+            } else {
+                "Volume for me".to_string()
+            })
             volume_row(app, &user_id, muted_for_me)
             MenuItem(
                 label = if muted_for_me { "Unmute for me".to_string() } else { "Mute for me".to_string() },
                 leading = Some(glyph(if muted_for_me { VOLUME_2 } else { VOLUME_X })),
                 on_select = cb(move || {
-                    app.toggle_in(app.muted, &n_mute);
-                    // The signal STAGES, so the value that matters is the one
-                    // being moved to, not the one a read would return.
-                    apply(&n_mute, !muted_for_me);
+                    // The toggle reports the state being moved to; reading the
+                    // signal back would give the one it just replaced.
+                    let muted = app.toggle_mute(&n_mute);
+                    apply(&n_mute, muted);
                     app.close_menu();
                 }),
             )
@@ -146,7 +153,9 @@ fn volume_row(app: App, user_id: &str, muted: bool) -> Element {
     let id = user_id.to_string();
     let on_change = std::rc::Rc::new(move |position: f32| {
         // The signal first, so the slider tracks the drag; then the store, so
-        // it survives a refresh; then the call, so it is audible now.
+        // it survives a refresh; then the call, so it is audible now. While
+        // muted the last step changes nothing audible and is still correct —
+        // it sets the level this person returns to.
         app.person_volume.set(position);
         crate::volume::set_person(&id, position);
         #[cfg(target_arch = "wasm32")]
@@ -162,10 +171,11 @@ fn volume_row(app: App, user_id: &str, muted: bool) -> Element {
                 max = crate::volume::PERSON_MAX,
                 width = 132.0,
                 size = ControlSize::Sm,
-                // Dimmed while muted rather than hidden: the level is still
-                // there and comes back with them, but dragging it would be
-                // moving a control that cannot make a sound.
-                disabled = muted,
+                // Live even while muted, on purpose. It is not the mute
+                // control, it is the level this person comes BACK to — and a
+                // slider that refused to move would be teaching people that
+                // the two are the same thing, which is exactly what having
+                // both exists to deny.
                 leading_icon = Some(VOLUME_X),
                 trailing_icon = Some(VOLUME_2),
             )

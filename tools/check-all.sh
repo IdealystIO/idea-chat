@@ -36,6 +36,9 @@ run cargo test -p hearth --lib -q
 # gain change, is arithmetic. It went unrun here for longer than it should
 # have.
 run cargo test -p voice-dsp -p voice-proto -q
+# The relay's room bookkeeping, which decides who can hear whom. It went
+# untested until a room silently split in two under a mid-call refresh.
+run cargo test -p voice-server --lib -q
 
 step "3/11  data layer — 41 tests against real Postgres"
 TAIL=4 run env HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q
@@ -102,7 +105,7 @@ else
   SKIPPED=1
 fi
 
-step "11/11  listener volume — 11 assertions, master and per-person"
+step "11/11  listener volume — 18 assertions, master, per-person, and mute"
 # The only stage in the audio chain nobody else can hear. Every silence check
 # is paired with a packet count: a volume control implemented by dropping
 # packets or closing a sink would pass "it got quieter" and fail "it is still
