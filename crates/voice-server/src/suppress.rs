@@ -46,7 +46,7 @@ use std::sync::mpsc;
 
 use denoise::Denoiser;
 use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
-use voice_dsp::{Leveler, Tuning};
+use voice_dsp::{Declicker, Leveler, Tuning};
 
 /// Environment variable that permits [`Mode::Server`](voice_dsp::Mode::Server).
 ///
@@ -217,22 +217,31 @@ fn open_pipeline(tuning: Tuning, mut sink: Sink) -> Result<(Pipeline, AudioWrite
     let clean = pollster::block_on(denoiser.process(&input))
         .map_err(|e| format!("denoiser: {e}"))?;
 
-    // Levelling runs in the callback so it sees exactly what the model emits:
-    // 48 kHz mono, hop-aligned. The scratch buffer is reused because this runs
-    // 100 times a second per talker and an allocation per hop is a needless
-    // one.
+    // The post-model stages run in the callback so they see exactly what the
+    // model emits: 48 kHz mono, hop-aligned. The scratch buffer is reused
+    // because this runs 100 times a second per talker and an allocation per
+    // hop is a needless one.
+    //
+    // Declicking before levelling, always — see the client's `Prepared::install`
+    // for why. Both sides run the same stages in the same order, so switching
+    // where suppression happens is the same experiment with the work moved.
+    let mut declicker = tuning.transients.map(|cfg| Declicker::new(cfg, 48_000));
     let mut leveler = tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
     let mut scratch: Vec<f32> = Vec::new();
     let sub = clean.subscribe(move |frame: &AudioFrame| {
-        match leveler.as_mut() {
-            Some(leveler) => {
-                scratch.clear();
-                scratch.extend_from_slice(frame.samples);
-                leveler.process(&mut scratch);
-                sink(&scratch, frame.pts_micros);
-            }
-            None => sink(frame.samples, frame.pts_micros),
+        if declicker.is_none() && leveler.is_none() {
+            sink(frame.samples, frame.pts_micros);
+            return;
         }
+        scratch.clear();
+        scratch.extend_from_slice(frame.samples);
+        if let Some(declicker) = declicker.as_mut() {
+            declicker.process(&mut scratch);
+        }
+        if let Some(leveler) = leveler.as_mut() {
+            leveler.process(&mut scratch);
+        }
+        sink(&scratch, frame.pts_micros);
     });
 
     Ok((Pipeline { _sub: sub, _clean: clean, _input: input }, writer))

@@ -39,7 +39,7 @@ use std::cell::RefCell;
 
 use denoise::Denoiser;
 use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
-use voice_dsp::{Leveler, Tuning};
+use voice_dsp::{Declicker, Leveler, Tuning};
 
 /// Where the model is served from, relative to the app's origin.
 ///
@@ -159,20 +159,33 @@ pub async fn prepare(mic: &AudioStream, tuning: Tuning) -> Result<Prepared, Stri
 impl Prepared {
     /// Connect the prepared model to `out`.
     ///
-    /// Levelling happens here because a subscriber sees borrowed samples: this
-    /// stage copies once, levels in place, and republishes. One extra copy per
-    /// 10 ms hop, which is 480 floats.
+    /// The post-model stages live here because a subscriber sees *borrowed*
+    /// samples: this copies once, works in place, and republishes. One extra
+    /// copy per 10 ms hop, which is 480 floats.
+    ///
+    /// Declicking before levelling, always. A keystroke is the loudest thing in
+    /// its frame, so a leveller that saw it first would duck the whole sentence
+    /// around it — and then let go, which is audible as a lurch on every
+    /// keypress.
     pub fn install(self, out: AudioWriter) -> Chain {
+        let mut declicker =
+            self.tuning.transients.map(|cfg| Declicker::new(cfg, 48_000));
         let mut leveler = self.tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
         let mut scratch: Vec<f32> = Vec::new();
-        let sub = self.clean.subscribe(move |frame: &AudioFrame| match leveler.as_mut() {
-            Some(leveler) => {
-                scratch.clear();
-                scratch.extend_from_slice(frame.samples);
-                leveler.process(&mut scratch);
-                out.write_pcm_f32(frame.sample_rate, frame.channels, &scratch);
+        let sub = self.clean.subscribe(move |frame: &AudioFrame| {
+            if declicker.is_none() && leveler.is_none() {
+                out.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples);
+                return;
             }
-            None => out.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples),
+            scratch.clear();
+            scratch.extend_from_slice(frame.samples);
+            if let Some(declicker) = declicker.as_mut() {
+                declicker.process(&mut scratch);
+            }
+            if let Some(leveler) = leveler.as_mut() {
+                leveler.process(&mut scratch);
+            }
+            out.write_pcm_f32(frame.sample_rate, frame.channels, &scratch);
         });
         Chain { _stage: Stage::Neural { _sub: sub, _clean: self.clean } }
     }

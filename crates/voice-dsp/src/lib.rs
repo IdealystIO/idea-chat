@@ -38,8 +38,10 @@
 #![forbid(unsafe_code)]
 
 mod level;
+mod transient;
 
 pub use level::{Leveler, Leveling};
+pub use transient::{Declicker, Transients};
 
 /// Where neural noise suppression runs for a session.
 ///
@@ -127,6 +129,12 @@ pub struct Tuning {
     /// DeepFilterNet's speech post-filter. Sharpens consonants at the cost of
     /// a little more attenuation.
     pub post_filter: bool,
+    /// Transient suppression, applied between the model and the levelling.
+    ///
+    /// Before the leveller on purpose: a keystroke is the loudest thing in a
+    /// frame, so a leveller that saw it first would duck the whole sentence
+    /// around it. `None` leaves impulsive noise alone.
+    pub transients: Option<Transients>,
     /// Loudness levelling applied after suppression. `None` leaves the signal
     /// at whatever level the speaker's microphone produced.
     pub leveling: Option<Leveling>,
@@ -137,6 +145,7 @@ impl Default for Tuning {
         Tuning {
             atten_lim_db: None,
             post_filter: true,
+            transients: Some(Transients::default()),
             leveling: Some(Leveling::default()),
         }
     }

@@ -127,6 +127,60 @@ previous value and the guard threw away the swap it was meant to protect. The
 setting silently did nothing, with no error anywhere. It is a thread-local
 generation counter now, bumped synchronously before anything can await.
 
+## Transients — the keystroke half
+
+DeepFilterNet is a speech *enhancement* model and it is very good at what it was
+trained on: noise with structure that persists. Fans, traffic, room tone. Its
+weakness is the other kind — a key bottoming out, a mug on a desk — because an
+impulse occupies one or two of its 10 ms hops and looks, inside that hop, a
+great deal like the onset of a word. This is the gap between DeepFilterNet and
+what Discord gets from Krisp, and it is the complaint that actually reaches
+users, because a keystroke is *louder* than the hum it sits on.
+
+`voice_dsp::Declicker` runs between the model and the leveller, on the property
+the model does not use: **how a sound starts, and whether it goes on**.
+
+Three measurements, all of which must agree:
+
+- **Brightness** — energy in the first difference against energy in the signal.
+  A click is almost all edge; a vowel is almost none. Separates clicks from
+  voiced speech and does nothing at all for `/s/`.
+- **Onset ratio** — that edge energy against a slowly-tracked estimate of what
+  it has recently been.
+- **Persistence**, implicitly. The floor rises over ~120 ms, so anything that
+  lasts is absorbed into it and stops being detected. A 10 ms click is long gone
+  before the floor moves; a 250 ms fricative outlives the suspicion it starts
+  with. That constant *is* the definition of "transient".
+
+### Lookahead is not optional
+
+A click's loudest sample is its first one, so a detector watching the sample it
+is about to output has already let that one through. The first version
+attenuated a keystroke by **0.8 dB** while correctly detecting every one. The
+signal is delayed 3 ms and the detector runs on the undelayed copy, which took
+the same fixture to **7.8 dB** — enough that the keystroke no longer stands
+above the voice, which is the threshold that matters by ear.
+
+### What it cannot do
+
+It ducks; it does not un-mix. A broadband gain reduction removes a keystroke
+cleanly when it lands between words and dulls ~20 ms of speech when it lands on
+top of one. That is the honest limit of the time domain, and it is why the
+reduction is capped at 18 dB rather than total: a capped duck on a plosive is a
+slightly soft `/t/`, an uncapped one is a hole.
+
+Removing a click from *underneath* a vowel needs the spectral domain — an FFT
+and a subtraction per bin. That is the next thing to build if this is not
+enough, and a much larger one.
+
+### Chain latency
+
+| stage | added |
+| --- | --- |
+| DeepFilterNet 3 | ~30 ms |
+| declicker lookahead | 3 ms |
+| leveller | 0 |
+
 ## Levelling
 
 Suppression decides what is noise. Levelling decides how loud what is left
