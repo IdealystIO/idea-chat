@@ -58,41 +58,45 @@ fn room_list_body(app: App) -> Element {
 /// Channels, then live rooms with their occupants nested underneath.
 fn space_section(app: App) -> Element {
     let space_id = app.space_id.get();
-    let selected = app.room_id.get();
-    let on_settings = app.settings_open.get();
 
     ui! {
         view(style = || StyleApplication::new(styles::RoomListPad::sheet())) {
             SectionLabel(label = "Talk".to_string())
             for room in model::rooms_in(space_id).filter(|r| r.kind.is_chat()), key = room.id {
-                channel_row(app, room, room.id == selected && !on_settings)
+                channel_row(app, room)
             }
             SectionLabel(label = "Rooms".to_string())
             for room in model::rooms_in(space_id).filter(|r| !r.kind.is_chat()), key = room.id {
-                live_room_row(app, room, room.id == selected && !on_settings)
+                live_room_row(app, room)
             }
         }
     }
 }
 
 /// A text channel in the list.
-fn channel_row(app: App, room: &'static crate::model::Room, active: bool) -> Element {
+///
+/// Selection is read inside the style sinks, not passed in: moving between
+/// channels is a re-tint of two rows, and expressing it as a rebuild of the
+/// whole list would be both slower and — because a rebuild discards per-row
+/// state — wrong.
+fn channel_row(app: App, room: &'static crate::model::Room) -> Element {
+    let active = move || app.room_id.get() == room.id && !app.settings_open.get();
     let label: Element = text(room.name)
         .with_style(|| StyleApplication::new(styles::RoomRowName::sheet()))
         .into();
     // The unread pip goes quiet the moment you're in the room — a dot on the
     // row you're reading is just noise.
-    let mut children = vec![icon(HASH).size(15.0).into(), label];
-    if room.unread && !active {
-        // A fixed slot on one row, not a reconciled list — nothing here can
-        // reorder, so there is no identity for a key to preserve.
-        children.push(ui! { view(style = || StyleApplication::new(styles::UnreadDot::sheet())) }); // idealyst-lint-disable-line prefer-keyed-list
-    }
+    let pip: Element = runtime_core::view(Vec::new())
+        .with_style(move || {
+            StyleApplication::new(styles::UnreadDot::sheet())
+                .with("shown", if room.unread && !active() { "on" } else { "off" })
+        })
+        .into();
     press(
-        children,
+        vec![icon(HASH).size(15.0).into(), label, pip],
         move || {
             StyleApplication::new(styles::RoomRow::sheet())
-                .with("active", if active { "on" } else { "off" })
+                .with("active", if active() { "on" } else { "off" })
         },
         move || app.go(room.id),
     )
@@ -101,7 +105,8 @@ fn channel_row(app: App, room: &'static crate::model::Room, active: bool) -> Ele
 /// A live room, with its occupants nested underneath. The faces sit under the
 /// room indented past its icon, so the list reads as "who is in there" rather
 /// than as a second level of navigation.
-fn live_room_row(app: App, room: &'static crate::model::Room, active: bool) -> Element {
+fn live_room_row(app: App, room: &'static crate::model::Room) -> Element {
+    let active = move || app.room_id.get() == room.id && !app.settings_open.get();
     let occupants = app.occupants(room);
     let count = occupants.len();
     let label: Element = text(room.name)
@@ -117,7 +122,7 @@ fn live_room_row(app: App, room: &'static crate::model::Room, active: bool) -> E
         children,
         move || {
             StyleApplication::new(styles::RoomRow::sheet())
-                .with("active", if active { "on" } else { "off" })
+                .with("active", if active() { "on" } else { "off" })
         },
         move || app.go(room.id),
     );
@@ -155,9 +160,6 @@ fn room_face(app: App, room_id: &'static str, name: String) -> Element {
 
 /// Direct messages: avatar, name, the last line, and when it arrived.
 fn dm_section(app: App) -> Element {
-    let selected = app.room_id.get();
-    let on_settings = app.settings_open.get();
-
     ui! {
         view(style = || StyleApplication::new(styles::RoomListPad::sheet())) {
             view(style = || StyleApplication::new(styles::Row::sheet())) {
@@ -175,14 +177,15 @@ fn dm_section(app: App) -> Element {
             for conversation in DMS.iter().filter(|d| !app.is_removed(d.name)),
                 key = conversation.id
             {
-                dm_row(app, conversation, conversation.id == selected && !on_settings)
+                dm_row(app, conversation)
             }
         }
     }
 }
 
 /// One conversation: avatar, name, the last line, and when it arrived.
-fn dm_row(app: App, conversation: &'static crate::model::Dm, active: bool) -> Element {
+fn dm_row(app: App, conversation: &'static crate::model::Dm) -> Element {
+    let active = move || app.room_id.get() == conversation.id && !app.settings_open.get();
     let last = app.messages(conversation.id).pop();
     let preview = match &last {
         Some(l) if l.author == "You" => format!("You: {}", l.text),
@@ -215,16 +218,22 @@ fn dm_row(app: App, conversation: &'static crate::model::Dm, active: bool) -> El
         },
         summary,
     ];
-    if conversation.unread && !active {
-        // As above: the pip is a fixed slot on this row, not a list entry.
-        children.push(ui! { view(style = || StyleApplication::new(styles::UnreadDot::sheet())) }); // idealyst-lint-disable-line prefer-keyed-list
-    }
+    children.push(
+        runtime_core::view(Vec::new())
+            .with_style(move || {
+                StyleApplication::new(styles::UnreadDot::sheet()).with(
+                    "shown",
+                    if conversation.unread && !active() { "on" } else { "off" },
+                )
+            })
+            .into(),
+    );
 
     press(
         children,
         move || {
             StyleApplication::new(styles::DmRow::sheet())
-                .with("active", if active { "on" } else { "off" })
+                .with("active", if active() { "on" } else { "off" })
         },
         move || app.go(conversation.id),
     )

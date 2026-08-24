@@ -993,6 +993,16 @@ pub struct NavKey {
     in_voice: &'static str,
 }
 
+/// What the room list is built out of. See [`App::room_list_key`].
+#[derive(Clone, PartialEq)]
+pub struct RoomListKey {
+    scope: Scope,
+    space_id: &'static str,
+    in_voice: &'static str,
+    removed: Vec<String>,
+    sent: usize,
+}
+
 /// The local audio/video state, which the tray, the room, and the call bar all
 /// paint from.
 #[derive(Clone, PartialEq)]
@@ -1037,6 +1047,24 @@ pub struct PrefsKey {
 }
 
 impl App {
+    /// What changes the *shape* of the room list: which space's rooms are
+    /// listed, whether the DM section or the space section is showing, who is
+    /// in each room, and whether anyone has been removed.
+    ///
+    /// Deliberately excludes `room_id` and `settings_open`. Those only change
+    /// which row is highlighted, and highlighting is a re-style read inside
+    /// each row's own style closure — putting them here would rebuild forty
+    /// rows to recolour two.
+    pub fn room_list_key(&self) -> RoomListKey {
+        RoomListKey {
+            scope: self.scope.get(),
+            space_id: self.space_id.get(),
+            in_voice: self.in_voice.get(),
+            removed: self.removed.get(),
+            sent: self.sent.with(|s| s.len()),
+        }
+    }
+
     pub fn nav_key(&self) -> NavKey {
         NavKey {
             scope: self.scope.get(),

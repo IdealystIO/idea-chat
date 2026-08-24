@@ -6,74 +6,106 @@ Each item is something that cost debugging time, produced a wrong result, or
 forced a documented departure from the design. They're ordered by how much they
 cost, not by severity to the framework.
 
-Nothing here blocked the app. All of it is now worked around in `crates/hearth`,
-and the workaround is commented at the site.
+Nothing here blocked the app. All of it is now handled in `crates/hearth`, and
+the reason is commented at the site.
+
+**The first two are corrections to my own misuse of the framework, not defects
+in it.** I originally filed #1 as a framework bug — that a `#[component]` body
+isn't a reactive scope. That claim was wrong, and the experiment that disproves
+it is in the section. It's kept here because the *misdiagnosis* is the useful
+artifact: it's the mistake a newcomer from a re-render framework will make, and
+the symptom points somewhere else entirely.
 
 ---
 
-## 1. Nothing tells you a component body is not a reactive scope
+## 1. Reading signals above the sink instead of inside it (my bug, not the framework's)
 
-**Cost: the largest single block of debugging in the build.**
+**Cost: the largest block of debugging in the build — and the diagnosis I got
+wrong.**
 
-The natural way to write a view is to read state at the top and build a tree
-from it:
+The symptom: the app rendered correctly on first paint and then went inert.
+Handlers fired, signals committed, nothing moved on screen. I concluded that a
+`#[component]` body was not a reactive scope and called it a framework defect.
+
+That was wrong. idealyst is fine-grained reactive, and a component body running
+once is the *correct* design — the same contract Solid and Leptos have. Updates
+flow through reactive **sinks**: a style closure that reads a signal inside
+itself, `rx!` on a prop, `text(move || …)`, `when`, `switch`. My code read state
+at the top of the body and baked the result into the tree:
 
 ```rust
-#[component]
-fn RoomList(app: App) -> Element {
-    let selected = app.room_id.get();          // ← reads once, forever
-    ui! { /* … built from `selected` … */ }
-}
+// what I wrote — `active` is a bool, decided once and frozen
+let active = app.space_id.get() == space.id;
+press(children,
+      move || StyleApplication::new(RailButton::sheet())
+                  .with("active", if active { "on" } else { "off" }),
+      on_click)
 ```
 
-This compiles, lints clean, renders correctly on first paint, and then never
-updates again. Handlers fire, signals commit, and nothing moves. The app looked
-completely inert while being, internally, completely correct.
+```rust
+// what it should have been — the sink reads the signal, so it re-tints in place
+press(children,
+      move || {
+          let active = app.space_id.get() == space.id;
+          StyleApplication::new(RailButton::sheet())
+              .with("active", if active { "on" } else { "off" })
+      },
+      on_click)
+```
 
-Fine-grained reactivity is the right model and `switch`/`when`/`rx!` are the
-right tools — the issue is purely that nothing points at the mistake. The
-symptom (a dead UI) points at event wiring, which is the one thing that was
-working. I went as far as verifying `onclick` was attached on the DOM node and
-firing before the real cause occurred to me.
+The one-word difference is where the `.get()` sits relative to the closure.
 
-Two things would have collapsed this to minutes:
+**Verified both directions.** Stripping the `switch` off `Rail` and leaving the
+build-time read froze the highlight while the (still-switched) room list
+updated. Moving the same reads inside the style closure — with no `switch`
+anywhere — made it correct:
 
-- **A lint.** `signal.get()` in a `#[component]` body whose result is not routed
-  into a reactive sink is nearly always this bug. `idealyst lint` already has
-  the AST access to spot it, and already carries rules of comparable subtlety
-  (`prefer-keyed-list`).
-- **A named entry in the docs.** The component-authoring guidance in `CLAUDE.md`
-  §9 covers `#[component]`, `ui!`, keyed lists, and prop reactivity in detail,
-  and never states that a component body runs once. §9.1 says the macro
-  "generates the props struct's `BuildElement` impl" — true, and not the thing
-  a newcomer needs to know first.
+```
+rail before : TC=rgb(79,70,229)  ST=rgb(38,37,45)   ← Cabin selected
+rail after  : TC=rgb(38,37,45)   ST=rgb(79,70,229)  ← Studio selected
+```
 
-`voice-client` doesn't hit this because it binds signals directly into
-primitives (`text(move || …)`). Any app that renders *structure* from state
-hits it immediately.
+`voice-client` never hits this because it binds signals into sinks throughout,
+which is the idiom. Any app that builds *structure* from a build-time read hits
+it immediately.
 
-## 2. A structural `switch` key that includes focus state destroys the field
+**What's actually left as a framework request:** a lint. `signal.get()` in a
+`#[component]` body whose result is not routed into a sink is nearly always
+this mistake, and the symptom points at event wiring — the one thing that is
+working. `idealyst lint` already carries rules of comparable subtlety
+(`prefer-keyed-list`). One diagnostic here would have saved hours, and would
+save them for anyone arriving from a re-render framework, where reading state
+at the top of a component is exactly right.
 
-The direct sequel to #1, and worth its own entry because the fix for #1 causes
-it. Having learned to wrap regions in `switch`, the obvious key for a composer
-is "what changes how it's painted" — which includes whether it has focus:
+## 2. `switch` is for shape, never for paint
+
+A corollary worth stating separately, because reaching for `switch` is the
+natural overcorrection once you understand #1 — and I made it. Wrapping every
+region in a `switch` keyed on the state it reads *works*, and it is wrong twice
+over.
+
+Wrong on cost: navigating between channels rebuilt forty rows to recolour two.
+
+Wrong on correctness, sharply, for anything focus-related. The obvious key for a
+composer includes whether it has focus:
 
 ```rust
-switch(
-    move || (app.draft.get().is_empty(), app.composer_focused.get()),
-    move |_| composer_body(app),
-)
+switch(move || (app.draft.get().is_empty(), app.composer_focused.get()),
+       move |_| composer_body(app))
 ```
 
 Focusing the input fires `on_focus` → sets `composer_focused` → changes the key
 → rebuilds the subtree → destroys the `<input>` that just took focus. The field
-cannot be typed into at all, and `document.activeElement` snaps back to `BODY`
-about 200ms after every click.
+cannot be typed into at all, and `activeElement` snaps back to `BODY` about
+200ms after every click.
 
-The correct shape is that per-keystroke and per-focus state belongs in reactive
-*sinks* (a style closure that reads the signal inside, `rx!` props), never in a
-structural key. That's a sharp, teachable rule and I found it by bisecting.
-`crates/hearth/src/views/chat.rs::Composer` carries the explanation.
+The rule Hearth now follows: **`switch` only where the subtree's shape differs**
+— which view is showing, which room's messages, whether an overlay is mounted.
+Everything presentational — selection highlights, tones, hover reveals, unread
+pips, the focus ring — is a sink. `views/rail.rs` carries no `switch` at all and
+is the reference for the pattern; `views/rooms.rs` shows the split, with a key
+covering only what changes the list's shape and per-row selection read inside
+each row's own style closure.
 
 ## 3. `ui!` silently reinterprets a braced child as the previous tag's children
 

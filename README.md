@@ -39,9 +39,12 @@ accessors there, so wiring this to the real backend is a change to that module
 and nowhere else.
 
 **[docs/hearth-framework-findings.md](docs/hearth-framework-findings.md)** is
-the other deliverable — eleven things in idealyst that cost debugging time or
-forced a departure from the design, plus what worked. The largest by far: a
-`#[component]` body is not a reactive scope, and nothing tells you.
+the other deliverable — what cost debugging time or forced a departure from the
+design, plus what worked. The first two entries are corrections to my own
+misuse of the framework rather than defects in it, kept because the
+misdiagnosis is the useful part: read a signal one level above its sink and the
+app renders once and then goes inert, with the symptom pointing squarely at
+event wiring, which is the one thing working.
 
 ## Step 1 — the voice loop (current)
 

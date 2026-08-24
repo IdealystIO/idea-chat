@@ -296,7 +296,12 @@ stylesheet! {
     }
 }
 
-// The unread pip on a channel row.
+// The unread pip on a channel or conversation row.
+//
+// Always mounted; `shown` is what reveals it. Adding and removing the node
+// would make "is this row selected" a structural question and force the whole
+// list to rebuild on every navigation — as a variant it is a re-style of one
+// node instead.
 stylesheet! {
     pub UnreadDot<IdeaThemeRef> {
         base(t) {
@@ -305,6 +310,11 @@ stylesheet! {
             flex_shrink: 0.0,
             border_radius: Length::Full,
             background: t.intent.primary.solid_bg(),
+        }
+        variant shown {
+            #[default]
+            off(_t) { width: 0.0, height: 0.0, opacity: 0.0 }
+            on(_t) {}
         }
     }
 }

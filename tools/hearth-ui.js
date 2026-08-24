@@ -90,6 +90,23 @@ const shot = async (p, name) => {
   await shot(p, '01-chat');
 
   // --- navigation ------------------------------------------------------------
+  // The rail carries no `switch`: which space is selected is read inside each
+  // button's style closure. Assert the re-tint actually happens, because the
+  // failure mode when a signal is read one level too high is a frozen
+  // highlight that still looks like a plausible UI.
+  const railFill = t => p.evaluate(t => {
+    const rail = document.querySelector('#app').firstElementChild.children[0];
+    const el = [...rail.querySelectorAll('[role=button]')]
+      .find(e => (e.innerText || '').trim() === t);
+    return el ? getComputedStyle(el).backgroundColor : '';
+  }, t);
+  const cabinBefore = await railFill('TC');
+  await clickText(p, 'ST', { xmax: 70 });
+  check('the rail re-tints the selected space in place', await railFill('ST') === cabinBefore);
+  check('the rail clears the previous space', await railFill('TC') !== cabinBefore);
+  check('switching space swaps the room list', await has(p, 'ship-log'));
+  await clickText(p, 'TC', { xmax: 70 });
+
   await clickText(p, 'recipes', { xmax: 320 });
   check('selecting a channel switches the transcript', await has(p, 'Thermos chai'));
 
