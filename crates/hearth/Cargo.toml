@@ -52,6 +52,7 @@ name = "server"
 path = "src/bin/server.rs"
 required-features = ["server"]
 
+
 [package.metadata.idealyst.app]
 name      = "Hearth"
 bundle_id = "dev.ideachat.hearth"
@@ -64,3 +65,14 @@ server_bin = "server"
 [package.metadata.idealyst.app.permissions]
 microphone = "Hearth uses your microphone in voice rooms."
 camera     = "Hearth uses your camera when you turn it on in a room."
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `uuid` refuses to build for wasm32 without a randomness source. The client
+# needs v7 ids of its own — it mints a message's id before sending, which is
+# what makes a retry idempotent — so this is a real dependency, not a
+# workaround for one that leaked in from the server half.
+uuid = { version = "1", features = ["v7", "serde", "js"] }
+# The page origin, so server-fn calls are same-origin and the browser attaches
+# the session cookie; and a clock for optimistic timestamps.
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+js-sys = "0.3"

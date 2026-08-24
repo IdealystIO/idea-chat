@@ -1519,3 +1519,74 @@ stylesheet! {
         }
     }
 }
+
+// ===========================================================================
+// Auth
+// ===========================================================================
+
+// The full-window ground behind a sign-in card.
+stylesheet! {
+    pub AuthPage<IdeaThemeRef> {
+        base(t) {
+            width: Length::pct(100.0),
+            height: Length::pct(100.0),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            padding: t.spacing.xl(),
+            background: t.color.background(),
+            color: t.color.text(),
+        }
+        transitions { background: 220ms EaseInOut }
+    }
+}
+
+// One centred card. Capped rather than stretched: a sign-in form the width of
+// a monitor is a worse form, and the cap is what makes the same layout work on
+// a phone.
+stylesheet! {
+    pub AuthCard<IdeaThemeRef> {
+        base(t) {
+            width: Length::pct(100.0),
+            max_width: 420.0,
+            flex_direction: FlexDirection::Column,
+            background: t.color.surface(),
+            border_width: 1.0,
+            border_color: t.color.border(),
+            border_radius: t.radius.lg(),
+            overflow: Overflow::Hidden,
+        }
+        transitions { background: 220ms EaseInOut }
+    }
+}
+
+// The message under a form. Danger-toned because in practice it is almost
+// always a refusal, and a neutral one reads as decoration.
+stylesheet! {
+    pub Notice<IdeaThemeRef> {
+        base(t) {
+            flex_direction: FlexDirection::Column,
+            padding_vertical: t.spacing.sm(),
+            padding_horizontal: t.spacing.md(),
+            border_radius: t.radius.md(),
+            background: t.intent.danger.soft_bg(),
+            color: t.intent.danger.soft_text(),
+        }
+    }
+}
+
+// A copyable value handed back to the user — an invite code.
+stylesheet! {
+    pub CodeBox<IdeaThemeRef> {
+        base(t) {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            gap: t.spacing.sm(),
+            padding_vertical: t.spacing.sm(),
+            padding_horizontal: t.spacing.md(),
+            border_radius: t.radius.md(),
+            background: t.color.surface_alt(),
+            border_width: 1.0,
+            border_color: t.color.border(),
+        }
+    }
+}

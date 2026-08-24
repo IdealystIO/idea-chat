@@ -13,14 +13,15 @@
 //! that has to be re-derived on iOS and Android. See README.md for the gap.
 
 use icons_lucide::{
-    MESSAGE_SQUARE, SHIELD, SHIELD_OFF, USER_MINUS, USER_PLUS, VOLUME_2, VOLUME_X,
+    MESSAGE_SQUARE, VOLUME_2, VOLUME_X,
 };
-use idea_ui::{typography_kind, AvatarSize, Menu, MenuItem, MenuLabel, MenuSeparator};
+use idea_ui::{AvatarSize, Menu, MenuItem, MenuLabel, MenuSeparator};
 use runtime_core::{ui, Element, Ref, StyleApplication, ViewHandle};
 
-use crate::model::{self, App};
+use crate::model::App;
+use crate::net;
 use crate::styles;
-use crate::views::bits::{cb, Face, Glyph, Muted};
+use crate::views::bits::{cb, Face, Glyph};
 
 /// Wrap a row that shows a person so that pressing it opens their menu.
 ///
@@ -57,13 +58,18 @@ pub fn person_target(
 }
 
 /// The menu itself.
-fn person_menu(app: App, name: &str, anchor: Ref<ViewHandle>) -> Element {
-    let name = name.to_string();
-    let is_mod_view = app.you_are_moderator.get() && app.scope.get() == crate::model::Scope::Space;
-    let muted_for_me = app.is_muted(&name);
-    let timed_out = app.is_timed_out(&name);
-    let is_moderator = app.is_moderator(&name);
-    let has_dm = model::dm_for(&name).is_some();
+fn person_menu(app: App, user_id: &str, anchor: Ref<ViewHandle>) -> Element {
+    let user_id = user_id.to_string();
+    // Read the role now rather than trusting anything cached: a demotion has
+    // to take effect on the next menu, not the next session.
+    let is_mod_view = app.moderates() && app.scope.get() == crate::model::Scope::Space;
+    let muted_for_me = app.is_muted(&user_id);
+    let member = app.member(&user_id);
+    let display = member
+        .as_ref()
+        .map(|m| m.display_name.clone())
+        .unwrap_or_else(|| "Someone".to_string());
+    let is_moderator = member.as_ref().map(|m| m.role != "member").unwrap_or(false);
 
     // Menu adornments are `Option<Element>`, so they're built up front rather
     // than inline: an `Element` can't be constructed inside a prop position
@@ -71,53 +77,25 @@ fn person_menu(app: App, name: &str, anchor: Ref<ViewHandle>) -> Element {
     // One clone per handler, made up front. `ui!` wraps a conditional branch
     // in a `move` closure, so a `name.clone()` written inside the `if has_dm`
     // arm moves `name` into that branch and the items after it can't see it.
-    let (n_profile, n_dm, n_mute, n_timeout, n_role, n_remove) = (
-        name.clone(),
-        name.clone(),
-        name.clone(),
-        name.clone(),
-        name.clone(),
-        name.clone(),
-    );
-    let profile_face: Element = ui! { Face(name = name.clone(), size = AvatarSize::Xs) };
-    let timeout_hint: Option<Element> = if timed_out {
-        None
-    } else {
-        Some(ui! { Muted(label = "1 hour".to_string(), kind = typography_kind::Overline) })
-    };
+    let (n_profile, n_dm, n_mute) = (user_id.clone(), user_id.clone(), user_id.clone());
+    let profile_face: Element =
+        ui! { Face(name = display.clone(), id = user_id.clone(), size = AvatarSize::Xs) };
 
     ui! {
         Menu(
             target = Some(runtime_core::primitives::portal::AnchorTarget::from(anchor)),
             on_dismiss = Some(cb(move || app.close_menu())),
         ) {
-            MenuLabel(text = name)
+            MenuLabel(text = display.clone())
             MenuItem(
                 label = "View profile".to_string(),
                 leading = Some(profile_face),
                 on_select = cb(move || app.open_profile(&n_profile)),
             )
-            // Only offered when a conversation actually exists. A "Send a
-            // message" that silently does nothing is worse than its absence.
-            if has_dm {
-                MenuItem(
-                    label = "Send a message".to_string(),
-                    leading = Some(glyph(MESSAGE_SQUARE)),
-                    on_select = cb(move || {
-                        app.close_menu();
-                        if let Some(d) = model::dm_for(&n_dm) {
-                            app.go(d.id);
-                        }
-                    }),
-                )
-            }
             MenuItem(
-                label = "Invite to a room".to_string(),
-                leading = Some(glyph(USER_PLUS)),
-                on_select = cb(move || {
-                    app.close_menu();
-                    app.join_open.set(true);
-                }),
+                label = "Send a message".to_string(),
+                leading = Some(glyph(MESSAGE_SQUARE)),
+                on_select = cb(move || net::open_dm(app, &n_dm)),
             )
 
             MenuSeparator()
@@ -130,44 +108,17 @@ fn person_menu(app: App, name: &str, anchor: Ref<ViewHandle>) -> Element {
                 }),
             )
 
-            // Moderation only appears inside a space, and only when you can
-            // actually moderate it. Showing greyed-out powers you don't have
-            // is how an app teaches people to ignore its menus.
+            // Moderation appears only where it would work. Muting in rooms
+            // and removal need endpoints that do not exist yet, so they are
+            // not drawn — a menu item that cannot do its job teaches people to
+            // distrust the menu.
             if is_mod_view {
                 MenuSeparator()
-                MenuItem(
-                    label = if timed_out {
-                        "Let them speak in rooms".to_string()
-                    } else {
-                        "Mute in rooms".to_string()
-                    },
-                    leading = Some(glyph(VOLUME_X)),
-                    trailing = timeout_hint,
-                    on_select = cb(move || {
-                        app.toggle_in(app.timed_out, &n_timeout);
-                        app.close_menu();
-                    }),
-                )
-                MenuItem(
-                    label = if is_moderator {
-                        "Remove moderator".to_string()
-                    } else {
-                        "Make moderator".to_string()
-                    },
-                    leading = Some(glyph(if is_moderator { SHIELD_OFF } else { SHIELD })),
-                    on_select = cb(move || {
-                        app.toggle_in(app.moderators, &n_role);
-                        app.close_menu();
-                    }),
-                )
-                MenuItem(
-                    label = "Remove from space…".to_string(),
-                    leading = Some(glyph(USER_MINUS)),
-                    on_select = cb(move || {
-                        app.close_menu();
-                        app.remove_target.set(n_remove.clone());
-                    }),
-                )
+                MenuLabel(text = if is_moderator {
+                    "Moderator".to_string()
+                } else {
+                    "Member".to_string()
+                })
             }
         }
     }

@@ -9,6 +9,7 @@ use idea_ui::{shape, size, tone, typography_kind, variant, Badge, Button, Stack,
 use runtime_core::{switch, component, ui, Element, StyleApplication};
 
 use crate::model::{App, Notify};
+use crate::net;
 use crate::styles;
 use crate::views::bits::{cb, Muted, SectionLabel, Strong};
 
@@ -82,7 +83,7 @@ fn on_off(current: bool, set: impl Fn(bool) + 'static) -> Vec<Element> {
 
 #[component]
 pub fn SettingsPage(#[prop(static)] app: App) -> Element {
-    switch(move || (app.prefs_key(), app.voice_key()), move |_| settings_body(app))
+    switch(move || (app.dark.get(), app.accent.get(), app.notify.get(), app.quiet_hours.get(), app.compact.get(), app.read_receipts.get(), app.mic.get(), app.cam.get()), move |_| settings_body(app))
 }
 
 fn settings_body(app: App) -> Element {
@@ -156,6 +157,7 @@ fn settings_body(app: App) -> Element {
                 ])
 
                 accent_group(app)
+                account_group(app)
 
                 view(style = || StyleApplication::new(styles::SettingsGroup::sheet())) {
                     view(style = || StyleApplication::new(styles::CardSection::sheet())) {
@@ -201,6 +203,35 @@ fn accent_group(app: App) -> Element {
                 option("Amber", current == Accent::Amber, move || app.accent.set(Accent::Amber)),
                 option("Violet", current == Accent::Violet, move || app.accent.set(Accent::Violet)),
             ],
+        )],
+    )
+}
+
+/// Who you are signed in as, and the way out.
+///
+/// The design has no such section — it never contemplated signing out, because
+/// it never contemplated signing in. A self-hosted client that cannot leave an
+/// account is a client you have to clear cookies to escape.
+fn account_group(app: App) -> Element {
+    let who = app
+        .me
+        .with(|m| m.as_ref().map(|m| format!("{} · @{}", m.display_name, m.handle)))
+        .unwrap_or_default();
+    group(
+        "Account",
+        vec![row(
+            "Signed in as",
+            &who,
+            vec![ui! {
+                Button(
+                    label = "Sign out".to_string(),
+                    tone = tone::Danger,
+                    variant = variant::Soft,
+                    size = size::Sm,
+                    shape = shape::Pill,
+                    on_click = cb(move || net::sign_out(app)),
+                )
+            }],
         )],
     )
 }

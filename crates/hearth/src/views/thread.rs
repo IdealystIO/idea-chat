@@ -7,24 +7,21 @@ use runtime_core::{rx, switch, component,
     text, text_input, ui, Element, KeyOutcome, StyleApplication,
 };
 
-use crate::model::{self, App};
+use crate::model::App;
+use crate::net;
 use crate::styles;
 use crate::views::bits::{cb, Face, Muted, Strong};
 
 #[component]
 pub fn ThreadPanel(#[prop(static)] app: App) -> Element {
-    switch(move || (app.nav_key(), app.content_key()), move |_| thread_body(app))
+    switch(move || (app.revision.get(), app.thread_root.get()), move |_| thread_body(app))
 }
 
 fn thread_body(app: App) -> Element {
     let lines = app.thread_lines();
-    let key = app.thread_key.get();
-    let where_ = key
-        .rsplit_once(':')
-        .map(|(room_id, _)| match model::dm(room_id) {
-            Some(d) => d.name.to_string(),
-            None => format!("#{}", model::room(room_id).map(|r| r.name).unwrap_or("")),
-        })
+    let where_ = app
+        .channel()
+        .map(|c| if c.kind == "text" { format!("#{}", c.name) } else { c.name })
         .unwrap_or_default();
 
     ui! {
@@ -40,13 +37,13 @@ fn thread_body(app: App) -> Element {
                     tone = tone::Neutral,
                     variant = variant::Ghost,
                     size = IconButtonSize::Md,
-                    on_click = cb(move || app.thread_key.set(String::new())),
+                    on_click = cb(move || app.thread_root.set(String::new())),
                 )
             }
 
             scroll_view(style = || StyleApplication::new(styles::Transcript::sheet())) {
                 view(style = || StyleApplication::new(styles::PeoplePad::sheet())) {
-                    for line in lines, key = line.key.clone() {
+                    for line in lines, key = line.id.clone() {
                         reply_row(line)
                     }
                 }
@@ -69,7 +66,7 @@ fn ThreadComposer(#[prop(static)] app: App) -> Element {
                             .placeholder("Reply in thread…".to_string())
                             .on_key_down(move |e| {
                                 if e.key == "Enter" && !e.shift {
-                                    app.send_reply();
+                                    net::send_reply(app);
                                     KeyOutcome::PreventDefault
                                 } else {
                                     KeyOutcome::Default
@@ -91,7 +88,7 @@ fn ThreadComposer(#[prop(static)] app: App) -> Element {
                             VariantRef::from(variant::Filled)
                         }),
                         size = IconButtonSize::Sm,
-                        on_click = cb(move || app.send_reply()),
+                        on_click = cb(move || net::send_reply(app)),
                     )
                 }
             }
@@ -109,7 +106,7 @@ fn reply_row(line: crate::model::Line) -> Element {
         view(style = || StyleApplication::new(styles::MessageRow::sheet())
             .with("density", "head"))
         {
-            Face(name = line.author.clone(), size = AvatarSize::Sm)
+            Face(name = line.author.clone(), id = line.author_id.clone().unwrap_or_default(), size = AvatarSize::Sm)
             view(style = || StyleApplication::new(styles::MessageBody::sheet())) {
                 view(style = || StyleApplication::new(styles::MessageHead::sheet())) {
                     Strong(label = line.author.clone(), kind = typography_kind::BodySm)

@@ -1,46 +1,42 @@
 //! Live rooms — voice, video, and screen share.
 //!
-//! One view for all three. A room is a room; the only differences are whether
-//! there's a stage to put someone's screen on and whether cameras are expected.
-//! That is the design's point: nobody "starts a call", they walk in.
+//! The room itself is real (it is a channel on the server); who is *in* it is
+//! not. Presence needs the live socket, so this shows you and nobody else
+//! rather than inventing a roster. That is deliberately visible in the UI:
+//! an empty room says it is empty.
 
 use icons_lucide::{MIC, MIC_OFF, MONITOR, MONITOR_UP, PLUS, VIDEO, VIDEO_OFF};
-use idea_ui::{shape, size, tone, typography_kind, variant, AvatarSize, Button, Grid, Stack, StackAlign, StackAxis, StackGap, StackPadding, ToneRef, VariantRef};
-use runtime_core::{switch, component, icon, ui, Element, StyleApplication};
+use idea_ui::{
+    shape, size, tone, typography_kind, variant, AvatarSize, Button, Grid, Stack, StackAlign,
+    StackAxis, StackGap, StackPadding, ToneRef, VariantRef,
+};
+use runtime_core::{component, switch, ui, Element, StyleApplication};
 
-use crate::model::{App, Room, RoomKind};
+use crate::model::{App, ChannelKind};
+use crate::net;
 use crate::styles;
 use crate::views::bits::{cb, press, Face, Glyph, Muted, Spring, Strong};
-use crate::views::person_menu::person_target;
-
-/// Who the design shows as actively speaking.
-///
-/// A real client reads this off the audio path — `voice-client` already
-/// computes exactly this signal from its mic/remote peak meters — so this is
-/// the seam that pipeline plugs into, not a decoration.
-fn is_speaking(name: &str) -> bool {
-    name == "Ana Ruiz" || name == "Mom"
-}
-
-/// Who is muted. Same note as [`is_speaking`]: server state, stubbed.
-fn is_muted_in_room(app: App, name: &str) -> bool {
-    if name == "You" {
-        return !app.mic.get();
-    }
-    name == "Theo Lang" || name == "Dad" || app.is_timed_out(name)
-}
 
 #[component]
 pub fn LiveRoom(#[prop(static)] app: App) -> Element {
-    switch(move || (app.nav_key(), app.voice_key(), app.people_key()), move |_| live_body(app))
+    switch(
+        move || {
+            (
+                app.revision.get(),
+                app.channel_id.get(),
+                app.in_voice.get(),
+                app.mic.get(),
+                app.cam.get(),
+                app.sharing.get(),
+            )
+        },
+        move |_| live_body(app),
+    )
 }
 
 fn live_body(app: App) -> Element {
-    let Some(room) = app.current_room() else {
-        return ui! { view() };
-    };
-    let body = if room.kind == RoomKind::Share { stage(app, room) } else { tiles(app, room) };
-    let bar = controls(app, room);
+    let body = if app.channel_kind() == ChannelKind::Share { stage(app) } else { tiles(app) };
+    let bar = controls(app);
 
     ui! {
         view(style = || StyleApplication::new(styles::Live::sheet())) {
@@ -50,11 +46,14 @@ fn live_body(app: App) -> Element {
     }
 }
 
-/// The screen-share layout: one big stage, a strip of faces beside it.
-fn stage(app: App, room: &'static Room) -> Element {
-    let sharer = room.people.first().copied().unwrap_or("Nobody");
-    let strip: Vec<Element> =
-        app.occupants(room).into_iter().map(|name| tile(app, room, name, true)).collect();
+/// The screen-share layout.
+fn stage(app: App) -> Element {
+    let sharing = app.sharing.get();
+    let headline = if sharing {
+        format!("{} is sharing", app.my_name())
+    } else {
+        "Nobody is sharing yet".to_string()
+    };
 
     ui! {
         Stack(
@@ -66,44 +65,56 @@ fn stage(app: App, room: &'static Room) -> Element {
             view(style = || StyleApplication::new(styles::Stage::sheet())) {
                 view(style = || StyleApplication::new(styles::StageBar::sheet())) {
                     view(style = || StyleApplication::new(styles::LiveDot::sheet()))
-                    Strong(label = format!("{sharer} is sharing"), kind = typography_kind::BodySm)
+                    Strong(label = headline, kind = typography_kind::BodySm)
                     Spring()
-                    Muted(label = "1080p · 22 min".to_string(), kind = typography_kind::Overline)
                 }
                 view(style = || StyleApplication::new(styles::StageSurface::sheet())) {
                     Glyph(data = Some(MONITOR), size = 34.0)
-                    Muted(label = "Shared screen".to_string(), kind = typography_kind::BodySm)
+                    Muted(
+                        label = "Screen sharing is not carried yet.".to_string(),
+                        kind = typography_kind::BodySm,
+                    )
                 }
-            }
-            Stack(gap = StackGap::Sm) {
-                strip
             }
         }
     }
 }
 
-/// The grid layout: every face the same size, plus an invite slot.
-fn tiles(app: App, room: &'static Room) -> Element {
-    let mut cells: Vec<Element> =
-        app.occupants(room).into_iter().map(|name| tile(app, room, name, false)).collect();
-
+/// The grid layout: you, and an invite slot.
+fn tiles(app: App) -> Element {
+    let joined = app.in_voice.get() == app.channel_id.get();
+    let mut cells: Vec<Element> = Vec::new();
+    if joined {
+        cells.push(tile(app));
+    }
     cells.push(press(
         vec![
-            icon(PLUS).size(22.0).into(),
-            ui! {
-                Strong(label = "Invite someone".to_string(), kind = typography_kind::BodySm)
-            },
+            ui! { Glyph(data = Some(PLUS), size = 22.0) },
+            ui! { Strong(label = "Invite someone".to_string(), kind = typography_kind::BodySm) },
         ],
         || StyleApplication::new(styles::TileGhost::sheet()),
-        move || app.join_open.set(true),
+        move || {
+            app.minted_invite.set(String::new());
+            app.join_open.set(true);
+            net::mint_invite(app);
+        },
     ));
 
-    // Three columns. `Grid` takes a fixed count rather than a min width, so
-    // this is the density that keeps a face legible on a laptop without
-    // stranding one tile alone on a row in the common 2–4 person case.
+    let note: Vec<Element> = if joined {
+        Vec::new()
+    } else {
+        vec![ui! {
+            Muted(
+                label = "This room never ends. People come and go — nobody has to start a call."
+                    .to_string(),
+            )
+        }]
+    };
+
     ui! {
         scroll_view(style = || StyleApplication::new(styles::Transcript::sheet())) {
-            Stack(padding = StackPadding::Xl) {
+            Stack(padding = StackPadding::Xl, gap = StackGap::Lg) {
+                note
                 Grid(columns = 3, gap = StackGap::Md) {
                     cells
                 }
@@ -112,40 +123,26 @@ fn tiles(app: App, room: &'static Room) -> Element {
     }
 }
 
-/// One person's tile. `narrow` is the screen-share filmstrip variant.
-fn tile(app: App, room: &'static Room, name: String, narrow: bool) -> Element {
-    let you = name == "You";
-    let speaking = is_speaking(&name);
-    let quiet = is_muted_in_room(app, &name);
-    let size = if narrow { AvatarSize::Md } else { AvatarSize::Lg };
-    let site = format!("tile:{}", room.id);
+/// Your own tile. Everyone else's needs presence, which needs the socket.
+fn tile(app: App) -> Element {
+    let muted = !app.mic.get();
+    let mute_mark: Vec<Element> =
+        if muted { vec![ui! { Glyph(data = Some(MIC_OFF), size = 13.0) }] } else { Vec::new() };
 
-    let owned = name.clone();
-    person_target(app, &site, &name, move |open| {
-        let plate_name = owned.clone();
-        let mute_mark: Vec<Element> =
-            if quiet { vec![icon(MIC_OFF).size(13.0).into()] } else { Vec::new() };
-        let plate: Element = ui! {
+    ui! {
+        view(style = || StyleApplication::new(styles::Tile::sheet()).with("you", "on")) {
+            Face(name = app.my_name(), id = app.my_id(), size = AvatarSize::Lg)
             view(style = || StyleApplication::new(styles::TileName::sheet())) {
-                Strong(label = plate_name, kind = typography_kind::BodySm)
+                Strong(label = app.my_name(), kind = typography_kind::BodySm)
                 mute_mark
             }
-        };
-        press(
-            vec![ui! { Face(name = owned.clone(), size = size) }, plate],
-            move || {
-                StyleApplication::new(styles::Tile::sheet())
-                    .with("speaking", if speaking { "on" } else { "off" })
-                    .with("you", if you { "on" } else { "off" })
-            },
-            open,
-        )
-    })
+        }
+    }
 }
 
-/// The floating control bar: mic, camera, share, and join/leave.
-fn controls(app: App, room: &'static Room) -> Element {
-    let joined = app.in_voice.get() == room.id;
+/// The floating control bar.
+fn controls(app: App) -> Element {
+    let joined = app.in_voice.get() == app.channel_id.get();
     let mic_on = app.mic.get();
     let cam_on = app.cam.get();
     let sharing = app.sharing.get();

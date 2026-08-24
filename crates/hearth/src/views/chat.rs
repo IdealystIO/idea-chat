@@ -1,64 +1,83 @@
 //! The message column: the transcript, and the composer under it.
 
-use icons_lucide::{BOOKMARK, MORE_HORIZONTAL, PAPERCLIP, REPLY, SEND};
+use icons_lucide::{PAPERCLIP, REPLY, SEND, TRASH_2};
 use idea_ui::{tone, typography_kind, variant, AvatarSize, Badge, IconButton, IconButtonSize, ToneRef, Typography, VariantRef};
 use runtime_core::{rx, switch, component, text, text_input, ui, Element, KeyOutcome, StyleApplication};
 
-use crate::model::{self, App, Line};
+use crate::model::{App, Line};
 use crate::styles;
 use crate::views::bits::{cb, press, Face, Muted, Spring};
+use crate::net;
 use crate::views::person_menu::person_target;
 
 #[component]
 pub fn ChatColumn(#[prop(static)] app: App) -> Element {
-    switch(move || (app.nav_key(), app.content_key(), app.people_key(), app.compact.get()), move |_| chat_body(app))
+    switch(move || (app.revision.get(), app.channel_id.get(), app.compact.get(), app.muted.get()), move |_| chat_body(app))
 }
 
 fn chat_body(app: App) -> Element {
+    // No channel, no composer: a message box with nowhere to send is an
+    // invitation to type something that will be thrown away.
+    let composer: Vec<Element> = if app.channel().is_some() {
+        vec![ui! { Composer(app = app) }]
+    } else {
+        Vec::new()
+    };
     ui! {
         view(style = || StyleApplication::new(styles::Chat::sheet())) {
             transcript(app)
-            Composer(app = app)
+            composer
         }
     }
 }
 
 /// The scrolling transcript: an intro block, then the messages.
 fn transcript(app: App) -> Element {
-    let room_id = app.room_id.get();
-    let lines = app.messages(room_id);
+    // Nothing selected is a real state on a fresh account — there are no
+    // channels to select. Rendering the channel intro anyway produces
+    // "Welcome to #" and a composer addressed to nobody.
+    if app.channel().is_none() {
+        return ui! {
+            view(style = || StyleApplication::new(styles::Transcript::sheet())) {
+                view(style = || StyleApplication::new(styles::Intro::sheet())) {
+                    Typography(content = "Nothing open".to_string(), kind = typography_kind::H2)
+                    Muted(
+                        label = "Make a space or accept an invite, and its channels appear on the left."
+                            .to_string(),
+                    )
+                }
+            }
+        };
+    }
     let is_dm = app.viewing_dm();
     let compact = app.compact.get();
+    let name = app.channel().map(|c| c.name).unwrap_or_default();
 
     let (intro_title, intro_body) = if is_dm {
-        let name = model::dm(room_id).map(|d| d.name).unwrap_or("");
         (
-            name.to_string(),
+            name,
             "Direct messages stay between the two of you. No previews, no receipts you did not ask for."
                 .to_string(),
         )
     } else {
-        let name = model::room(room_id).map(|r| r.name).unwrap_or("");
         (
             format!("Welcome to #{name}"),
             "The beginning of this channel. Scroll up all you like — this is the top.".to_string(),
         )
     };
 
-    // A message "heads" its group when it follows someone else. Consecutive
-    // messages from one person lose the avatar and the name, which is what
-    // turns a list of records back into someone talking.
-    // Only the *data* is prepared here; the elements are built inside the
-    // macro under `key = line.key`, so a message arriving mid-transcript
-    // reconciles by identity instead of by position.
-    let rows: Vec<Row> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| Row {
-            line: line.clone(),
-            heads: i == 0 || lines[i - 1].author != line.author,
-        })
-        .collect();
+    let lines = app.lines();
+    let empty: Vec<Element> = if lines.is_empty() {
+        vec![ui! {
+            view(style = || StyleApplication::new(styles::Intro::sheet())) {
+                Muted(label = "Nothing here yet. Say something.".to_string())
+            }
+        }]
+    } else {
+        Vec::new()
+    };
+    let rows: Vec<Element> =
+        lines.into_iter().map(|line| message_row(app, line, compact)).collect();
 
     ui! {
         scroll_view(style = || StyleApplication::new(styles::Transcript::sheet())) {
@@ -66,32 +85,15 @@ fn transcript(app: App) -> Element {
                 Typography(content = intro_title, kind = typography_kind::H2)
                 Muted(label = intro_body)
             }
-
-            for row in rows, key = row.line.key.clone() {
-                message_row(app, row.line, row.heads, compact)
-            }
-
-            // The design pins this to #general. It stands in for a real
-            // typing signal, and it renders where the real one would.
-            if room_id == "general" {
-                view(style = || StyleApplication::new(styles::Intro::sheet())) {
-                    Muted(label = "Priya is typing…".to_string(), kind = typography_kind::BodySm)
-                }
-            }
+            empty
+            rows
         }
     }
 }
 
-/// A message plus whether it heads its group — the one presentational fact the
-/// transcript computes from a message's neighbours rather than from itself.
-#[derive(Clone)]
-pub struct Row {
-    pub line: Line,
-    pub heads: bool,
-}
-
 /// One message.
-fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
+fn message_row(app: App, line: Line, compact: bool) -> Element {
+    let heads = line.heads;
     let density = if compact {
         "tight"
     } else if heads {
@@ -99,18 +101,21 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
     } else {
         "sub"
     };
-    let replies = app.reply_count(&line.key, line.seeded_replies);
-    let author = line.author.clone();
-    let hidden = app.is_muted(&author);
+    let replies = line.reply_count;
+    let author_id = line.author_id.clone().unwrap_or_default();
+    // A muted person's messages stay readable but recede — hiding them leaves
+    // holes in a conversation other people are still replying to.
+    let hidden = app.is_muted(&author_id) || line.deleted;
 
     // The avatar and the author name are both person targets, so both are
     // built here and splatted — a `person_target` is a wrapper view, not a tag.
     let gutter: Vec<Element> = if heads {
-        let site = format!("msg:{}", line.key);
-        let name = author.clone();
-        vec![person_target(app, &site, &author, move |open| {
+        let site = format!("msg:{}", line.id);
+        let name = line.author.clone();
+        let id = author_id.clone();
+        vec![person_target(app, &site, &author_id, move |open| {
             press(
-                vec![ui! { Face(name = name.clone(), size = AvatarSize::Sm) }],
+                vec![ui! { Face(name = name.clone(), id = id.clone(), size = AvatarSize::Sm) }],
                 || StyleApplication::new(styles::Bare::sheet()),
                 open,
             )
@@ -120,14 +125,17 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
     };
 
     let head: Vec<Element> = if heads {
-        let site = format!("name:{}", line.key);
-        let name = author.clone();
-        let label = author.clone();
-        let stamp = line.time.clone();
+        let site = format!("name:{}", line.id);
+        let label = line.author.clone();
+        let stamp = if line.edited {
+            format!("{} · edited", line.time)
+        } else {
+            line.time.clone()
+        };
         vec![ui! {
             view(style = || StyleApplication::new(styles::MessageHead::sheet())) {
                 {
-                    person_target(app, &site, &name, move |open| {
+                    person_target(app, &site, &author_id, move |open| {
                         press(
                             vec![ui! { text(label.clone()) }],
                             || StyleApplication::new(styles::AuthorName::sheet()),
@@ -143,7 +151,7 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
     };
 
     let thread_badge: Vec<Element> = if replies > 0 {
-        let key = line.key.clone();
+        let key = line.id.clone();
         vec![press(
             vec![ui! {
                 Badge(
@@ -157,14 +165,16 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
                 )
             }],
             || StyleApplication::new(styles::Hug::sheet()),
-            move || app.thread_key.set(key.clone()),
+            move || net::open_thread(app, &key),
         )]
     } else {
         Vec::new()
     };
 
     let body = line.text.clone();
-    let reply_key = line.key.clone();
+    let reply_key = line.id.clone();
+    let delete_id = line.id.clone();
+    let mine = line.author_id.as_deref() == Some(app.my_id().as_str());
     let body_node: Element = text(body)
         .with_style(move || {
             StyleApplication::new(styles::MessageText::sheet())
@@ -177,6 +187,23 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
     let mut body_block = head;
     body_block.push(body_node);
     body_block.extend(thread_badge);
+
+    // Only offered where it would work: your own message always, anyone's if
+    // you moderate this space. A button that always 403s is worse than none.
+    let delete_button: Vec<Element> = if mine || app.moderates() {
+        vec![ui! {
+            IconButton(
+                glyph = String::new(),
+                icon = Some(TRASH_2),
+                tone = tone::Danger,
+                variant = variant::Ghost,
+                size = IconButtonSize::Sm,
+                on_click = cb(move || net::delete_message(app, &delete_id)),
+            )
+        }]
+    } else {
+        Vec::new()
+    };
 
     ui! {
         view(style = move || StyleApplication::new(styles::MessageRow::sheet())
@@ -200,24 +227,9 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
                     tone = tone::Neutral,
                     variant = variant::Ghost,
                     size = IconButtonSize::Sm,
-                    on_click = cb(move || app.thread_key.set(reply_key.clone())),
+                    on_click = cb(move || net::open_thread(app, &reply_key)),
                 )
-                IconButton(
-                    glyph = String::new(),
-                    icon = Some(BOOKMARK),
-                    tone = tone::Neutral,
-                    variant = variant::Ghost,
-                    size = IconButtonSize::Sm,
-                    on_click = cb(|| {}),
-                )
-                IconButton(
-                    glyph = String::new(),
-                    icon = Some(MORE_HORIZONTAL),
-                    tone = tone::Neutral,
-                    variant = variant::Ghost,
-                    size = IconButtonSize::Sm,
-                    on_click = cb(|| {}),
-                )
+                delete_button
             }
         }
     }
@@ -235,11 +247,11 @@ fn message_row(app: App, line: Line, heads: bool, compact: bool) -> Element {
 /// could never be typed into at all.
 #[component]
 fn Composer(#[prop(static)] app: App) -> Element {
+    let name = app.channel().map(|c| c.name).unwrap_or_default();
     let hint = if app.viewing_dm() {
-        let name = model::dm(app.room_id.get()).map(|d| d.name).unwrap_or("");
-        format!("Message {}", name.split(' ').next().unwrap_or(name))
+        format!("Message {}", name.split(' ').next().unwrap_or(&name))
     } else {
-        format!("Message #{}", model::room(app.room_id.get()).map(|r| r.name).unwrap_or(""))
+        format!("Message #{name}")
     };
 
     ui! {
@@ -258,7 +270,7 @@ fn Composer(#[prop(static)] app: App) -> Element {
                         // lands in the box we just cleared.
                         .on_key_down(move |e| {
                             if e.key == "Enter" && !e.shift {
-                                app.send();
+                                net::send(app);
                                 KeyOutcome::PreventDefault
                             } else {
                                 KeyOutcome::Default
@@ -288,7 +300,7 @@ fn Composer(#[prop(static)] app: App) -> Element {
                         VariantRef::from(variant::Filled)
                     }),
                     size = IconButtonSize::Md,
-                    on_click = cb(move || app.send()),
+                    on_click = cb(move || net::send(app)),
                 )
             }
             view(style = || StyleApplication::new(styles::ComposerHint::sheet())) {

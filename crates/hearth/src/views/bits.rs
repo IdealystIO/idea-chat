@@ -22,10 +22,12 @@ use std::rc::Rc;
 use crate::model::{initials, tone_index, Status};
 use crate::styles;
 
-/// The seven avatar tints, indexed by [`tone_index`]. Same order as the
-/// design's table, so a given name lands on the same colour in both.
-pub fn avatar_color(name: &str) -> AvatarColor {
-    match tone_index(name) {
+/// The six avatar tints, indexed by [`tone_index`].
+///
+/// Keyed on a person's **id**, so renaming yourself does not recolour every
+/// message you have ever sent.
+pub fn avatar_color(id: &str) -> AvatarColor {
+    match tone_index(id) {
         0 => AvatarColor::Primary,
         1 => AvatarColor::Info,
         2 => AvatarColor::Warning,
@@ -35,19 +37,23 @@ pub fn avatar_color(name: &str) -> AvatarColor {
     }
 }
 
-/// Someone's avatar, tinted and lettered from their name.
+/// Someone's avatar: initials from their name, colour from their id.
+///
+/// Both are needed because they answer different questions — the letters say
+/// who this is, the colour keeps saying it after a rename.
 #[component]
 pub fn Face(
-    // `#[prop(static)]`: the name is read to derive initials and a tint, not
-    // routed into a reactive sink, so wrapping it in `Reactive` would only mean
-    // unwrapping it again on the next line.
+    // `#[prop(static)]`: read to derive initials and a tint, not routed into a
+    // reactive sink, so wrapping it in `Reactive` would only mean unwrapping it
+    // again on the next line.
     #[prop(static)] name: String,
+    #[prop(static)] id: String,
     #[prop(static, default = AvatarSize::Sm)] size: AvatarSize,
 ) -> Element {
     ui! {
         Avatar(
             initials = initials(&name),
-            color = avatar_color(&name),
+            color = avatar_color(&id),
             size = size,
         )
     }
@@ -61,6 +67,7 @@ pub fn Face(
 #[component]
 pub fn Presence(
     #[prop(static)] name: String,
+    #[prop(static)] id: String,
     #[prop(static, default = AvatarSize::Sm)] size: AvatarSize,
     #[prop(static, default = Status::Offline)] status: Status,
     #[prop(static)] small: bool,
@@ -73,7 +80,7 @@ pub fn Presence(
     let dot_size = if small { "sm" } else { "md" };
     ui! {
         view(style = || StyleApplication::new(styles::AvatarSlot::sheet())) {
-            Face(name = name, size = size)
+            Face(name = name, id = id, size = size)
             view(style = move || StyleApplication::new(styles::PresenceDot::sheet())
                 .with("status", dot_status)
                 .with("size", dot_size))

@@ -15,63 +15,59 @@ repo right now is to prove that by building around it.
 Everything here lives outside the `idealyst-native` tree on purpose. What earns
 promotion into the SDK gets decided after it works, not before.
 
-## Hearth — the client
+## Hearth — the app
 
-`crates/hearth` is the app: an implementation of the `Hearth.dc.html` design on
-idealyst, composed from `idea-ui` components over a Hearth-specific theme.
-Spaces, channels, always-open voice/video/share rooms, direct messages,
-threads, search, a person menu and profile, moderation, seven settings, and a
-device preview.
+`crates/hearth` is one crate compiled two ways. By default it builds the
+client: the UI from `Hearth.dc.html`, plus HTTP stubs for every `#[server]`
+function. Under `--features server` it builds the other half — the real
+function bodies over `crates/hearth-db` — and `src/bin/server.rs` serves the
+API and the wasm bundle from one origin, which the session cookie requires.
 
 ```bash
-# the client, on its fixture
-cd crates/hearth && idealyst build --web
-idealyst serve dist/web --port 8099
-node tools/hearth-ui.js          # 31 assertions through a real browser
-
-# the server: schema, auth, messages
+docker compose up -d postgres redis
 docker exec idea-chat-postgres-1 psql -U postgres -c 'CREATE DATABASE hearth_dev'
+
 cargo build -p hearth --bin server --features server
-DATABASE_URL=postgres://postgres:dev@localhost:55432/hearth_dev \
-  HEARTH_BIND=127.0.0.1:8090 REDIS_URL=redis://localhost:6399 \
-  ./target/debug/server | tee /tmp/hearth-server.log &
-bash tools/auth-flows.sh         # 34 assertions
-bash tools/message-flows.sh      # 17 assertions
+(cd crates/hearth && idealyst build --web)
+bash tools/reset-dev.sh          # fresh instance on :8090, prints a claim link
 ```
 
-The server prints a one-time claim link on first boot; there is no default
-account and no default password. `crates/hearth-db` carries the schema and its
-own suite (`HEARTH_TEST_DATABASE_URL=… cargo test -p hearth-db`), which skips
-rather than fails when no database is configured.
+Open <http://127.0.0.1:8090>. A fresh instance has no accounts and no default
+password: the server prints a one-time claim link, and the first person to
+paste it becomes the instance admin. After that it is invite-only.
 
-**The client still runs on its fixture** — the server is real and tested, but
-`model.rs` is not yet reading from it. That wiring is the next step, and it is
-a larger change than the build order implied: see the note at the end of
-[docs/data-model.md](docs/data-model.md).
+What works end to end, against Postgres: claiming, sign-in and sign-out,
+invites, creating spaces, channels, posting, editing, deleting, threads,
+paging, read state and unread pips, direct messages, and the roster. Voice
+rooms render and the controls are local-only — the audio path is
+`crates/voice-*`, and the two tiers are not joined yet.
 
-Everything visible is a stock `idea-ui` component; the ~60 `stylesheet!` blocks
-in `styles.rs` are layout only. Light/dark and four accents are token values —
-one closure re-themes every component and every app stylesheet at once.
+### Verification
 
-`model.rs` is a **presentation model over the design's fixture** — not a domain
-model, and not a wire format. It is `&'static str` throughout with no serde;
-people are keyed by display name, timestamps are display strings (`"9:02"`,
-`"Yest"`), and a message's identity is its position (`room:index`). It exists to
-render the design, and it is honest about that.
+```bash
+# the data layer, against a real Postgres (skips without the variable)
+HEARTH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:55432/hearth \
+  cargo test -p hearth-db                # 41
 
-What it does buy is a seam: every view reads rooms, messages and people through
-the accessors in that module rather than touching the tables, so the views don't
-have to change when a real model lands behind them. The domain model itself —
-stable IDs, real timestamps, authorship, membership, read state — has not been
-designed yet.
+bash tools/reset-dev.sh
+bash tools/auth-flows.sh                 # 34 — session, CSRF, timing, invites
+bash tools/message-flows.sh              # 17 — posting, threads, authorization
 
-**[docs/hearth-framework-findings.md](docs/hearth-framework-findings.md)** is
-the other deliverable — what cost debugging time or forced a departure from the
-design, plus what worked. The first two entries are corrections to my own
-misuse of the framework rather than defects in it, kept because the
-misdiagnosis is the useful part: read a signal one level above its sink and the
-app renders once and then goes inert, with the symptom pointing squarely at
-event wiring, which is the one thing working.
+bash tools/reset-dev.sh
+node tools/hearth-e2e.js                 # 27 — the whole app, two browsers
+```
+
+`hearth-e2e.js` is the one that matters: it claims an instance, makes a space,
+posts, reloads, invites a second person in another browser, watches them talk,
+signs out and back in — all through the UI.
+
+### Design notes
+
+- **[docs/data-model.md](docs/data-model.md)** — the schema, the auth flows,
+  and §13's record of where the plan turned out to be wrong.
+- **[docs/hearth-framework-findings.md](docs/hearth-framework-findings.md)** —
+  what building this taught us about idealyst, including two entries that are
+  corrections to my own misuse rather than defects.
 
 ## Step 1 — the voice loop (current)
 

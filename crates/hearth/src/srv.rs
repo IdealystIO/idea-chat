@@ -316,6 +316,34 @@ pub async fn space_summary(db: &Db, space: Space, role: Role) -> Result<SpaceSum
     })
 }
 
+/// The conversation list, with each row's other person and last line.
+pub async fn dms_for(db: &Db, user: Uuid) -> Result<Vec<DmDto>, ServerError> {
+    Ok(db
+        .dm_list(user)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|d| {
+            // "You: " is decided here so every client renders the list the
+            // same way, and so the client does not need to know its own id to
+            // format a preview.
+            let preview = match (&d.last_body, &d.last_author) {
+                (Some(body), Some(author)) => {
+                    let mine = d.other_name.as_deref() != Some(author.as_str());
+                    if mine { format!("You: {body}") } else { body.clone() }
+                }
+                _ => "Say hello".to_string(),
+            };
+            DmDto {
+                channel_id: d.channel_id.to_string(),
+                other_id: d.other_id.map(|i| i.to_string()),
+                other_name: d.other_name.unwrap_or_else(|| "Deleted account".into()),
+                preview,
+            }
+        })
+        .collect())
+}
+
 pub async fn spaces_for(db: &Db, user: Uuid) -> Result<Vec<SpaceSummary>, ServerError> {
     let spaces = db.spaces_for_user(user).await.map_err(internal)?;
     let mut out = Vec::with_capacity(spaces.len());

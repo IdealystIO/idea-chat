@@ -149,3 +149,35 @@ pub struct Catchup {
     /// rather than trusting this partial list to be contiguous.
     pub truncated: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemberDto {
+    pub id: String,
+    pub handle: String,
+    pub display_name: String,
+    pub role: String,
+}
+
+/// One row of the direct-message list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DmDto {
+    pub channel_id: String,
+    pub other_id: Option<String>,
+    pub other_name: String,
+    /// Already prefixed with "You: " when you sent it — the list renders it
+    /// verbatim, and deciding that here keeps every client agreeing.
+    pub preview: String,
+}
+
+/// Everything the shell needs to render, in one call.
+///
+/// The client makes this request once on boot and once after any change that
+/// could reshape the sidebar. Splitting it into three would mean three round
+/// trips before the first frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bootstrap {
+    pub me: Me,
+    pub spaces: Vec<SpaceSummary>,
+    pub dms: Vec<DmDto>,
+    pub unread: Vec<String>,
+}

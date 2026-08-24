@@ -424,3 +424,97 @@ pub async fn open_dm(
         topic: None,
     })
 }
+
+/// Everything the shell needs to render, in one call.
+#[server]
+pub async fn bootstrap(
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<Bootstrap, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let me = db
+        .0
+        .user(user)
+        .await
+        .map_err(srv::internal)?
+        .filter(|u| u.is_active())
+        .ok_or_else(|| ServerError::failed("that account no longer exists"))?;
+
+    Ok(Bootstrap {
+        me: srv::to_me(me),
+        spaces: srv::spaces_for(&db.0, user).await?,
+        dms: srv::dms_for(&db.0, user).await?,
+        unread: db
+            .0
+            .unread_channels(user)
+            .await
+            .map_err(srv::internal)?
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+    })
+}
+
+/// Everyone in a space — the roster.
+#[server]
+pub async fn space_members(
+    space_id: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<Vec<MemberDto>, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let space = srv::parse_id(&space_id)?;
+    // Membership, not moderation: any member may see who else is here.
+    if db.0.role_in_space(space, user).await.map_err(srv::internal)?.is_none() {
+        return Err(ServerError::failed("no such space"));
+    }
+    Ok(db
+        .0
+        .members_of(space)
+        .await
+        .map_err(srv::internal)?
+        .into_iter()
+        .map(|m| MemberDto {
+            id: m.user_id.to_string(),
+            handle: m.handle,
+            display_name: m.display_name,
+            role: format!("{:?}", m.role).to_lowercase(),
+        })
+        .collect())
+}
+
+/// Join a space with an invite, as an account that already exists.
+///
+/// Distinct from `register`, which creates an account *and* joins. Signing in
+/// and then redeeming a link is a different act from signing up, and folding
+/// them into one endpoint would mean one of the two paths carrying fields it
+/// has no use for.
+#[server(tags(limit = "10/hour"))]
+pub async fn join_space(
+    code: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<SpaceSummary, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let space = match db.0.redeem_invite(&code, user).await.map_err(srv::internal)? {
+        hearth_db::Redemption::Joined(space) | hearth_db::Redemption::AlreadyMember(space) => space,
+        hearth_db::Redemption::Refused(why) => {
+            return Err(ServerError::failed(srv::refusal_copy(why)))
+        }
+    };
+    let role = db
+        .0
+        .role_in_space(space, user)
+        .await
+        .map_err(srv::internal)?
+        .unwrap_or(hearth_db::Role::Member);
+    let summary = db
+        .0
+        .spaces_for_user(user)
+        .await
+        .map_err(srv::internal)?
+        .into_iter()
+        .find(|s| s.id == space)
+        .ok_or_else(|| ServerError::failed("joined, but the space could not be read back"))?;
+    srv::space_summary(&db.0, summary, role).await
+}

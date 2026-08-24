@@ -146,3 +146,57 @@ impl Db {
         Ok(())
     }
 }
+
+impl Db {
+    /// Everyone in a space, owners first.
+    ///
+    /// Ordered in the database rather than the client so every surface that
+    /// lists members agrees on the order without each one re-deciding it.
+    pub async fn members_of(&self, space_id: Uuid) -> Result<Vec<Member>> {
+        Ok(sqlx::query_as::<_, Member>(
+            "SELECT u.id AS user_id, u.handle, u.display_name, m.role
+               FROM space_members m
+               JOIN users u ON u.id = m.user_id
+              WHERE m.space_id = $1
+              ORDER BY CASE m.role
+                         WHEN 'owner' THEN 0
+                         WHEN 'moderator' THEN 1
+                         ELSE 2
+                       END,
+                       u.display_name",
+        )
+        .bind(space_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// This user's conversations, most recent first, each with the other
+    /// person and the last thing said.
+    ///
+    /// One query rather than one per conversation: the list renders in a
+    /// single frame, so a round trip per row would be a round trip per row on
+    /// every cold start.
+    pub async fn dm_list(&self, user_id: Uuid) -> Result<Vec<DmSummary>> {
+        Ok(sqlx::query_as::<_, DmSummary>(
+            "SELECT c.id                AS channel_id,
+                    other.id            AS other_id,
+                    other.display_name  AS other_name,
+                    last.body           AS last_body,
+                    author.display_name AS last_author,
+                    last.created_at     AS last_at
+               FROM channels c
+               JOIN channel_members mine
+                 ON mine.channel_id = c.id AND mine.user_id = $1
+               LEFT JOIN channel_members theirs
+                 ON theirs.channel_id = c.id AND theirs.user_id <> $1
+               LEFT JOIN users other ON other.id = theirs.user_id
+               LEFT JOIN messages last ON last.id = c.last_message_id
+               LEFT JOIN users author ON author.id = last.author_id
+              WHERE c.kind = 'dm'
+              ORDER BY c.last_message_id DESC NULLS LAST",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+}

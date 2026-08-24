@@ -15,7 +15,7 @@ use idea_ui::{
 };
 use runtime_core::{component, switch, text, ui, Element, StyleApplication};
 
-use crate::model::{self, App};
+use crate::model::App;
 use crate::styles;
 use crate::views::bits::{cb, Face, Glyph, Muted, Spring, Strong};
 
@@ -75,37 +75,21 @@ fn press_backdrop(app: App) -> Element {
 
 #[component]
 fn MobileBody(#[prop(static)] app: App) -> Element {
-    switch(move || (app.nav_key(), app.content_key()), move |_| mobile_body(app))
+    switch(move || (app.revision.get(), app.channel_id.get()), move |_| mobile_body(app))
 }
 
 fn mobile_body(app: App) -> Element {
-    // A live room has no message column, so the phone shows the last text
-    // channel or DM you were in — the same fallback the design uses, and the
-    // reason `last_chat` is tracked at all.
-    let room_id = if app.current_kind().is_chat() || app.viewing_dm() {
-        app.room_id.get()
-    } else {
-        app.last_chat.get()
-    };
-    let title = match model::dm(room_id) {
-        Some(d) => d.name.to_string(),
-        None => format!("# {}", model::room(room_id).map(|r| r.name).unwrap_or("")),
-    };
-    let space_name = model::space(app.space_id.get()).name.to_string();
+    let channel = app.channel();
+    let title = channel
+        .as_ref()
+        .map(|c| if c.kind == "text" { format!("# {}", c.name) } else { c.name.clone() })
+        .unwrap_or_default();
+    let space_name = app.space().map(|s| s.name).unwrap_or_default();
 
-    // The last handful of messages: a phone screen holds about six.
-    let lines = app.messages(room_id);
-    let recent: Vec<crate::views::chat::Row> = {
-        let start = lines.len().saturating_sub(6);
-        lines[start..]
-            .iter()
-            .enumerate()
-            .map(|(i, l)| crate::views::chat::Row {
-                line: l.clone(),
-                heads: i == 0 || lines[start + i - 1].author != l.author,
-            })
-            .collect()
-    };
+    // The last handful — a phone screen holds about six.
+    let all = app.lines();
+    let recent: Vec<crate::model::Line> =
+        all.iter().skip(all.len().saturating_sub(6)).cloned().collect();
 
     ui! {
         Stack(axis = StackAxis::Row, gap = StackGap::Xl, align = StackAlign::Center) {
@@ -127,8 +111,8 @@ fn mobile_body(app: App) -> Element {
                 }
 
                 view(style = || StyleApplication::new(styles::Transcript::sheet())) {
-                    for row in recent, key = row.line.key.clone() {
-                        phone_row(row.line, row.heads)
+                    for line in recent, key = line.id.clone() {
+                        phone_row(line)
                     }
                 }
 
@@ -165,9 +149,10 @@ fn mobile_body(app: App) -> Element {
 
 /// One message on the phone. Same grouping rule as the desktop transcript —
 /// the layout narrows, the reading model doesn't change.
-fn phone_row(line: model::Line, heads: bool) -> Element {
+fn phone_row(line: crate::model::Line) -> Element {
+    let heads = line.heads;
     let avatar: Vec<Element> = if heads {
-        vec![ui! { Face(name = line.author.clone(), size = AvatarSize::Sm) }]
+        vec![ui! { Face(name = line.author.clone(), id = line.author_id.clone().unwrap_or_default(), size = AvatarSize::Sm) }]
     } else {
         Vec::new()
     };

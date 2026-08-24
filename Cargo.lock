@@ -1260,6 +1260,7 @@ dependencies = [
  "icons-lucide",
  "idea-ui",
  "idealyst",
+ "js-sys",
  "rand 0.8.7",
  "redis 0.27.6",
  "runtime-core",
@@ -1272,6 +1273,7 @@ dependencies = [
  "tokio",
  "tower-http 0.6.11",
  "uuid",
+ "web-sys",
 ]
 
 [[package]]

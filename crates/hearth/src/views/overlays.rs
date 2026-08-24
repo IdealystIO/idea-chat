@@ -19,9 +19,10 @@ use runtime_core::{
     StyleApplication,
 };
 
-use crate::model::{self, App, JoinTab, Status};
+use crate::model::{App, JoinTab, Status};
 use crate::styles;
-use crate::views::bits::{cb, cb1, press, Face, Glyph, Muted, Presence, SectionLabel, Strong};
+use crate::net;
+use crate::views::bits::{cb, cb1, press, Face, Glyph, Muted, Presence, Strong};
 
 // =============================================================================
 // Search
@@ -82,21 +83,29 @@ fn search_body(app: App) -> Element {
 }
 
 /// One search result.
-fn result_row(app: App, hit: crate::model::Hit) -> Element {
-    let room = hit.room;
+fn result_row(app: App, line: crate::model::Line) -> Element {
     let summary: Element = ui! {
         view(style = || StyleApplication::new(styles::Ellipsis::sheet())) {
             view(style = || StyleApplication::new(styles::MessageHead::sheet())) {
-                Strong(label = hit.author.clone(), kind = typography_kind::BodySm)
-                Muted(label = hit.where_.clone(), kind = typography_kind::Overline)
+                Strong(label = line.author.clone(), kind = typography_kind::BodySm)
+                Muted(label = line.time.clone(), kind = typography_kind::Overline)
             }
-            Muted(label = hit.text.clone(), kind = typography_kind::BodySm)
+            Muted(label = line.text.clone(), kind = typography_kind::BodySm)
         }
     };
     press(
-        vec![ui! { Face(name = hit.author.clone(), size = AvatarSize::Sm) }, summary],
+        vec![
+            ui! {
+                Face(
+                    name = line.author.clone(),
+                    id = line.author_id.clone().unwrap_or_default(),
+                    size = AvatarSize::Sm,
+                )
+            },
+            summary,
+        ],
         || StyleApplication::new(styles::ResultRow::sheet()),
-        move || app.go(room),
+        move || app.search_open.set(false),
     )
 }
 
@@ -106,7 +115,7 @@ fn SearchResults(#[prop(static)] app: App) -> Element {
 }
 
 fn search_results_body(app: App) -> Element {
-    let hits = app.search();
+    let hits = app.search_hits();
     let query = app.query.get();
     let nothing_found = hits.is_empty();
 
@@ -114,9 +123,9 @@ fn search_results_body(app: App) -> Element {
     // or nothing found. They call for different next moves.
     let empty: Vec<Element> = if nothing_found {
         let label = if query.trim().is_empty() {
-            "Type to search messages and people.".to_string()
+            "Search what is loaded in this channel.".to_string()
         } else {
-            format!("Nothing matches “{}”.", query.trim())
+            format!("Nothing matches “{}” in this channel.", query.trim())
         };
         vec![ui! {
             Stack(padding = StackPadding::Xl, align = StackAlign::Center) {
@@ -130,7 +139,7 @@ fn search_results_body(app: App) -> Element {
     ui! {
         scroll_view(style = || StyleApplication::new(styles::ResultsScroll::sheet())) {
             Stack(gap = StackGap::None) {
-                for hit in hits, key = hit.key.clone() {
+                for hit in hits, key = hit.id.clone() {
                     result_row(app, hit)
                 }
                 empty
@@ -145,7 +154,10 @@ fn search_results_body(app: App) -> Element {
 
 #[component]
 pub fn JoinDialog(#[prop(static)] app: App) -> Element {
-    switch(move || (app.join_open.get(), app.join_tab.get()), move |_| join_shell(app))
+    switch(
+        move || (app.join_open.get(), app.join_tab.get(), app.minted_invite.get(), app.notice.get()),
+        move |_| join_shell(app),
+    )
 }
 
 fn join_shell(app: App) -> Element {
@@ -161,6 +173,24 @@ fn join_shell(app: App) -> Element {
 
 fn join_body(app: App) -> Element {
     let joining = app.join_tab.get() == JoinTab::Join;
+    // When a moderator opened this from "Invite someone", the code they can
+    // hand out appears here rather than in a second dialog.
+    let code = app.minted_invite.get();
+    let minted: Vec<Element> = if code.is_empty() {
+        Vec::new()
+    } else {
+        vec![ui! {
+            Stack(gap = StackGap::Xs) {
+                Muted(
+                    label = "Share this. It works once, and expires in a week.".to_string(),
+                    kind = typography_kind::BodySm,
+                )
+                view(style = || StyleApplication::new(styles::CodeBox::sheet())) {
+                    Strong(label = code.clone())
+                }
+            }
+        }]
+    };
 
     ui! {
         Stack(gap = StackGap::Lg) {
@@ -223,6 +253,8 @@ fn join_body(app: App) -> Element {
                 }),
             )
 
+            minted
+
             Stack(axis = StackAxis::Row, gap = StackGap::Sm, justify = StackJustify::End) {
                 Button(
                     label = "Not now".to_string(),
@@ -236,7 +268,13 @@ fn join_body(app: App) -> Element {
                     tone = tone::Primary,
                     variant = variant::Filled,
                     shape = shape::Md,
-                    on_click = cb(move || app.join_open.set(false)),
+                    on_click = cb(move || {
+                        if joining {
+                            net::join_space(app)
+                        } else {
+                            net::create_space(app)
+                        }
+                    }),
                 )
             }
         }
@@ -249,7 +287,7 @@ fn join_body(app: App) -> Element {
 
 #[component]
 pub fn ProfileCard(#[prop(static)] app: App) -> Element {
-    switch(move || (app.profile.get(), app.people_key(), app.space_id.get()), move |_| profile_shell(app))
+    switch(move || (app.profile.get(), app.revision.get(), app.muted.get()), move |_| profile_shell(app))
 }
 
 fn profile_shell(app: App) -> Element {
@@ -265,29 +303,41 @@ fn profile_shell(app: App) -> Element {
 }
 
 fn profile_body(app: App) -> Element {
-    let name = app.profile.get();
-    if name.is_empty() {
+    let user_id = app.profile.get();
+    if user_id.is_empty() {
         return ui! { view() };
     }
-    let status = model::status_of(&name);
-    let bio = model::bio(&name);
-    let is_mod = app.is_moderator(&name);
-    let muted_for_me = app.is_muted(&name);
-    let has_dm = model::dm_for(&name).is_some();
-
-    // Which rooms this person is usually found in. An empty list reads as a
-    // sentence rather than a gap — a blank area under a heading looks broken.
-    let rooms: Vec<&'static str> = model::rooms_in(app.space_id.get())
-        .filter(|r| r.people.contains(&name.as_str()))
-        .map(|r| r.name)
-        .collect();
-    let no_rooms: Vec<Element> = if rooms.is_empty() {
-        vec![ui! {
-            Muted(label = "Not in a room right now".to_string(), kind = typography_kind::BodySm)
-        }]
-    } else {
-        Vec::new()
+    let Some(member) = app.member(&user_id) else {
+        // The roster is the only source of names and it covers the current
+        // space, so somebody from a space you have left is a legitimate gap.
+        // Saying so beats rendering a card full of blanks.
+        return ui! {
+            Stack(gap = StackGap::Md) {
+                Typography(content = "Not in this space".to_string(), kind = typography_kind::H3)
+                Muted(label = "This account is not a member of the space you are looking at."
+                    .to_string())
+                Stack(axis = StackAxis::Row, gap = StackGap::Sm, justify = StackJustify::End) {
+                    Button(
+                        label = "Close".to_string(),
+                        tone = tone::Neutral,
+                        variant = variant::Ghost,
+                        shape = shape::Md,
+                        on_click = cb(move || app.profile.set(String::new())),
+                    )
+                }
+            }
+        };
     };
+
+    let muted_for_me = app.is_muted(&user_id);
+    let role_label = {
+        let mut r = member.role.clone();
+        if let Some(c) = r.get_mut(0..1) {
+            c.make_ascii_uppercase();
+        }
+        r
+    };
+    let is_privileged = member.role != "member";
 
     let mute_tag: Vec<Element> = if muted_for_me {
         vec![ui! {
@@ -297,73 +347,45 @@ fn profile_body(app: App) -> Element {
         Vec::new()
     };
 
-    let message_button: Vec<Element> = if has_dm {
-        let target = name.clone();
+    let message_button: Vec<Element> = if user_id == app.my_id() {
+        Vec::new()
+    } else {
+        let target = user_id.clone();
         vec![ui! {
             Button(
                 label = "Send a message".to_string(),
                 tone = tone::Primary,
                 variant = variant::Filled,
                 shape = shape::Md,
-                on_click = cb(move || {
-                    let id = model::dm_for(&target).map(|d| d.id);
-                    app.profile.set(String::new());
-                    if let Some(id) = id {
-                        app.go(id);
-                    }
-                }),
+                on_click = cb(move || net::open_dm(app, &target)),
             )
         }]
-    } else {
-        Vec::new()
-    };
-
-    let presence_label = match status {
-        Status::Online => "Around now",
-        Status::Away => "Away",
-        Status::Offline => "Offline",
     };
 
     ui! {
         Stack(gap = StackGap::Md) {
             Stack(axis = StackAxis::Row, gap = StackGap::Md, align = StackAlign::Start) {
-                Presence(name = name.clone(), size = AvatarSize::Lg, status = status, small = false)
+                Presence(
+                    name = member.display_name.clone(),
+                    id = member.id.clone(),
+                    size = AvatarSize::Lg,
+                    status = Status::Online,
+                    small = false,
+                )
                 Stack(gap = StackGap::Xs) {
-                    Typography(content = name.clone(), kind = typography_kind::H3)
-                    Muted(label = presence_label.to_string(), kind = typography_kind::BodySm)
+                    Typography(content = member.display_name.clone(), kind = typography_kind::H3)
+                    Muted(label = format!("@{}", member.handle), kind = typography_kind::BodySm)
                     Stack(axis = StackAxis::Row, gap = StackGap::Xs, wrap = true) {
                         Badge(
-                            label = if is_mod { "Moderator".to_string() } else { "Member".to_string() },
-                            tone = if is_mod { ToneRef::from(tone::Primary) } else { ToneRef::from(tone::Neutral) },
+                            label = role_label,
+                            tone = if is_privileged {
+                                ToneRef::from(tone::Primary)
+                            } else {
+                                ToneRef::from(tone::Neutral)
+                            },
                             variant = variant::Soft,
                         )
                         mute_tag
-                    }
-                }
-            }
-
-            Stack(gap = StackGap::Xs) {
-                Muted(
-                    label = bio.map(|b| b.where_).unwrap_or("In this space").to_string(),
-                    kind = typography_kind::BodySm,
-                )
-                Muted(
-                    label = format!(
-                        "In this space since {}",
-                        bio.map(|b| b.since).unwrap_or("a while back")
-                    ),
-                    kind = typography_kind::BodySm,
-                )
-            }
-
-            Divider()
-
-            Stack(gap = StackGap::Sm) {
-                SectionLabel(label = "Rooms they're usually in".to_string())
-                view(style = || StyleApplication::new(styles::WrapRow::sheet())) {
-                    no_rooms
-                    for room in rooms, key = room {
-                        Badge(label = room.to_string(), tone = tone::Neutral, variant = variant::Soft)
                     }
                 }
             }
@@ -378,57 +400,6 @@ fn profile_body(app: App) -> Element {
                     variant = variant::Ghost,
                     shape = shape::Md,
                     on_click = cb(move || app.profile.set(String::new())),
-                )
-            }
-        }
-    }
-}
-
-// =============================================================================
-// Remove confirmation
-// =============================================================================
-
-#[component]
-pub fn RemoveConfirm(#[prop(static)] app: App) -> Element {
-    switch(move || app.remove_target.get(), move |_| remove_shell(app))
-}
-
-fn remove_shell(app: App) -> Element {
-    let open = !app.remove_target.get().is_empty();
-    ui! {
-        Modal(
-            open = open,
-            width = 400.0,
-            on_dismiss = Some(cb(move || app.remove_target.set(String::new()))),
-            content = move || remove_body(app),
-        )
-    }
-}
-
-fn remove_body(app: App) -> Element {
-    let name = app.remove_target.get();
-    let first = name.split(' ').next().unwrap_or(&name).to_string();
-
-    ui! {
-        Stack(gap = StackGap::Md) {
-            Typography(content = format!("Remove {name}?"), kind = typography_kind::H3)
-            Muted(label = format!(
-                "Their messages stay where they are. {first} would need a new invite to come back."
-            ))
-            Stack(axis = StackAxis::Row, gap = StackGap::Sm, justify = StackJustify::End) {
-                Button(
-                    label = "Keep them".to_string(),
-                    tone = tone::Neutral,
-                    variant = variant::Ghost,
-                    shape = shape::Md,
-                    on_click = cb(move || app.remove_target.set(String::new())),
-                )
-                Button(
-                    label = "Remove".to_string(),
-                    tone = tone::Danger,
-                    variant = variant::Filled,
-                    shape = shape::Md,
-                    on_click = cb(move || app.confirm_remove()),
                 )
             }
         }

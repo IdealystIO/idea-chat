@@ -1,30 +1,24 @@
 //! The spaces rail — the 70px column that switches between direct messages
 //! and each space, with the theme and settings controls pinned to the bottom.
 //!
-//! Nothing in here is wrapped in a `switch`. The rail's *shape* never changes:
-//! the spaces are a static table, and the only thing that varies is which entry
-//! is selected. So selection is read inside each node's style closure and the
-//! backend re-tints the two affected nodes in place, rather than rebuilding the
-//! column. That is the idiom to reach for first — a `switch` belongs where a
-//! subtree's shape genuinely differs, not where its colours do.
+//! The space list comes from the server now, so this region is wrapped in a
+//! `switch` keyed on the load revision. Selection within it is still read
+//! inside each node's style closure: which space is highlighted is a re-tint
+//! of two nodes, not a different tree.
 
 use icons_lucide::{MESSAGE_CIRCLE, PLUS, SETTINGS, SUN};
 use idea_ui::{tone, variant, IconButton, IconButtonSize, VariantRef};
-use runtime_core::{component, icon, rx, text, ui, Element, StyleApplication};
+use runtime_core::{component, icon, rx, switch, text, ui, Element, StyleApplication};
 
-use crate::model::{App, Scope, SPACES};
+use crate::model::{initials, App, Scope};
+use crate::net;
 use crate::styles;
 use crate::views::bits::{cb, press};
 
 /// One slot in the rail: the selection pip and the round button beside it.
 ///
-/// `selected` is a closure, not a `bool`: it's called inside the pip's style
+/// `selected` is a closure, not a `bool`: it is called inside the pip's style
 /// sink, so the pip grows and shrinks on its own when the selection moves.
-///
-/// The two children are assembled here rather than written as macro siblings —
-/// a childless tag followed by a braced `{ button }` is parsed as that tag's
-/// children block, which nested the button inside the absolutely-positioned
-/// pip and collapsed the slot to its padding.
 fn slot(selected: impl Fn() -> bool + 'static, button: Element) -> Element {
     let pip: Element = runtime_core::view(Vec::new())
         .with_style(move || {
@@ -42,6 +36,49 @@ fn slot(selected: impl Fn() -> bool + 'static, button: Element) -> Element {
 
 #[component]
 pub fn Rail(#[prop(static)] app: App) -> Element {
+    switch(move || app.revision.get(), move |_| rail_body(app))
+}
+
+fn rail_body(app: App) -> Element {
+    let spaces: Vec<(String, String)> =
+        app.spaces.with(|s| s.iter().map(|s| (s.id.clone(), s.name.clone())).collect());
+
+    let buttons: Vec<Element> = spaces
+        .into_iter()
+        .map(|(id, name)| {
+            let for_style = id.clone();
+            let for_click = id.clone();
+            let for_pip = for_style.clone();
+            let pip_active =
+                move || app.space_id.get() == for_pip && app.scope.get() == Scope::Space;
+            let is_active =
+                move || app.space_id.get() == for_style && app.scope.get() == Scope::Space;
+            slot(
+                pip_active,
+                press(
+                    vec![ui! { text(initials(&name)) }],
+                    move || {
+                        StyleApplication::new(styles::RailButton::sheet())
+                            .with("active", if is_active() { "on" } else { "off" })
+                    },
+                    move || net::go_space(app, &for_click),
+                ),
+            )
+        })
+        .collect();
+
+    // Built outside the macro: a braced child whose expression contains a
+    // block confuses the `ui!` parser.
+    let mut space_buttons = buttons;
+    space_buttons.push(press(
+        vec![icon(PLUS).size(20.0).into()],
+        || StyleApplication::new(styles::RailAdd::sheet()),
+        move || {
+            app.minted_invite.set(String::new());
+            app.join_open.set(true);
+        },
+    ));
+
     ui! {
         view(style = || StyleApplication::new(styles::Rail::sheet())) {
             // Direct messages. Its own slot above the rule, because DMs sit
@@ -56,40 +93,15 @@ pub fn Rail(#[prop(static)] app: App) -> Element {
                             StyleApplication::new(styles::RailButton::sheet())
                                 .with("active", if in_dms() { "on" } else { "off" })
                         },
-                        move || app.go_dms(),
+                        move || net::go_dms(app),
                     ),
                 )
             }
 
             view(style = || StyleApplication::new(styles::RailRule::sheet()))
 
-            for space in SPACES {
-                {
-                    let is_active =
-                        move || app.space_id.get() == space.id && app.scope.get() == Scope::Space;
-                    slot(
-                        is_active,
-                        press(
-                            vec![ui! { text(space.initials) }],
-                            move || {
-                                StyleApplication::new(styles::RailButton::sheet())
-                                    .with("active", if is_active() { "on" } else { "off" })
-                            },
-                            move || app.go_space(space.id),
-                        ),
-                    )
-                }
-            }
+            space_buttons
 
-            {
-                press(
-                    vec![icon(PLUS).size(20.0).into()],
-                    || StyleApplication::new(styles::RailAdd::sheet()),
-                    move || app.join_open.set(true),
-                )
-            }
-
-            // Everything below is pinned to the bottom of the rail.
             view(style = || StyleApplication::new(styles::Spring::sheet()))
 
             IconButton(
@@ -104,8 +116,6 @@ pub fn Rail(#[prop(static)] app: App) -> Element {
                 glyph = String::new(),
                 icon = Some(SETTINGS),
                 tone = tone::Neutral,
-                // `rx!`, not a plain `if`: the gear fills when settings are
-                // open, and that's a re-style, not a different button.
                 variant = rx!(if app.settings_open.get() {
                     VariantRef::from(variant::Soft)
                 } else {
@@ -114,7 +124,7 @@ pub fn Rail(#[prop(static)] app: App) -> Element {
                 size = IconButtonSize::Md,
                 on_click = cb(move || {
                     app.settings_open.set(!app.settings_open.get());
-                    app.thread_key.set(String::new());
+                    app.thread_root.set(String::new());
                 }),
             )
         }

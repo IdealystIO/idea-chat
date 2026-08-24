@@ -96,6 +96,29 @@ pub struct Channel {
     pub last_message_id: Option<Uuid>,
 }
 
+/// A member of a space, as the roster needs them.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Member {
+    pub user_id: Uuid,
+    pub handle: String,
+    pub display_name: String,
+    pub role: Role,
+}
+
+/// One conversation in the direct-message list.
+///
+/// Carries the other person and the last line, because that is what the list
+/// renders — resolving either client-side would be a request per row.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DmSummary {
+    pub channel_id: Uuid,
+    pub other_id: Option<Uuid>,
+    pub other_name: Option<String>,
+    pub last_body: Option<String>,
+    pub last_author: Option<String>,
+    pub last_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
