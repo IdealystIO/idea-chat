@@ -4,7 +4,6 @@ pub mod auth;
 pub mod bits;
 pub mod chat;
 pub mod live;
-pub mod mobile;
 pub mod overlays;
 pub mod person_menu;
 pub mod rail;

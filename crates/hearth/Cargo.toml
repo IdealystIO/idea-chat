@@ -45,6 +45,9 @@ runtime-core = { workspace = true, features = ["async-driver"] }
 runtime-vocabulary = { workspace = true }
 runtime-scene = { workspace = true }
 idea-ui = { workspace = true }
+# The responsive shell: one sidebar that is pinned on desktop and a drawer
+# below it, built once. See `client::Shell`.
+idea-ui-nav = { workspace = true }
 icons-lucide = { workspace = true }
 
 [[bin]]

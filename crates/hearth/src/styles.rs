@@ -46,6 +46,20 @@ stylesheet! {
 // Spaces rail — the 70px column of space buttons
 // =============================================================================
 
+// The navigation surface — rail beside room list — as one panel. AppShell
+// pins this in-flow on desktop and slides it in as a drawer below Lg, so it
+// has to fill whatever it is given rather than set a width of its own.
+stylesheet! {
+    pub NavPanel<()> {
+        base(_t) {
+            flex_direction: FlexDirection::Row,
+            width: Length::pct(100.0),
+            height: Length::pct(100.0),
+            overflow: Overflow::Hidden,
+        }
+    }
+}
+
 stylesheet! {
     pub Rail<IdeaThemeRef> {
         base(t) {
@@ -476,6 +490,12 @@ stylesheet! {
             flex_grow: 1.0,
             flex_basis: 0.0,
             min_width: 0.0,
+            // Explicit, not inherited from a flex parent. `AppShell`'s content
+            // wrapper is a plain block — it sets height and the pinned-sidebar
+            // margin but never `display: flex` — so `flex_grow` alone has no
+            // flex context here and the column collapses to its header.
+            height: Length::pct(100.0),
+            min_height: 0.0,
             flex_direction: FlexDirection::Column,
             position: Position::Relative,
         }
@@ -483,6 +503,23 @@ stylesheet! {
 }
 
 // The 56px title bar over the main column.
+// The title block inside the header. `min_width: 0` is what lets it shrink
+// below its content instead of pushing the search and roster buttons off the
+// edge — without it a long channel name wraps the whole bar onto three lines.
+stylesheet! {
+    pub HeaderTitle<()> {
+        base(_t) {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Baseline,
+            gap: 9.0,
+            flex_grow: 1.0,
+            flex_basis: 0.0,
+            min_width: 0.0,
+            overflow: Overflow::Hidden,
+        }
+    }
+}
+
 stylesheet! {
     pub Header<IdeaThemeRef> {
         base(t) {
@@ -491,11 +528,13 @@ stylesheet! {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             gap: t.spacing.sm(),
-            padding_horizontal: t.spacing.lg(),
+            overflow: Overflow::Hidden,
+            padding_horizontal: t.spacing.sm(),
             border_bottom_width: 1.0,
             border_bottom_color: t.color.border(),
             background: t.color.background(),
         }
+        breakpoint md(t) { padding_horizontal: t.spacing.lg() }
         transitions { background: 220ms EaseInOut, border_bottom_color: 220ms EaseInOut }
     }
 }
@@ -542,6 +581,12 @@ stylesheet! {
             flex_grow: 1.0,
             flex_basis: 0.0,
             min_width: 0.0,
+            // Explicit for the same reason as `Main`: on a narrow screen this
+            // sits inside a `Drawer`, whose content wrapper is a plain block,
+            // so `flex_grow` has nothing to grow inside and the transcript
+            // collapses under the composer.
+            height: Length::pct(100.0),
+            min_height: 0.0,
             flex_direction: FlexDirection::Column,
         }
     }
@@ -1048,7 +1093,9 @@ stylesheet! {
 // Overlays — thread, search, menus, cards
 // =============================================================================
 
-// The thread panel, docked over the main column's right edge.
+// The thread panel. Mobile-first: it covers the column, because a 380px dock
+// beside a phone-width conversation leaves neither readable. From `md` up it
+// becomes the dock the design draws, over the main column's right edge.
 stylesheet! {
     pub ThreadPanel<IdeaThemeRef> {
         base(t) {
@@ -1056,11 +1103,14 @@ stylesheet! {
             top: 56.0,
             right: 0.0,
             bottom: 0.0,
-            width: 380.0,
+            width: Length::pct(100.0),
             flex_direction: FlexDirection::Column,
             background: t.color.surface(),
             border_left_width: 1.0,
             border_left_color: t.color.border(),
+        }
+        breakpoint md(_t) {
+            width: 380.0,
         }
     }
 }
@@ -1265,125 +1315,6 @@ stylesheet! {
 }
 
 // =============================================================================
-// Mobile preview
-// =============================================================================
-
-// The phone frame. Its bezel is the one deliberately un-themed colour in
-// the app — a phone's body is a physical object, not a surface.
-stylesheet! {
-    pub Phone<IdeaThemeRef> {
-        base(t) {
-            width: 372.0,
-            height: 756.0,
-            flex_direction: FlexDirection::Column,
-            border_radius: 44.0,
-            border_width: 10.0,
-            border_color: Color("#10151f".into()),
-            background: t.color.background(),
-            overflow: Overflow::Hidden,
-            flex_shrink: 0.0,
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneStatus<IdeaThemeRef> {
-        base(t) {
-            height: 44.0,
-            flex_shrink: 0.0,
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::SpaceBetween,
-            padding_horizontal: 22.0,
-            color: t.color.text(),
-            font_size: 12.0,
-            font_weight: FontWeight::SemiBold,
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneBar<IdeaThemeRef> {
-        base(t) {
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            gap: 10.0,
-            padding_top: 6.0,
-            padding_bottom: 10.0,
-            padding_horizontal: t.spacing.md(),
-            border_bottom_width: 1.0,
-            border_bottom_color: t.color.border(),
-            flex_shrink: 0.0,
-        }
-    }
-}
-
-// The green call affordance in the phone header.
-stylesheet! {
-    pub PhoneCall<IdeaThemeRef> {
-        base(t) {
-            width: 32.0,
-            height: 32.0,
-            flex_shrink: 0.0,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            border_radius: Length::Full,
-            background: t.intent.success.soft_bg(),
-            color: t.intent.success.soft_text(),
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneTabs<IdeaThemeRef> {
-        base(t) {
-            flex_direction: FlexDirection::Row,
-            flex_shrink: 0.0,
-            padding_top: 8.0,
-            padding_bottom: 18.0,
-            border_top_width: 1.0,
-            border_top_color: t.color.border(),
-            background: t.color.surface(),
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneTab<IdeaThemeRef> {
-        base(t) {
-            flex_grow: 1.0,
-            flex_basis: 0.0,
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            gap: 4.0,
-            color: t.color.text_muted(),
-            font_size: 10.0,
-        }
-        variant active {
-            #[default]
-            off(_t) {}
-            on(t) { color: t.color.text() }
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneTabDot<IdeaThemeRef> {
-        base(t) {
-            width: 5.0,
-            height: 5.0,
-            border_radius: Length::Full,
-            background: t.color.border_strong(),
-        }
-        variant active {
-            #[default]
-            off(_t) {}
-            on(t) { background: t.intent.primary.solid_bg() }
-        }
-    }
-}
-
-// =============================================================================
 // Small shared bits
 // =============================================================================
 
@@ -1460,62 +1391,6 @@ stylesheet! {
             flex_direction: FlexDirection::Column,
             width: Length::pct(100.0),
             max_height: 380.0,
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneComposerPad<IdeaThemeRef> {
-        base(t) {
-            flex_shrink: 0.0,
-            padding_vertical: t.spacing.sm(),
-            padding_horizontal: t.spacing.md(),
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneComposer<IdeaThemeRef> {
-        base(t) {
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            gap: 8.0,
-            height: 42.0,
-            padding_left: t.spacing.md(),
-            padding_right: 6.0,
-            border_radius: Length::Full,
-            background: t.color.surface(),
-            border_width: 1.0,
-            border_color: t.color.border(),
-        }
-    }
-}
-
-stylesheet! {
-    pub PhoneSend<IdeaThemeRef> {
-        base(t) {
-            width: 32.0,
-            height: 32.0,
-            flex_shrink: 0.0,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            border_radius: Length::Full,
-            background: t.intent.primary.solid_bg(),
-            color: t.intent.primary.solid_text(),
-        }
-    }
-}
-
-// The note beside the phone. A fixed width, because in a row a column of
-// prose otherwise takes whatever the flex distribution leaves it and wraps to
-// two words a line.
-stylesheet! {
-    pub PhoneAside<IdeaThemeRef> {
-        base(t) {
-            width: 280.0,
-            flex_shrink: 0.0,
-            flex_direction: FlexDirection::Column,
-            gap: t.spacing.md(),
         }
     }
 }

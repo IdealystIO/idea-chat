@@ -249,6 +249,54 @@ const clickText = async (p, label) => {
   check('signing back in restores everything', await has(ana, 'First message in a real database.'));
   await shot(ana, '09-back-in');
 
+  // --- responsiveness ---
+  // The rail and room list are one AppShell sidebar: pinned from Lg up, an
+  // off-canvas drawer below. What is asserted here is geometry, not a class
+  // name — the sidebar is either taking horizontal space from the
+  // conversation or it is not.
+  const railLeft = () => ana.evaluate(() => {
+    const el = [...document.querySelectorAll('div')].find(d => (d.innerText || '').trim().startsWith('TALK'));
+    if (!el) return null;
+    let p = el; for (let i = 0; i < 6 && p.parentElement; i++) p = p.parentElement;
+    return Math.round(el.getBoundingClientRect().x);
+  });
+  const composerTop = () => ana.evaluate(() => {
+    const i = [...document.querySelectorAll('input')].find(x => (x.placeholder || '').startsWith('Message'));
+    return i ? Math.round(i.getBoundingClientRect().y) : null;
+  });
+
+  await ana.setViewportSize({ width: 1440, height: 900 });
+  await ana.waitForTimeout(900);
+  const wideRail = await railLeft();
+  const wideComposer = await composerTop();
+  check('wide: the channel list is on screen', wideRail !== null && wideRail >= 0 && wideRail < 400);
+  check('wide: the composer sits at the bottom', wideComposer > 600, `composer y=${wideComposer}`);
+
+  await ana.setViewportSize({ width: 390, height: 844 });
+  await ana.waitForTimeout(900);
+  const narrowRail = await railLeft();
+  const narrowComposer = await composerTop();
+  check('narrow: the channel list is off-canvas', narrowRail === null || narrowRail < 0,
+    `rail x=${narrowRail}`);
+  check('narrow: the composer still sits at the bottom', narrowComposer > 600,
+    `composer y=${narrowComposer}`);
+  check('narrow: a menu button appears', await has(ana, '#'));
+  await shot(ana, '10-phone');
+
+  // The drawer opens over the conversation and brings the channels back.
+  await ana.mouse.click(24, 27);
+  await ana.waitForTimeout(800);
+  const openedRail = await railLeft();
+  check('narrow: the menu button opens the drawer', openedRail !== null && openedRail >= 0,
+    `rail x=${openedRail}`);
+  await shot(ana, '11-phone-drawer');
+
+  await ana.setViewportSize({ width: 1440, height: 900 });
+  await ana.waitForTimeout(700);
+  check('going back to a wide viewport re-pins the sidebar', (await railLeft()) >= 0);
+  check('and the conversation survived the trip',
+    await has(ana, 'First message in a real database.'));
+
   check('no runtime errors', errors.length === 0, errors.join('; '));
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -379,6 +379,11 @@ pub fn go_channel(app: App, channel_id: &str) {
     // column, so it steps aside — this does not leave the room, which is the
     // whole point of keeping connection and view separate.
     app.stage.set(String::new());
+    // On a phone the room list IS the screen, so picking a channel has to get
+    // out of the way. Pinned, there is nothing to close.
+    if !idea_ui_nav::sidebar_pinned(runtime_core::Breakpoint::Lg) {
+        app.nav_open.set(false);
+    }
     app.thread_root.set(String::new());
     app.search_open.set(false);
     app.draft.set(String::new());

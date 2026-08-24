@@ -49,12 +49,15 @@ pub fn scene_app() -> runtime_core::Element {
 
 #[cfg(not(feature = "server"))]
 mod client {
-    use icons_lucide::{SEARCH, SMARTPHONE, USERS};
+    use icons_lucide::{MENU, SEARCH, USERS};
     use idea_ui::{
         install_idea_theme_reactive, shape, size, tone, typography_kind, variant, Button,
         IconButton, IconButtonSize, VariantRef,
     };
-    use runtime_core::{component, effect, switch, ui, Element, StyleApplication};
+    use idea_ui_nav::{sidebar_pinned, AppShell, Drawer, DrawerSide};
+    use runtime_core::{
+        component, current_breakpoint, effect, switch, ui, Breakpoint, Element, StyleApplication,
+    };
 
     use crate::model::{App, Phase, Scope, View};
     use crate::net;
@@ -65,7 +68,6 @@ mod client {
     use crate::views::bits::{cb, Muted, Strong};
     use crate::views::chat::ChatColumn;
     use crate::views::live::LiveRoom;
-    use crate::views::mobile::MobilePreview;
     use crate::views::overlays::{JoinDialog, ProfileCard, SearchPalette};
     use crate::views::rail::Rail;
     use crate::views::rooms::{PeopleSidebar, RoomList};
@@ -104,13 +106,33 @@ mod client {
     }
 
     /// The signed-in app.
+    ///
+    /// The rail and the room list are one navigation surface, so they are one
+    /// `AppShell` sidebar: pinned in-flow from `Lg` up, an off-canvas drawer
+    /// below it. `AppShell` builds that sidebar exactly once and switches
+    /// between the two arrangements with static breakpoint styling, so
+    /// crossing the threshold never remounts the room list or re-fires what it
+    /// loaded — which is why this is the SDK's job and not a pair of
+    /// hand-rolled columns.
     #[component]
     fn Shell(#[prop(static)] app: App) -> Element {
-        ui! {
-            view(style = || StyleApplication::new(styles::Shell::sheet())) {
+        let sidebar: Vec<Element> = vec![ui! {
+            view(style = || StyleApplication::new(styles::NavPanel::sheet())) {
                 Rail(app = app)
                 RoomList(app = app)
-                MainColumn(app = app)
+            }
+        }];
+
+        ui! {
+            view(style = || StyleApplication::new(styles::Shell::sheet())) {
+                AppShell(
+                    sidebar = sidebar,
+                    is_open = app.nav_open,
+                    pin_at = Breakpoint::Lg,
+                    width = 316.0,
+                ) {
+                    MainColumn(app = app)
+                }
 
                 // The dialogs mount at the root rather than inside whatever
                 // opened them: a `Modal` renders through a portal, and one
@@ -118,7 +140,6 @@ mod client {
                 SearchPalette(app = app)
                 JoinDialog(app = app)
                 ProfileCard(app = app)
-                MobilePreview(app = app)
             }
         }
     }
@@ -163,22 +184,66 @@ mod client {
         }
     }
 
-    /// The chat view plus, when it applies, the people sidebar beside it.
+    /// The chat view plus, when it applies, the people sidebar.
+    ///
+    /// Pinned beside the messages on a wide screen, an edge drawer on a narrow
+    /// one. A 224px column taken out of a phone's width leaves the messages
+    /// unreadable, so below `Xl` the roster overlays instead of competing.
     #[component]
     fn ChatPane(#[prop(static)] app: App) -> Element {
-        switch(move || (app.scope.get(), app.show_people.get()), move |_| chat_pane_body(app))
+        switch(
+            move || {
+                (
+                    app.scope.get(),
+                    app.show_people.get(),
+                    app.roster_open.get(),
+                    current_breakpoint().get(),
+                )
+            },
+            move |_| chat_pane_body(app),
+        )
     }
 
     fn chat_pane_body(app: App) -> Element {
-        let people: Vec<Element> = if views::rooms::people_visible(app) {
-            vec![ui! { PeopleSidebar(app = app) }]
-        } else {
-            Vec::new()
-        };
+        let wanted = views::rooms::people_visible(app);
+        let roomy = sidebar_pinned(Breakpoint::Xl);
+
+        if roomy {
+            let people: Vec<Element> =
+                if wanted { vec![ui! { PeopleSidebar(app = app) }] } else { Vec::new() };
+            return ui! {
+                view(style = || StyleApplication::new(styles::Body::sheet())) {
+                    ChatColumn(app = app)
+                    people
+                }
+            };
+        }
+
+        // Outside a space there is no roster to show, and the header hides its
+        // toggle there — so do not leave a drawer that a stale `show_people`
+        // could still slide open over a DM.
+        if app.scope.get() != Scope::Space {
+            return ui! {
+                view(style = || StyleApplication::new(styles::Body::sheet())) {
+                    ChatColumn(app = app)
+                }
+            };
+        }
+
+        // Narrow: the roster is an overlay on the trailing edge. `show_people`
+        // is the same signal the header toggle already drives, so the control
+        // does not change meaning with the viewport — only its presentation.
+        let panel: Vec<Element> = vec![ui! { PeopleSidebar(app = app) }];
         ui! {
             view(style = || StyleApplication::new(styles::Body::sheet())) {
-                ChatColumn(app = app)
-                people
+                Drawer(
+                    sidebar = panel,
+                    is_open = app.roster_open,
+                    side = DrawerSide::End,
+                    width = 260.0,
+                ) {
+                    ChatColumn(app = app)
+                }
             }
         }
     }
@@ -193,8 +258,12 @@ mod client {
                     app.channel_id.get(),
                     app.settings_open.get(),
                     app.show_people.get(),
+                    app.roster_open.get(),
                     app.revision.get(),
                     app.stage.get(),
+                    // Rebuild when the sidebar pins or unpins: the hamburger
+                    // exists only while it is a drawer.
+                    current_breakpoint().get(),
                 )
             },
             move |_| header_body(app),
@@ -211,7 +280,9 @@ mod client {
         } else {
             app.channel_title()
         };
-        let subtitle = if settings {
+        // A narrow header has room for the name or the explanation, not both.
+        let roomy = sidebar_pinned(Breakpoint::Md);
+        let subtitle = if settings || !roomy {
             String::new()
         } else if on_stage {
             "You're in this room".to_string()
@@ -225,7 +296,28 @@ mod client {
             String::new()
         };
         let in_space = app.scope.get() == Scope::Space && !on_stage;
-        let people_on = app.show_people.get();
+        let people_on = if sidebar_pinned(Breakpoint::Xl) {
+            app.show_people.get()
+        } else {
+            app.roster_open.get()
+        };
+
+        // Only when the sidebar is a drawer — pinned, it is already on screen
+        // and a button to reveal it would be a button that does nothing.
+        let hamburger: Vec<Element> = if sidebar_pinned(Breakpoint::Lg) {
+            Vec::new()
+        } else {
+            vec![ui! {
+                IconButton(
+                    glyph = String::new(),
+                    icon = Some(MENU),
+                    tone = tone::Neutral,
+                    variant = variant::Ghost,
+                    size = IconButtonSize::Md,
+                    on_click = cb(move || app.nav_open.set(!app.nav_open.get())),
+                )
+            }]
+        };
 
         let subtitle_node: Vec<Element> = if subtitle.is_empty() {
             Vec::new()
@@ -246,7 +338,16 @@ mod client {
                         VariantRef::from(variant::Ghost)
                     },
                     size = IconButtonSize::Md,
-                    on_click = cb(move || app.show_people.set(!app.show_people.get())),
+                    on_click = cb(move || {
+                        // Pinned column on a wide screen, overlay on a narrow
+                        // one — the button means "show me who's here" either
+                        // way, but the two are different pieces of state.
+                        if sidebar_pinned(Breakpoint::Xl) {
+                            app.show_people.set(!app.show_people.get());
+                        } else {
+                            app.roster_open.set(!app.roster_open.get());
+                        }
+                    }),
                 )
             }]
         } else {
@@ -255,7 +356,8 @@ mod client {
 
         ui! {
             view(style = || StyleApplication::new(styles::Header::sheet())) {
-                view(style = || StyleApplication::new(styles::MessageHead::sheet())) {
+                hamburger
+                view(style = || StyleApplication::new(styles::HeaderTitle::sheet())) {
                     Strong(label = title, kind = typography_kind::BodyLg)
                     subtitle_node
                 }
@@ -274,18 +376,6 @@ mod client {
                     }),
                 )
                 roster_toggle
-                IconButton(
-                    glyph = String::new(),
-                    icon = Some(SMARTPHONE),
-                    tone = tone::Neutral,
-                    variant = if app.mobile_open.get() {
-                        VariantRef::from(variant::Soft)
-                    } else {
-                        VariantRef::from(variant::Ghost)
-                    },
-                    size = IconButtonSize::Md,
-                    on_click = cb(move || app.mobile_open.set(!app.mobile_open.get())),
-                )
             }
         }
     }

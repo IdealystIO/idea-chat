@@ -227,7 +227,16 @@ pub struct App {
     pub join_value: Signal<String>,
     /// The invite code the join dialog minted, shown to be copied.
     pub minted_invite: Signal<String>,
-    pub mobile_open: Signal<bool>,
+    /// Whether the navigation drawer is open. Only meaningful below the pin
+    /// breakpoint — at desktop widths the rail and room list are pinned and
+    /// this is ignored. See `client::Shell`.
+    pub nav_open: Signal<bool>,
+    /// Whether the roster OVERLAY is open. Distinct from `show_people`, which
+    /// is whether the pinned roster column is shown on a wide screen: a column
+    /// you keep visible and a panel you slide over the conversation are not
+    /// the same preference, and sharing one signal makes the app open a drawer
+    /// on a phone because of a choice made on a desktop.
+    pub roster_open: Signal<bool>,
     pub profile: Signal<String>,
     pub menu: Signal<String>,
     pub remove_target: Signal<String>,
@@ -303,7 +312,8 @@ impl App {
             join_tab: signal(JoinTab::Join),
             join_value: signal(String::new()),
             minted_invite: signal(String::new()),
-            mobile_open: signal(false),
+            nav_open: signal(false),
+            roster_open: signal(false),
             profile: signal(String::new()),
             menu: signal(String::new()),
             remove_target: signal(String::new()),

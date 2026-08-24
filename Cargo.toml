@@ -33,6 +33,7 @@ runtime-core       = { path = "../idealyst-native/crates/runtime/core" }
 runtime-vocabulary = { path = "../idealyst-native/crates/runtime/vocabulary" }
 runtime-scene      = { path = "../idealyst-native/crates/runtime/scene" }
 idea-ui            = { path = "../idealyst-native/crates/ui/idea-ui" }
+idea-ui-nav        = { path = "../idealyst-native/crates/ui/idea-ui-nav" }
 icons-lucide       = { path = "../idealyst-native/crates/ui/icons-lucide" }
 microphone         = { path = "../idealyst-native/crates/sdk/client/microphone" }
 media-stream       = { path = "../idealyst-native/crates/sdk/client/media-stream" }

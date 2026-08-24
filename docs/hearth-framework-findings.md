@@ -256,7 +256,54 @@ bottom of the room list runs past the viewport and the last item —
 `side`/`align` exist as props but are static and there's no measurement
 available to app code, so the app can't choose the right side itself.
 
-## 11. Small things
+## 11. `AppShell` and `Drawer` wrap content in a block, not a flex container
+
+`idea_ui_nav::AppShell` documents its content wrapper as "Main content: fills
+the shell", and it does set `height: 100%`, `min-height: 0`, and the
+pinned-sidebar margin. What it does not set is `display: flex`.
+
+That is invisible until you put a `flex_grow: 1.0` child in it — which is the
+natural thing to do, because every other container in the framework is a flex
+box. The child has no flex context, falls back to content height, and the
+layout collapses in a way that looks like a bug in your own column:
+
+```
+margin-left: 316px   height 900   display: block   <- AppShell content wrapper
+  flex-grow: 1       height  56   display: flex    <- our main column, collapsed
+    header           height  56
+    body             height   0                    <- everything below it gone
+```
+
+The composer ends up under the header and the transcript disappears. `Drawer`'s
+container has the same shape (`position: relative; width/height: 100%`, no
+`display`), so wrapping a flex column in a `Drawer` fails the same way.
+
+The workaround is one line per affected root — an explicit
+`height: Length::pct(100.0)` instead of relying on `flex_grow`:
+
+```rust
+pub Main<()> {
+    base(_t) {
+        flex_grow: 1.0,        // still right when the parent IS a flex box
+        height: Length::pct(100.0),  // ...and this is what actually applies here
+        min_height: 0.0,
+        flex_direction: FlexDirection::Column,
+    }
+}
+```
+
+Both wrappers exist to hold exactly one subtree of app layout, and that subtree
+is almost always a flex column. Adding `display: flex` +
+`flex_direction: column` to those two sheets would make the documented
+behaviour ("fills the shell") true without changing anything for content that
+does not use flex.
+
+Worth noting the failure is silent and viewport-dependent: at desktop widths
+the collapse looked like a styling mistake in the chat column, and it only
+became obviously structural when the same subtree broke inside a `Drawer` at
+phone width.
+
+## 12. Small things
 
 - **A bare `view` is `display: block`, not a flex column.** idea-ui's own
   documentation says containers are "flex-column by default", which is true of
