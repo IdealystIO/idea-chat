@@ -35,7 +35,16 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
         // `in_voice` is here because the tray strip appears and disappears with
         // it — that is structural, not a re-style. Row highlighting still reads
         // it inside each row's own style closure and needs no rebuild.
-        move || (app.revision.get(), app.scope.get(), app.space_id.get(), app.in_voice.get()),
+        move || {
+            (
+                app.revision.get(),
+                app.scope.get(),
+                app.space_id.get(),
+                app.in_voice.get(),
+                app.voice_live.get(),
+                app.voice_error.get(),
+            )
+        },
         move |_| room_list_body(app),
     )
 }
@@ -267,20 +276,33 @@ fn tray(app: App) -> Element {
     } else {
         let room_name = app.voice_room_name();
         let open_room = in_voice.clone();
-        let name_node: Element = text(room_name)
-            .with_style(|| StyleApplication::new(styles::Ellipsis::sheet()))
-            .into();
-        let status: Element = ui! {
-            Muted(label = "Voice connected".to_string(), kind = typography_kind::Overline)
+        let live = app.voice_live.get();
+        let trouble = app.voice_error.get();
+        // Plain: `Ellipsis` on a text node zeroes its height, because its
+        // `flex_basis: 0` applies on the cross axis in a column and the line
+        // box collapses. The wrapper does the clipping instead.
+        let name_node: Element = text(room_name).into();
+        // Says what is true. "Connected" while the microphone is still being
+        // opened is the kind of small lie that makes people talk into a call
+        // that is not carrying them yet.
+        let status: Element = if !trouble.is_empty() {
+            ui! { Strong(label = trouble, kind = typography_kind::Overline) }
+        } else if live {
+            ui! { Muted(label = "Voice connected".to_string(), kind = typography_kind::Overline) }
+        } else {
+            ui! { Muted(label = "Connecting…".to_string(), kind = typography_kind::Overline) }
         };
         vec![ui! {
             view(style = || StyleApplication::new(styles::VoiceStrip::sheet())) {
-                view(style = || StyleApplication::new(styles::Row::sheet())) {
+                view(style = move || {
+                    StyleApplication::new(styles::Meter::sheet())
+                        .with("live", if live { "on" } else { "off" })
+                }) {
                     view(style = || StyleApplication::new(styles::LevelBar::sheet()).with("step", "a"))
                     view(style = || StyleApplication::new(styles::LevelBar::sheet()).with("step", "b"))
                     view(style = || StyleApplication::new(styles::LevelBar::sheet()).with("step", "c"))
                 }
-                view(style = || StyleApplication::new(styles::Ellipsis::sheet())) {
+                view(style = || StyleApplication::new(styles::VoiceStripText::sheet())) {
                     status
                     name_node
                 }

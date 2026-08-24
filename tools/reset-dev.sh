@@ -8,6 +8,8 @@ docker exec idea-chat-postgres-1 psql -U postgres \
   -c "DROP DATABASE IF EXISTS hearth_dev" -c "CREATE DATABASE hearth_dev" >/dev/null
 DATABASE_URL=postgres://postgres:dev@localhost:55432/hearth_dev \
   HEARTH_BIND=127.0.0.1:8090 REDIS_URL=redis://localhost:6399 \
+  VOICE_DIRECTOR_URL=${VOICE_DIRECTOR_URL:-http://127.0.0.1:9100} \
+  VOICE_SHARED_SECRET=${VOICE_SHARED_SECRET:-a-shared-secret-for-local-testing} \
   ./target/debug/server > /tmp/hearth-server.log 2>&1 &
 for _ in $(seq 1 30); do
   grep -q 'Claim it' /tmp/hearth-server.log && { echo "hearth: fresh instance on :8090"; exit 0; }

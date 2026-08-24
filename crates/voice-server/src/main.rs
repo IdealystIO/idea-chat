@@ -31,6 +31,18 @@ async fn main() {
         std::env::var("PUBLIC_URL").unwrap_or_else(|_| format!("ws://127.0.0.1:{port}"));
     let capacity: u32 = std::env::var("CAPACITY").ok().and_then(|c| c.parse().ok()).unwrap_or(0);
 
+    // Say which mode this is, every time. An open relay is a legitimate
+    // configuration for a demo and a serious mistake for a deployment, and the
+    // difference is one unset variable — so it does not get to be quiet.
+    match voice_server::ticket_secret() {
+        Some(_) => println!("[node] room tickets REQUIRED (VOICE_SHARED_SECRET is set)"),
+        None => {
+            println!("[node] VOICE_SHARED_SECRET unset — this node admits ANYONE");
+            println!("       who knows a room name. Correct for the loopback demo;");
+            println!("       set it to the chat server's secret for a real deployment.");
+        }
+    }
+
     let coord = match std::env::var("COORD_BACKEND") {
         Ok(_) => {
             let store: Arc<dyn voice_coord::RoomStore> = director_shared::store_from_env().await;

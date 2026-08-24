@@ -1,0 +1,10 @@
+[package]
+name = "voice-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Room tickets for the voice fleet — an HMAC the chat server mints and a relay node verifies without calling anybody."
+
+[dependencies]
+hmac = "0.12"
+sha2 = "0.10"

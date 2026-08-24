@@ -84,11 +84,36 @@ async fn main() {
         eprintln!("hearth: {} does not exist — run `idealyst build --web` first.", web_dir.display());
     }
 
-    let app: Router = server::router().fallback_service(
+    // Voice, on this origin. A browser on an https page may only open wss, and
+    // the session cookie is scoped to this host — pointing people at a second
+    // origin for audio means a second certificate and a second set of rules to
+    // get wrong. The relay fleet still runs as its own processes; this is only
+    // the door.
+    let voice: Option<Router> = match std::env::var("VOICE_DIRECTOR_URL") {
+        Ok(url) if !url.is_empty() => {
+            if srv::voice_secret().is_none() {
+                eprintln!("hearth: VOICE_DIRECTOR_URL is set but VOICE_SHARED_SECRET is not.");
+                eprintln!("        Voice stays OFF: without the secret this server cannot mint");
+                eprintln!("        the tickets the relays check, and a relay that is not");
+                eprintln!("        checking them admits anyone who can guess a channel id.");
+                None
+            } else {
+                println!("hearth: voice enabled — relays via {url}");
+                Some(voice_server::gateway::voice_routes(url))
+            }
+        }
+        _ => None,
+    };
+
+    let mut app: Router = server::router().fallback_service(
         ServeDir::new(&web_dir)
             .append_index_html_on_directories(true)
             .not_found_service(ServeDir::new(&web_dir)),
     );
+
+    if let Some(voice) = voice {
+        app = app.merge(voice);
+    }
 
     println!("Hearth is running.");
     println!("  UI  → http://{bind}/");

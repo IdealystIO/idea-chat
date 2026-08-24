@@ -18,7 +18,10 @@
 //! here and it is not on the native path at all.
 
 mod playback;
-mod session;
+// Public because Hearth drives the same transport from its own UI: the loop
+// this crate proves is the loop the chat app uses, rather than a second
+// implementation that can drift from it.
+pub mod session;
 
 use idea_ui::{install_idea_theme, light_theme, Stack, StackGap, StackPadding, Typography};
 use runtime_core::{rx, signal, text, ui, Element, Signal};
@@ -168,7 +171,7 @@ pub fn app() -> Element {
 
             let active = active.clone();
             runtime_core::driver::spawn_async(async move {
-                match session::join(&base, &room_name, my_id, capture).await {
+                match session::join(&base, &room_name, my_id, capture, None).await {
                     Ok(sess) => {
                         status.set(format!("Live in '{room_name}' as {my_id} — talk"));
                         *active.borrow_mut() = Some(sess);

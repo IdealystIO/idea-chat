@@ -247,11 +247,18 @@ pub enum Capture {
     Raw,
 }
 
+/// Proof that the caller may be in this room, when the relay asks for it.
+///
+/// `None` is the loopback demo, where the node admits anyone. Hearth always
+/// passes one — see `voice_auth`.
+pub type Ticket<'a> = Option<&'a str>;
+
 pub async fn join(
     director_url: &str,
     room: &str,
     id: u32,
     capture: Capture,
+    ticket: Ticket<'_>,
 ) -> Result<Session, String> {
     reset_stats();
 
@@ -282,7 +289,11 @@ pub async fn join(
 
     // 3. Transport. Binary frames, because the framework's typed Socket is JSON
     //    text on send. This is the seam that becomes QUIC datagrams later.
-    let url = format!("{}/ws?room={}&id={}", node_url.trim_end_matches('/'), room, id);
+    let mut url = format!("{}/ws?room={}&id={}", node_url.trim_end_matches('/'), room, id);
+    if let Some(t) = ticket {
+        url.push_str("&token=");
+        url.push_str(t);
+    }
     let socket = WebSocket::connect(&url)
         .await
         .map_err(|e| format!("connect {url}: {e}"))?;
@@ -327,6 +338,7 @@ pub async fn join(
         socket,
         room.to_string(),
         id,
+        ticket.map(str::to_string),
         sender.clone(),
         peers.clone(),
         closed.clone(),
@@ -346,6 +358,11 @@ fn spawn_receive_loop(
     socket: WebSocket,
     room: String,
     id: u32,
+    // Carried so a redirect can re-present it. The node we are sent to runs the
+    // same check as the one that sent us, so dropping the ticket here turns the
+    // cold-room race into an authentication failure — which would look exactly
+    // like a flaky relay and only ever happen under load.
+    ticket: Option<String>,
     sender: SharedSender,
     peers: Rc<RefCell<HashMap<u32, PeerSink>>>,
     closed: Rc<RefCell<bool>>,
@@ -361,7 +378,12 @@ fn spawn_receive_loop(
                 Pump::Finished => break,
                 Pump::Redirect(url) if hops < 3 => {
                     hops += 1;
-                    let next = format!("{}/ws?room={}&id={}", url.trim_end_matches('/'), room, id);
+                    let mut next =
+                        format!("{}/ws?room={}&id={}", url.trim_end_matches('/'), room, id);
+                    if let Some(t) = ticket.as_deref() {
+                        next.push_str("&token=");
+                        next.push_str(t);
+                    }
                     match WebSocket::connect(&next).await {
                         Ok(s) => {
                             // Swap the publish half so the capture callback

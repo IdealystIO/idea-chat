@@ -181,3 +181,22 @@ pub struct Bootstrap {
     pub dms: Vec<DmDto>,
     pub unread: Vec<String>,
 }
+
+/// Permission to be in one voice room, for a couple of minutes.
+///
+/// The relay fleet knows nothing about spaces or membership, so the chat
+/// server answers the only question it can answer — "may this person be in
+/// this room?" — in a form the relay can check by itself. See `voice_auth`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceTicket {
+    /// Where to reach the fleet. Same-origin under `/_voice` so the session
+    /// cookie's rules and the page's TLS both carry over unchanged.
+    pub relay: String,
+    /// The room name: the channel's id, so a room is exactly a channel.
+    pub room: String,
+    /// This connection's number on the wire. Not the user id — the transport
+    /// wants something small, and the user is named inside the ticket.
+    pub participant: u32,
+    /// The signed ticket, presented on connect.
+    pub token: String,
+}

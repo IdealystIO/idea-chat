@@ -25,9 +25,12 @@ pub mod coord;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+pub mod gateway;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -148,16 +151,53 @@ pub struct NodeState {
 struct JoinParams {
     room: Option<String>,
     id: Option<u32>,
+    /// A `voice_auth` ticket, when the deployment requires one.
+    token: Option<String>,
+}
+
+/// The shared secret tickets are signed with, if this node requires them.
+///
+/// Absent, the node admits anyone who knows a room name — which is what the
+/// two-tab loopback demo needs and what a chat deployment must never run. The
+/// binaries say loudly which mode they came up in; see `main`.
+pub fn ticket_secret() -> Option<Vec<u8>> {
+    match std::env::var("VOICE_SHARED_SECRET") {
+        Ok(s) if !s.is_empty() => Some(s.into_bytes()),
+        _ => None,
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<JoinParams>,
     State(state): State<NodeState>,
-) -> impl IntoResponse {
+) -> Response {
     let room = params.room.unwrap_or_else(|| "lobby".to_string());
     let id = params.id.unwrap_or(0);
-    ws.on_upgrade(move |socket| relay(socket, state, room, id))
+
+    // Checked before the upgrade, so a refusal is an HTTP status the client can
+    // read rather than a socket that opens and then dies for no stated reason.
+    if let Some(secret) = ticket_secret() {
+        let token = params.token.unwrap_or_default();
+        match voice_auth::verify(&secret, &room, &token, now_secs()) {
+            Ok(t) => {
+                println!("[admit] room={room} id={id} user={}", t.user);
+            }
+            Err(e) => {
+                eprintln!("[refuse] room={room} id={id}: {e}");
+                return (StatusCode::FORBIDDEN, "a valid room ticket is required").into_response();
+            }
+        }
+    }
+
+    ws.on_upgrade(move |socket| relay(socket, state, room, id)).into_response()
 }
 
 /// Ask the store whether this node may serve `room`.

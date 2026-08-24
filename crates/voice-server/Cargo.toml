@@ -7,6 +7,7 @@ description = "idea-chat voice fleet: the `voice-node` relay and the `voice-dire
 
 [dependencies]
 voice-proto = { workspace = true }
+voice-auth = { workspace = true }
 voice-coord = { workspace = true }
 async-trait = "0.1"
 # Gateway: HTTP reverse proxy + the client half of the WebSocket proxy.

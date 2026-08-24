@@ -389,6 +389,42 @@ pub async fn delete_message(
     }
 }
 
+/// Ask for permission to join a voice room.
+///
+/// The room is a channel, so the answer is the answer to a question the server
+/// already knows how to ask: can you see this channel? Everything about voice
+/// authorization reduces to that, deliberately — a voice room you may enter is
+/// exactly a channel you may read, and inventing a second rule would be a way
+/// for the two to disagree.
+///
+/// Rate-limited because each call is a fresh couple of minutes of access, and
+/// a client only needs one per join.
+#[server(tags(limit = "30/min"))]
+pub async fn voice_ticket(
+    channel_id: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<VoiceTicket, ServerError> {
+    let me = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    srv::require_channel_access(&db.0, channel, me).await?;
+
+    let Some(secret) = srv::voice_secret() else {
+        return Err(ServerError::failed("voice is not configured on this instance"));
+    };
+
+    Ok(VoiceTicket {
+        relay: srv::voice_relay(),
+        room: channel_id.clone(),
+        // Derived from the user id rather than random, so reconnecting keeps
+        // the same wire identity — the relay suppresses your own frames by it,
+        // and a new number each time would make a stale connection audible to
+        // you as an echo of yourself.
+        participant: srv::participant_number(me),
+        token: voice_auth::mint(&secret, &channel_id, &me.to_string(), srv::now_secs()),
+    })
+}
+
 #[server]
 pub async fn mark_read(
     channel_id: String,

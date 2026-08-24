@@ -46,6 +46,12 @@ x-node: &node
   environment: &node-env
     COORD_BACKEND: postgres
     POSTGRES_URL: postgres://postgres:dev@postgres:5432/voice
+    # Room tickets. Unset — as it is here — a node admits anyone who knows a
+    # room name, which is what the standalone loopback demo needs. A chat
+    # deployment MUST set this to the same value as the chat server's
+    # VOICE_SHARED_SECRET, or the relay will carry audio for rooms nobody
+    # checked. The node says which mode it started in, every time.
+    VOICE_SHARED_SECRET: ${VOICE_SHARED_SECRET:-}
     # 0 = unbounded. Set a real number to make the fleet refuse new rooms
     # before a node degrades; the director then answers 503, which is the
     # signal to scale out.

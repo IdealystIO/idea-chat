@@ -17,7 +17,7 @@ default = []
 # The wasm client build never turns this on, so none of it reaches the bundle.
 server = [
     "server/server", "server-kit/server",
-    "dep:hearth-db", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand", "dep:time",
+    "dep:hearth-db", "dep:voice-auth", "dep:voice-server", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand", "dep:time",
 ]
 
 [dependencies]
@@ -32,6 +32,11 @@ credentials = { workspace = true }
 
 # --- server-only ---
 hearth-db = { workspace = true, optional = true }
+# Mints room tickets the voice relays verify. Server-only: the client is given
+# a ticket, it never makes one.
+voice-auth = { workspace = true, optional = true }
+# The `/_voice` routes, mounted on this origin. Server-only.
+voice-server = { path = "../voice-server", optional = true }
 cache = { workspace = true, optional = true }
 # The Redis client is the app's to provide: `cache` and `server_kit`'s rate
 # limiter both read the one installed here, so they share a connection pool.
@@ -75,6 +80,14 @@ camera     = "Hearth uses your camera when you turn it on in a room."
 # what makes a retry idempotent — so this is a real dependency, not a
 # workaround for one that leaked in from the server half.
 uuid = { version = "1", features = ["v7", "serde", "js"] }
+# Voice, on the one target that can carry it. `voice-client` owns the audio
+# path — capture out, remote PCM in, playback — and Hearth drives it rather
+# than reimplementing it. Web-only because playback on native is the missing
+# `audio-output` SDK (docs/framework-gap-analysis.md §9); the UI degrades to
+# saying so rather than pretending to connect.
+voice-client = { path = "../voice-client" }
+# For the voice stats seam in `voice.rs` — see `install_stats_probe`.
+wasm-bindgen = "0.2"
 # The page origin, so server-fn calls are same-origin and the browser attaches
 # the session cookie; and a clock for optimistic timestamps.
 web-sys = { version = "0.3", features = ["Window", "Location"] }

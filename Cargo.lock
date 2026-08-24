@@ -1274,6 +1274,10 @@ dependencies = [
  "tokio",
  "tower-http 0.6.11",
  "uuid",
+ "voice-auth",
+ "voice-client",
+ "voice-server",
+ "wasm-bindgen",
  "web-sys",
 ]
 
@@ -4143,6 +4147,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "voice-auth"
+version = "0.1.0"
+dependencies = [
+ "hmac 0.12.1",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "voice-client"
 version = "0.1.0"
 dependencies = [
@@ -4192,6 +4204,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tower-http 0.5.2",
+ "voice-auth",
  "voice-coord",
  "voice-proto",
 ]

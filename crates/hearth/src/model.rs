@@ -247,7 +247,15 @@ pub struct App {
     pub cam: Signal<bool>,
     pub sharing: Signal<bool>,
     /// The room you are connected to. Independent of what you are reading.
+    ///
+    /// Set the moment you tap a room — before the socket opens — because a
+    /// room you have joined should look joined. Whether audio is actually
+    /// flowing is `voice_live`, and the tray tells the two apart.
     pub in_voice: Signal<String>,
+    /// Whether the call is actually up: microphone open, socket connected.
+    pub voice_live: Signal<bool>,
+    /// Why the last join failed, if it did.
+    pub voice_error: Signal<String>,
     /// The room whose conference view is open, or empty.
     ///
     /// Separate from [`in_voice`] because being *in* a call and *looking at*
@@ -323,6 +331,8 @@ impl App {
             cam: signal(false),
             sharing: signal(false),
             in_voice: signal(String::new()),
+            voice_live: signal(false),
+            voice_error: signal(String::new()),
             stage: signal(String::new()),
 
             dark: signal(true),
@@ -519,12 +529,29 @@ impl App {
     /// Clicking a voice room joins it immediately — there is no separate
     /// "connect" step and no confirmation. Switching rooms while connected is
     /// just another join.
+    ///
+    /// On web this opens a real microphone and a real socket (see
+    /// `crate::voice`). Everywhere else it moves the UI and says so, because
+    /// playback on native is a framework gap and a call you cannot hear is
+    /// worse than one the app admits it cannot make.
     pub fn join_voice(&self, id: &str) {
-        self.in_voice.set(id.to_string());
+        #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+        crate::voice::join_room(*self, id);
+
+        #[cfg(not(all(not(feature = "server"), target_arch = "wasm32")))]
+        {
+            self.in_voice.set(id.to_string());
+            self.voice_live.set(false);
+            self.voice_error.set("Voice needs the web build for now.".to_string());
+        }
     }
 
     pub fn leave_voice(&self) {
+        #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+        crate::voice::leave_room(*self);
+
         self.in_voice.set(String::new());
+        self.voice_live.set(false);
         self.sharing.set(false);
         self.cam.set(false);
         // Nothing to look at once you are out of the call.

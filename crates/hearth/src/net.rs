@@ -80,7 +80,7 @@ fn forget_token() {
 ///
 /// `Failed` carries copy the server wrote for exactly this; anything else is a
 /// transport or protocol fault, which is not the user's problem to read.
-fn message(e: ServerError) -> String {
+pub fn message(e: ServerError) -> String {
     match e {
         ServerError::Failed(m) => m,
         _ => "Could not reach the server.".to_string(),

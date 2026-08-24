@@ -450,6 +450,41 @@ stylesheet! {
     }
 }
 
+// The two stacked lines in the voice strip: what the call is doing, and which
+// room it is. A column that hugs BOTH lines — `Ellipsis` clips to one here,
+// because its `flex_basis: 0` is read on the cross axis too and the second
+// line lands outside the box.
+stylesheet! {
+    pub VoiceStripText<()> {
+        base(_t) {
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            min_width: 0.0,
+            overflow: Overflow::Hidden,
+        }
+    }
+}
+
+// The three-bar meter. Dimmed until the call is actually up — it is the one
+// piece of the UI claiming something is happening right now, so it must not
+// claim it early.
+stylesheet! {
+    pub Meter<()> {
+        base(_t) {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            gap: 2.0,
+            opacity: 0.35,
+        }
+        variant live {
+            #[default]
+            off(_t) {}
+            on(_t) { opacity: 1.0 }
+        }
+        transitions { opacity: 200ms EaseInOut }
+    }
+}
+
 // One bar of the three-bar "audio is flowing" indicator.
 stylesheet! {
     pub LevelBar<IdeaThemeRef> {

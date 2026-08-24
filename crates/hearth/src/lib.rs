@@ -32,6 +32,11 @@ pub mod styles;
 pub mod theme;
 #[cfg(not(feature = "server"))]
 pub mod views;
+// The live call. Web-only: playback on native is the missing `audio-output`
+// SDK, so rather than shipping a session that captures and never plays, the
+// module is absent and the UI says voice is not available on this build.
+#[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+pub mod voice;
 
 /// SDK-handler registration seam the CLI-generated wrappers invoke after
 /// `runtime_vocabulary::register_builtins`. Hearth renders entirely from
@@ -93,6 +98,9 @@ mod client {
         // Point the server-fn client at the right origin before anything can
         // call it, then ask the server what this instance is.
         net::configure();
+        // Test seam for the voice end-to-end run; see `voice::install_stats_probe`.
+        #[cfg(target_arch = "wasm32")]
+        crate::voice::install_stats_probe();
         effect!({
             net::start(state);
         });

@@ -144,6 +144,55 @@ pub fn refusal_copy(why: InviteRefusal) -> &'static str {
     }
 }
 
+// ===========================================================================
+// Voice
+// ===========================================================================
+
+/// The secret this instance shares with its voice relays.
+///
+/// Absent, voice is off rather than open: an instance that cannot prove who
+/// may enter a room has no business handing out room names. The client is told
+/// plainly, instead of being dropped into a call that will not connect.
+pub fn voice_secret() -> Option<Vec<u8>> {
+    match std::env::var("VOICE_SHARED_SECRET") {
+        Ok(s) if !s.is_empty() => Some(s.into_bytes()),
+        _ => None,
+    }
+}
+
+/// Where clients reach the fleet.
+///
+/// Same-origin by default: the gateway is mounted under `/_voice`, so a
+/// browser on `https://…` gets `wss://` with no configuration, and there is
+/// no second origin for a cookie or a certificate to disagree about.
+pub fn voice_relay() -> String {
+    std::env::var("VOICE_RELAY").unwrap_or_else(|_| "/_voice".to_string())
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A stable small integer for one user, for the transport's sender field.
+///
+/// The wire wants a `u32` and the app has a UUID, so this folds one into the
+/// other. Collisions are possible and survivable: two people who collide in
+/// the same room would each filter the other's frames as their own, which is
+/// a bad call for those two — not a security boundary, which the ticket is.
+/// Zero is avoided because the relay uses it as "unset".
+pub fn participant_number(id: Uuid) -> u32 {
+    let b = id.as_bytes();
+    let n = u32::from_be_bytes([b[8], b[9], b[10], b[11]]);
+    if n == 0 {
+        1
+    } else {
+        n
+    }
+}
+
 pub fn parse_id(s: &str) -> Result<Uuid, ServerError> {
     Uuid::parse_str(s).map_err(|_| ServerError::failed("malformed id"))
 }
