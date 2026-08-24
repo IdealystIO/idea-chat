@@ -270,12 +270,37 @@ enough, and a much larger one.
 | declicker lookahead | 3 ms |
 | leveller | 0 |
 | expander lookahead | 12 ms |
-| **total one-way** | **~45 ms** |
+| fader (receive side) | 0 |
+| **total, this chain** | **~45 ms** |
 
-Against a mouth-to-ear budget of about 150 ms, which leaves room for the
-network. Each stage's lookahead is the price of that stage being correct rather
-than merely present — both were built without one first, and both were
-measurably useless that way.
+Each stage's lookahead is the price of that stage being correct rather than
+merely present — the declicker and the expander were both built without one
+first, and both were measurably useless that way.
+
+**This table is not the call's latency, and an earlier version of it implied
+otherwise.** It was written next to a "150 ms mouth-to-ear budget, which leaves
+room for the network", which is wrong in a way worth correcting rather than
+quietly deleting: the DSP is the *small* half. The buffers on either side of it
+are larger than everything in the table put together, and they are constants in
+the SDK rather than choices this app makes:
+
+| | frames | at 48 kHz |
+| --- | --- | --- |
+| capture block (`microphone`, `SCRIPT_PROCESSOR_BUFFER`) | 4096 | **85.3 ms** |
+| playback ring cushion (`media-stream`, `PRIME_FRAMES`) | 2048 | 42.7 ms |
+| playback render block (`media-stream`, `BUFFER_SIZE`) | 2048 | 42.7 ms |
+| | | **~171 ms** |
+
+So a call with suppression **off** already spends ~171 ms in buffering before
+any network, and one with it on spends ~216 ms. Neither number includes the
+device capture stack, the browser's own AEC/AGC, or the `<audio>` element and
+OS output path, none of which are observable from here.
+
+Two consequences worth stating plainly. The suppression chain is a **26%**
+addition to a fixed cost, not the thing to optimise first. And the capture
+block alone is half the budget — `AudioStreamConfig` exposes sample rate,
+channels, and the three WebRTC flags, but *not* the block size, so an app
+cannot trade it. See `hearth-framework-findings.md`.
 
 ## Levelling
 

@@ -286,6 +286,38 @@ guidance that state read at build time needs a `switch`/`rx!` sink has an
 inverse — state read at build time *forces* a rebuild, and putting it in a sink
 is how you stop paying for one.
 
+## 10c. Audio block sizes are not configurable, and they dominate call latency
+
+Both audio SDKs pick a `ScriptProcessorNode` block size as a private constant:
+
+| | frames | at 48 kHz |
+| --- | --- | --- |
+| `microphone::web::SCRIPT_PROCESSOR_BUFFER` | 4096 | 85.3 ms |
+| `media_stream::audio_web_bridge::BUFFER_SIZE` | 2048 | 42.7 ms |
+| `media_stream::audio_web_bridge::PRIME_FRAMES` | 2048 | 42.7 ms |
+
+Both comments justify the value as "a balance between callback overhead and
+latency", which is the right trade to think about and the wrong place to
+resolve it: the balance depends on what the stream is *for*. A recorder does
+not care about 85 ms. A live call spends more than half its latency budget
+there before a single sample has been processed or sent — the whole neural
+suppression chain, model included, adds 45 ms against the capture block's 85.
+
+`AudioStreamConfig` is the natural home for it. It already carries sample rate,
+channels, and the three WebRTC processing flags; a `with_block_frames(1024)`
+alongside them would let a call trade CPU for ~64 ms and leave every other
+caller on the current default. The `media-stream` side wants the same for its
+render block and its prime cushion.
+
+Worth noting that the 4096 is not obviously deliberate for voice: the capture
+block is 4096 while the playback block is 2048, and nothing in either file
+explains the difference.
+
+(`AudioWorklet` is the standards answer to the overhead half of the trade, and
+both files say so — `ScriptProcessorNode` is used because the worklet's module
+load would make `native_source()` async. That is a real cost and a separate
+argument; a configurable block size is available today either way.)
+
 ## 11. `AppShell` and `Drawer` wrap content in a block, not a flex container
 
 `idea_ui_nav::AppShell` documents its content wrapper as "Main content: fills
