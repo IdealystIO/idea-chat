@@ -1,0 +1,15 @@
+[package]
+name = "idea-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A client/server reducer: the server owns state, a connection serves a snapshot, and events keep both sides in step."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "macros", "rt-multi-thread"] }

@@ -292,13 +292,24 @@ const peakOver = async (pages, ms) => {
     JSON.stringify(await occupantsUnder(w, 'Movie Night')) === '[]',
     JSON.stringify(await occupantsUnder(w, 'Movie Night')));
 
-  // Moving rooms must move you, not clone you.
+  // Moving rooms must move you, not clone you — and the watcher must be told,
+  // not discover it. This used to need an eleven second wait for the next
+  // poll; over the live connection it is an event, so the budget is tight
+  // enough that a poll could not pass it.
+  const movedAt = Date.now();
   await clickRoom(t, 'Movie Night');
-  await t.waitForTimeout(3000);
-  await w.waitForTimeout(11000);
-  const porchNow = await occupantsUnder(w, 'The Porch');
-  const movieNow = await occupantsUnder(w, 'Movie Night');
+  let porchNow = null, movieNow = null;
+  while (Date.now() - movedAt < 4000) {
+    porchNow = await occupantsUnder(w, 'The Porch');
+    movieNow = await occupantsUnder(w, 'Movie Night');
+    if (movieNow && movieNow.includes('Theo Lang')) break;
+    await w.waitForTimeout(50);
+  }
+  const propagated = Date.now() - movedAt;
   console.log(`        after Theo moves — Porch: ${JSON.stringify(porchNow)}  Movie: ${JSON.stringify(movieNow)}`);
+  console.log(`        propagated to another client in ${propagated}ms`);
+  check('another client is told within a moment, not on a poll', propagated < 2500,
+    `took ${propagated}ms`);
   check('moving rooms leaves no ghost in the old one',
     !!porchNow && !porchNow.includes('Theo Lang'), JSON.stringify(porchNow));
   check('and shows them in the new one',

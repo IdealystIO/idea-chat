@@ -53,6 +53,8 @@ idea-ui = { workspace = true }
 # The responsive shell: one sidebar that is pinned on desktop and a drawer
 # below it, built once. See `client::Shell`.
 idea-ui-nav = { workspace = true }
+# The client/server reducer this app is prototyping — see `src/live.rs`.
+idea-state = { workspace = true }
 icons-lucide = { workspace = true }
 
 [[bin]]

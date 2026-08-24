@@ -303,7 +303,40 @@ the collapse looked like a styling mistake in the chat column, and it only
 became obviously structural when the same subtree broke inside a `Drawer` at
 phone width.
 
-## 12. Small things
+## 12. A refused WebSocket handshake throws out of the SDK
+
+Opening a `Socket` whose upgrade is rejected — the ordinary case for a client
+that connects before it has a session — raises an uncaught
+
+```
+Error: closure invoked recursively or after being dropped
+```
+
+from `wasm-bindgen`, once per attempt. `Socket::connect` returns its `Err` as
+well, so the app's own error handling runs; the throw is extra, escapes the
+future, and lands as a page error the app cannot catch.
+
+It is easy to hit and hard to attribute. Anything with a reconnect loop
+retries, so one mistimed connection becomes a stream of identical uncaught
+errors with no stack pointing anywhere in the app. Ours surfaced as a failing
+"no runtime errors" assertion in the browser suite, four occurrences per run,
+long after the code that caused it was written.
+
+Reproduction is one line — `Socket::connect` at an endpoint whose extractor
+refuses, with no cookie:
+
+```
+WebSocket connection to 'ws://…/_srv/_ws/live' failed:
+  HTTP Authentication failed; no valid credentials available
+Uncaught Error: closure invoked recursively or after being dropped
+```
+
+The workaround is to not connect until the connection can succeed, which Hearth
+now does — it waits for `Phase::Ready`. That is the right behaviour anyway, so
+the cost here is only the time spent finding out why. A failed handshake should
+resolve the future with `Err` and drop its callbacks without invoking them.
+
+## 13. Small things
 
 - **A bare `view` is `display: block`, not a flex column.** idea-ui's own
   documentation says containers are "flex-column by default", which is true of

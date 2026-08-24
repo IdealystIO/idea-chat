@@ -20,6 +20,10 @@
 //! the app, a sign-in form, a claim form, or a connection error.
 
 pub mod api;
+// The synchronized world: state, events, actions, and the reducer that folds
+// them. Compiled into BOTH halves on purpose — one definition of what an event
+// means, so a reconnect and a live update agree by construction.
+pub mod live;
 pub mod model;
 // The client half. The server binary never renders, and `net` holds the client
 // stubs of the very fns the server build defines bodies for — so both are off
@@ -37,6 +41,9 @@ pub mod views;
 // module is absent and the UI says voice is not available on this build.
 #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
 pub mod voice;
+// The client's end of the live connection.
+#[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+pub mod livewire;
 
 /// SDK-handler registration seam the CLI-generated wrappers invoke after
 /// `runtime_vocabulary::register_builtins`. Hearth renders entirely from
@@ -102,7 +109,9 @@ mod client {
         #[cfg(target_arch = "wasm32")]
         {
             crate::voice::install_stats_probe();
-            crate::voice::watch_presence(state);
+            // One connection, held for the session. It serves the opening
+            // state and every change after it.
+            crate::livewire::start(state);
         }
         effect!({
             net::start(state);

@@ -7,6 +7,7 @@
 //!
 //! Bodies name `crate::srv`, which exists only under `--features server`.
 
+pub mod socket;
 pub mod types;
 
 use server::{server, ServerError};
@@ -507,79 +508,15 @@ pub async fn bootstrap(
             .into_iter()
             .map(|id| id.to_string())
             .collect(),
-        // Who is in which voice room, for every space this account belongs to.
-        //
-        // Here rather than in a request of its own because it is part of the
-        // state the app opens with, not something it discovers afterwards. Sent
-        // separately it arrived up to a poll late, so a room with people in it
-        // rendered empty first and filled in seconds later.
-        voice: srv::group_presence(db.0.voice_for_user(user).await.map_err(srv::internal)?),
     })
 }
 
 /// Everyone in a space — the roster.
-/// Say that you are in a voice room, or that you still are.
-///
-/// One call for arriving and for staying — they are the same fact, and a
-/// separate join would be a second thing to get out of step. The client sends
-/// this once the audio session is actually up and then on a timer; presence
-/// that were asserted at the moment of *asking* to join would show people in
-/// rooms they never reached.
-///
-/// Rate-limited well above the heartbeat interval, so a client with a slow
-/// clock is not throttled out of existence.
-#[server(tags(limit = "30/min"))]
-pub async fn voice_here(
-    channel_id: String,
-    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
-    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
-) -> Result<(), ServerError> {
-    let user = srv::parse_id(&who.0.user_id)?;
-    let channel = srv::parse_id(&channel_id)?;
-    // The same gate as getting a ticket: presence in a room is only claimable
-    // by someone who could be in it.
-    srv::require_channel_access(&db.0, channel, user).await?;
-    db.0.voice_present(user, channel).await.map_err(srv::internal)
-}
-
-/// Say that you have left.
-///
-/// Best-effort — a tab that dies says nothing, which is what the freshness
-/// window in `voice_in_space` is for. This just makes the common case
-/// immediate instead of taking up to a heartbeat to notice.
-#[server]
-pub async fn voice_gone(
-    channel_id: String,
-    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
-    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
-) -> Result<(), ServerError> {
-    let user = srv::parse_id(&who.0.user_id)?;
-    let channel = srv::parse_id(&channel_id)?;
-    db.0.voice_absent(user, channel).await.map_err(srv::internal)
-}
-
-/// Who is in each of this space's voice rooms.
-///
-/// Answered from the chat server's own state, so it is the same answer whether
-/// or not you are in a call yourself — which is the whole point: you should be
-/// able to see that three people are talking in The Porch before deciding to
-/// join them.
-#[server]
-pub async fn voice_presence(
-    space_id: String,
-    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
-    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
-) -> Result<Vec<RoomPresence>, ServerError> {
-    let user = srv::parse_id(&who.0.user_id)?;
-    let space = srv::parse_id(&space_id)?;
-    // Same gate as the roster: who is in a space's rooms is a member's
-    // business.
-    if db.0.role_in_space(space, user).await.map_err(srv::internal)?.is_none() {
-        return Err(ServerError::failed("no such space"));
-    }
-
-    Ok(srv::group_presence(db.0.voice_in_space(space).await.map_err(srv::internal)?))
-}
+// Voice presence used to live here as three endpoints — say I am here, say I
+// am gone, tell me who is where — polled by every client. It is now the live
+// channel's business (`api::socket`): the connection serves the state and
+// events keep it current. Leaving these behind would mean two ways to reach
+// the same state, which is the drift this whole design exists to avoid.
 
 #[server]
 pub async fn space_members(

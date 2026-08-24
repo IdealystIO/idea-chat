@@ -187,6 +187,7 @@ pub struct InstanceSettings {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct VoiceOccupant {
     pub channel_id: Uuid,
+    pub space_id: Uuid,
     pub user_id: Uuid,
     pub handle: String,
     pub display_name: String,

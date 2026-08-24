@@ -27,6 +27,7 @@ use runtime_core::driver::spawn_async;
 use voice_client::session::{self, Capture, Session};
 
 use crate::api;
+use crate::live::Action;
 use crate::model::App;
 
 /// Wait, on the one target that has voice.
@@ -98,8 +99,8 @@ pub fn join_room(app: App, channel_id: &str) {
                 app.voice_live.set(true);
                 // Only now — presence claimed at the moment of ASKING to join
                 // would show people in rooms they never reached.
+                crate::livewire::send(Action::JoinVoice { channel_id: room.clone() });
                 announce(app, room);
-                refresh_presence(app);
             }
             Err(e) => {
                 app.voice_error.set(e);
@@ -117,12 +118,11 @@ pub fn leave_room(app: App) {
     app.voice_live.set(false);
     app.voice_error.set(String::new());
     if !was.is_empty() {
-        // Best-effort: a tab that dies says nothing, which is what the server's
-        // freshness window is for. This only makes the ordinary case immediate.
-        spawn_async(async move {
-            let _ = api::voice_gone(was).await;
-            refresh_presence(app);
-        });
+        // The server takes them out of the room and tells everyone, including
+        // this client — the sidebar updates because the event arrives, not
+        // because we also changed it locally. One path, so there is nothing to
+        // disagree.
+        crate::livewire::send(Action::LeaveVoice { channel_id: was });
     }
 }
 
@@ -150,9 +150,10 @@ fn announce(app: App, room: String) {
             // never send a single heartbeat. The room is the argument for the
             // same reason: it does not have to be read out of a signal.
             //
-            // A failure is not worth reporting. The next tick tries again, and
-            // if they all fail the server drops us on its own.
-            let _ = api::voice_here(room.clone()).await;
+            // `StillHere` doubles as the join: the server treats presence in a
+            // room it does not already have as an arrival and announces it, so
+            // a reconnect mid-call re-asserts itself without a separate step.
+            crate::livewire::send(Action::StillHere { channel_id: room.clone() });
             sleep(HEARTBEAT_MS).await;
 
             // By now those writes are long committed, so this is a real
@@ -204,78 +205,4 @@ pub fn install_stats_probe() {
     // Handed to JS for the life of the page; dropping it would leave a dead
     // function object behind that throws when called.
     cb.forget();
-}
-
-/// How often to ask who is in this space's rooms.
-///
-/// Polling because there is no live socket yet. Slower than the heartbeat on
-/// purpose: presence is a thing you glance at, and a sidebar that redraws
-/// every second costs more than it tells anyone. When the socket lands, this
-/// becomes a subscription and the interval goes away.
-const PRESENCE_POLL_MS: u32 = 8_000;
-
-/// How long to wait before the first poll.
-///
-/// Short, because the loop starts while the app is still signing in: its first
-/// pass finds no space selected and would otherwise sleep a full interval
-/// before looking again — which is the whole of the "occupants appear a few
-/// seconds late" delay, and it happened on every load.
-const FIRST_POLL_MS: u32 = 400;
-
-/// Keep the sidebar's occupant lists current for whichever space is open.
-///
-/// Started once, lives as long as the page. It follows the selection rather
-/// than being restarted on every change, so switching spaces does not leave a
-/// second poller running against the old one.
-pub fn watch_presence(app: App) {
-    spawn_async(async move {
-        // What we last asked about. A poll every N seconds is fine for "has
-        // anyone moved"; it is far too slow for "I just opened a different
-        // space", which needs an answer now — otherwise the sidebar shows the
-        // previous space's rooms as empty until the timer comes round.
-        let mut asked_about = String::new();
-        loop {
-            let space = app.space_id.get();
-            if space != asked_about {
-                asked_about = space.clone();
-                if !space.is_empty() {
-                    refresh_presence(app);
-                }
-            }
-            if !space.is_empty() {
-                match api::voice_presence(space.clone()).await {
-                    // Only apply if the selection has not moved on while the
-                    // request was in flight — otherwise a slow answer for the
-                    // previous space paints itself over the current one.
-                    Ok(rooms) if app.space_id.get() == space => app.voice_rooms.set(rooms),
-                    Ok(_) => {}
-                    // Silent: presence is decoration on top of a working app,
-                    // and an error banner for it would be noise. The next poll
-                    // tries again.
-                    Err(_) => {}
-                }
-            } else if !app.voice_rooms.with(|r| r.is_empty()) {
-                app.voice_rooms.set(Vec::new());
-            }
-            sleep(if asked_about.is_empty() { FIRST_POLL_MS } else { PRESENCE_POLL_MS }).await;
-        }
-    });
-}
-
-/// Ask again now, without waiting for the next tick.
-///
-/// Called when this client changes a room, so your own avatar appears where
-/// you just went instead of up to a poll later.
-pub fn refresh_presence(app: App) {
-    spawn_async(async move {
-        let space = app.space_id.get();
-        if space.is_empty() {
-            return;
-        }
-        if let Ok(rooms) = api::voice_presence(space.clone()).await {
-            if app.space_id.get() == space {
-                app.voice_rooms.set(rooms);
-            }
-        }
-    });
 }

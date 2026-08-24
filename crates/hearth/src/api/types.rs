@@ -180,11 +180,6 @@ pub struct Bootstrap {
     pub spaces: Vec<SpaceSummary>,
     pub dms: Vec<DmDto>,
     pub unread: Vec<String>,
-    /// Who is in which voice room, across every space you are in.
-    ///
-    /// Part of the opening state rather than a request that follows it: a room
-    /// with people in it should never render empty and then fill in.
-    pub voice: Vec<RoomPresence>,
 }
 
 /// Permission to be in one voice room, for a couple of minutes.
@@ -210,6 +205,11 @@ pub struct VoiceTicket {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoomPresence {
     pub channel_id: String,
+    /// The space the room belongs to.
+    ///
+    /// Carried so a client can scope a room without a second lookup — the same
+    /// reason `live::Event` carries it.
+    pub space_id: String,
     /// The people connected, as the roster already describes them — so the
     /// sidebar draws the same name and the same avatar colour it does
     /// everywhere else, rather than a second rendering of the same person.

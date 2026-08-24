@@ -1271,6 +1271,7 @@ dependencies = [
  "gloo-timers",
  "hearth-db",
  "icons-lucide",
+ "idea-state",
  "idea-ui",
  "idea-ui-nav",
  "idealyst",
@@ -1572,6 +1573,14 @@ dependencies = [
  "zerofrom",
  "zerotrie",
  "zerovec",
+]
+
+[[package]]
+name = "idea-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tokio",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ resolver = "2"
 members = [
     "crates/voice-proto",
     "crates/voice-auth",
+    "crates/idea-state",
     "crates/voice-coord",
     "crates/voice-server",
     "crates/voice-client",
@@ -25,6 +26,7 @@ license = "MIT"
 [workspace.dependencies]
 voice-proto = { path = "crates/voice-proto" }
 voice-auth  = { path = "crates/voice-auth" }
+idea-state  = { path = "crates/idea-state" }
 voice-coord = { path = "crates/voice-coord" }
 hearth-db   = { path = "crates/hearth-db" }
 

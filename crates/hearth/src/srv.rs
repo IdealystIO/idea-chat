@@ -145,6 +145,82 @@ pub fn refusal_copy(why: InviteRefusal) -> &'static str {
 }
 
 // ===========================================================================
+// The live state
+// ===========================================================================
+
+/// The server's projection of [`crate::live::State`], for every space at once.
+///
+/// In memory rather than read from Postgres per connection, because a snapshot
+/// has to be taken synchronously while the connection is being registered —
+/// see `idea_state::Store::snapshot` for why that matters. Durability is still
+/// the database's job: an action writes the row first, and the event that
+/// follows updates this and everyone connected.
+///
+/// Loaded once at boot so a restart does not lose who is in a call.
+pub struct LiveStore {
+    all: std::sync::Mutex<crate::live::State>,
+}
+
+impl LiveStore {
+    /// Start from what the database already knows.
+    pub async fn load(db: &Db) -> LiveStore {
+        let rows = db.voice_everywhere().await.unwrap_or_default();
+        LiveStore { all: std::sync::Mutex::new(crate::live::State { voice: group_presence(rows) }) }
+    }
+}
+
+impl idea_state::Store<crate::live::Live> for LiveStore {
+    /// Only the spaces this connection subscribes to.
+    ///
+    /// The same list drives fan-out, so a client is never shown a room it
+    /// would not be told about again.
+    fn snapshot(&self, _viewer: &str, topics: &[idea_state::Topic]) -> crate::live::State {
+        let all = self.all.lock().expect("live state lock");
+        crate::live::State {
+            voice: all
+                .voice
+                .iter()
+                .filter(|room| topics.contains(&idea_state::Topic::space(&room.space_id)))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// The same reducer the client runs. That is the point of the crate.
+    fn commit(&self, event: &crate::live::Event) {
+        use idea_state::Model;
+        crate::live::Live::apply(&mut self.all.lock().expect("live state lock"), event);
+    }
+}
+
+/// One member of a space, as every surface describes them.
+///
+/// Shared so the sidebar's occupant, the roster's row and a live event are the
+/// same person rendered the same way — a second construction of this would
+/// drift on the first field anybody adds.
+pub async fn member_dto(
+    db: &Db,
+    space: Uuid,
+    user: Uuid,
+) -> Result<crate::api::types::MemberDto, ServerError> {
+    db.members_of(space)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .find(|m| m.user_id == user)
+        .map(|m| crate::api::types::MemberDto {
+            id: m.user_id.to_string(),
+            handle: m.handle,
+            display_name: m.display_name,
+            role: format!("{:?}", m.role).to_lowercase(),
+        })
+        .ok_or_else(|| ServerError::failed("no such member"))
+}
+
+/// The process-wide fan-out point.
+pub type LiveHub = idea_state::hub::Hub<crate::live::Live>;
+
+// ===========================================================================
 // Voice
 // ===========================================================================
 
@@ -211,7 +287,11 @@ pub fn group_presence(rows: Vec<hearth_db::VoiceOccupant>) -> Vec<crate::api::ty
         };
         match out.last_mut() {
             Some(room) if room.channel_id == channel_id => room.people.push(person),
-            _ => out.push(RoomPresence { channel_id, people: vec![person] }),
+            _ => out.push(RoomPresence {
+                channel_id,
+                space_id: occ.space_id.to_string(),
+                people: vec![person],
+            }),
         }
     }
     out

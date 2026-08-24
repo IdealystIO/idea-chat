@@ -24,7 +24,23 @@ impl Db {
     /// fact and a separate "join" would be a second way to get it wrong. One
     /// row per person, so moving to another room moves them — there is no
     /// state in which somebody is in two calls.
-    pub async fn voice_present(&self, user: Uuid, channel: Uuid) -> Result<()> {
+    /// Returns `true` when this is an ARRIVAL — a room they were not already
+    /// in. A heartbeat for the room they are in returns `false`.
+    ///
+    /// The caller needs the difference to decide whether anything is worth
+    /// telling anyone. Publishing on every heartbeat would wake every client
+    /// in the space every fifteen seconds to be told what it already knows.
+    pub async fn voice_present(&self, user: Uuid, channel: Uuid) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        // Read the room they are in before overwriting it. In the same
+        // transaction as the write, so two connections racing to move the same
+        // account cannot both report an arrival.
+        let was: Option<(Uuid,)> =
+            sqlx::query_as("SELECT channel_id FROM voice_presence WHERE user_id = $1 FOR UPDATE")
+                .bind(user)
+                .fetch_optional(&mut *tx)
+                .await?;
+
         sqlx::query(
             "INSERT INTO voice_presence (user_id, channel_id)
              VALUES ($1, $2)
@@ -42,9 +58,10 @@ impl Db {
         )
         .bind(user)
         .bind(channel)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(was.map(|(c,)| c) != Some(channel))
     }
 
     /// Remove `user` from `channel`.
@@ -53,13 +70,15 @@ impl Db {
     /// already moved on from arrives late often enough to matter — a slow
     /// request, a reconnect — and an unscoped delete would take them out of the
     /// call they are actually in.
-    pub async fn voice_absent(&self, user: Uuid, channel: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM voice_presence WHERE user_id = $1 AND channel_id = $2")
+    /// Returns `true` when a row was actually removed — so a caller can avoid
+    /// announcing a departure that did not happen.
+    pub async fn voice_absent(&self, user: Uuid, channel: Uuid) -> Result<bool> {
+        let done = sqlx::query("DELETE FROM voice_presence WHERE user_id = $1 AND channel_id = $2")
             .bind(user)
             .bind(channel)
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(done.rows_affected() > 0)
     }
 
     /// Everyone currently in any voice room of `space`, oldest arrival first.
@@ -68,7 +87,7 @@ impl Db {
     /// this is drawn on every sidebar poll.
     pub async fn voice_in_space(&self, space: Uuid) -> Result<Vec<VoiceOccupant>> {
         Ok(sqlx::query_as::<_, VoiceOccupant>(
-            "SELECT p.channel_id, p.user_id, u.handle, u.display_name, m.role
+            "SELECT p.channel_id, c.space_id, p.user_id, u.handle, u.display_name, m.role
                FROM voice_presence p
                JOIN channels c     ON c.id = p.channel_id
                JOIN users u        ON u.id = p.user_id
@@ -92,7 +111,7 @@ impl Db {
     /// meant to remove.
     pub async fn voice_for_user(&self, user: Uuid) -> Result<Vec<VoiceOccupant>> {
         Ok(sqlx::query_as::<_, VoiceOccupant>(
-            "SELECT p.channel_id, p.user_id, u.handle, u.display_name, m.role
+            "SELECT p.channel_id, c.space_id, p.user_id, u.handle, u.display_name, m.role
                FROM voice_presence p
                JOIN channels c      ON c.id = p.channel_id
                JOIN users u         ON u.id = p.user_id
@@ -103,6 +122,27 @@ impl Db {
               ORDER BY p.channel_id, p.joined_at",
         )
         .bind(user)
+        .bind(PRESENCE_TTL_SECS as f64)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Everyone in any voice room anywhere.
+    ///
+    /// For building the server's in-memory projection at boot. Not reachable
+    /// from any request — a client is only ever shown the spaces it belongs
+    /// to, and the filtering happens above this.
+    pub async fn voice_everywhere(&self) -> Result<Vec<VoiceOccupant>> {
+        Ok(sqlx::query_as::<_, VoiceOccupant>(
+            "SELECT p.channel_id, c.space_id, p.user_id, u.handle, u.display_name, m.role
+               FROM voice_presence p
+               JOIN channels c      ON c.id = p.channel_id
+               JOIN users u         ON u.id = p.user_id
+               JOIN space_members m ON m.space_id = c.space_id AND m.user_id = p.user_id
+              WHERE p.seen_at > now() - make_interval(secs => $1)
+                AND u.deleted_at IS NULL
+              ORDER BY p.channel_id, p.joined_at",
+        )
         .bind(PRESENCE_TTL_SECS as f64)
         .fetch_all(&self.pool)
         .await?)

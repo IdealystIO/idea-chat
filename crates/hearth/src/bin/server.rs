@@ -50,6 +50,11 @@ async fn main() {
     // without a password reset flow that does not exist yet.
     let (bootstrap, claim) = srv::Bootstrap::arm(&db).await.expect("check for accounts");
 
+    // The live state, loaded from the database once so a restart does not
+    // forget who is in a call, then kept current by the events themselves.
+    let hub: srv::LiveHub = idea_state::hub::Hub::new(srv::LiveStore::load(&db).await);
+    server::install_state(hub);
+
     server::install_state(srv::AppDb(db));
     server::install_state(sessions.clone());
     server::install_state(bootstrap);

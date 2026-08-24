@@ -256,6 +256,8 @@ pub struct App {
     pub voice_live: Signal<bool>,
     /// Why the last join failed, if it did.
     pub voice_error: Signal<String>,
+    /// Whether the live connection is up and the state is being kept current.
+    pub live_up: Signal<bool>,
     /// Who is in each of this space's voice rooms, as the server sees it.
     ///
     /// Not derived from `in_voice`: this is everyone, including people in
@@ -339,6 +341,7 @@ impl App {
             in_voice: signal(String::new()),
             voice_live: signal(false),
             voice_error: signal(String::new()),
+            live_up: signal(false),
             voice_rooms: signal(Vec::new()),
             stage: signal(String::new()),
 
