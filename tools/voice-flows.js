@@ -6,7 +6,7 @@
 // the standalone demo never had: the relay refusing anyone who was not let in
 // by the chat server.
 //
-//   bash tools/reset-dev.sh          # hearth on :8090, voice enabled
+//   bash tools/reset-dev.sh          # hearth on :8091, voice enabled
 //   node tools/voice-flows.js
 //
 // Needs the local fleet running with the same VOICE_SHARED_SECRET.
@@ -14,7 +14,7 @@ const { chromium } = require('./node_modules/playwright-core');
 
 const CHROME = process.env.CHROME ||
   '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
-const APP = 'http://localhost:8090';
+const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';
 
@@ -209,6 +209,18 @@ const peakOver = async (pages, ms) => {
   });
   const open = async (handle, password) => {
     const p = await browser.newPage({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+    // Suppression OFF for this suite, pinned before the app boots.
+    //
+    // Not a workaround — the fixture and the feature are incompatible by
+    // design. Chromium's fake microphone emits a pure tone, a tone is not
+    // speech, and removing what is not speech is exactly DeepFilterNet's job.
+    // With suppression on (the default) every peak here reads zero, which is
+    // the suppressor working and this suite's evidence disappearing. What this
+    // suite proves is that the TRANSPORT carries audio; `suppression-flows.js`
+    // is where the suppressor is judged, on assertions built for it.
+    await p.addInitScript(() => {
+      try { localStorage.setItem('hearth.suppress', 'off'); } catch {}
+    });
     await p.goto(APP + '/', { waitUntil: 'load' });
     await p.waitForTimeout(3000);
     await fill(p, 'Handle or email', handle);

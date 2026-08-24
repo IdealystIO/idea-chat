@@ -296,6 +296,52 @@ async fn act(
             leave(db, hub, user, channel_id).await?;
             Ok(None)
         }
+        Action::Speaking { channel_id, speaking } => {
+            let channel = srv::parse_id(channel_id)?;
+            // The same gate as everywhere else, so a client cannot light itself
+            // up in a room it has no business being in.
+            srv::require_channel_access(db, channel, user).await?;
+            let space = db
+                .channel_space(channel)
+                .await
+                .map_err(srv::internal)?
+                .ok_or_else(|| ServerError::failed("that room is not in a space"))?;
+
+            // Not written down anywhere. Talking is true for about a second and
+            // a database row describing it would be stale before it committed;
+            // this is fanned out and forgotten.
+            hub.publish(
+                &idea_state::Topic::space(&space.to_string()),
+                Event::VoiceSpeaking {
+                    space_id: space.to_string(),
+                    channel_id: channel_id.clone(),
+                    user_id: user.to_string(),
+                    speaking: *speaking,
+                },
+            );
+            // Deliberately does NOT claim presence. Saying you are talking is
+            // not the same as saying you are in the room, and treating it as a
+            // heartbeat would let a client hold a lease without ever renewing
+            // it properly.
+            Ok(None)
+        }
+        Action::NotInVoice => {
+            // A refresh, almost always. The client came back and says it is in
+            // no call; the server may still hold a lease from the connection
+            // that went away. Reconciling now is what stops a refreshed tab
+            // from sitting in the sidebar until its lease expires.
+            //
+            // ABANDONED leases only. A second tab is also "in no call", and
+            // taking that at face value would hang up the call running in the
+            // first one — see `Db::ABANDONED_AFTER_SECS`.
+            //
+            // Cheap when there is nothing to do, which is the common case: one
+            // indexed lookup that finds no row.
+            if let Some(room) = db.voice_abandoned_room_of(user).await.map_err(srv::internal)? {
+                leave(db, hub, user, &room.to_string()).await?;
+            }
+            Ok(None)
+        }
     }
 }
 

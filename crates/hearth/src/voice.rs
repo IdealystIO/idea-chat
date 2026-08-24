@@ -331,20 +331,57 @@ fn still_wanted(generation: u64) -> bool {
 /// changes — which for speech is a few times a second, not twenty.
 const ACTIVITY_MS: u32 = 50;
 
-/// Keep `app.speaking` current for as long as the app is running.
+/// How long the answer must stay "not talking" before that is broadcast.
+///
+/// Speech is full of gaps — stops between words, the closure before a plosive —
+/// and an edge-triggered broadcast without this would send several messages a
+/// second and make everyone's sidebar flicker. Going quiet waits; starting does
+/// not, because a late highlight is worse than a slightly long one.
+const QUIET_MS: u32 = 250;
+
+/// Keep `app.speaking` current, and tell the room about it.
 ///
 /// Started once at boot rather than per call: it costs one timer, it reads an
 /// atomic, and a loop that started and stopped with calls would be one more
 /// thing to get wrong at exactly the moment the indicator matters.
+///
+/// Two consumers, deliberately different. Your own highlight comes from the
+/// local signal and is instant. Everyone else's comes from the broadcast and
+/// costs a round trip — which is right, because the alternative is lighting
+/// yourself up from an event you sent, and being 50 ms behind your own voice.
 pub fn watch_activity(app: App) {
     spawn_async(async move {
+        // How long the local answer has been "quiet", in ticks.
+        let mut quiet_for = 0u32;
+        let mut told_the_room = false;
         loop {
             sleep(ACTIVITY_MS).await;
+
             // Only while a call is up. Otherwise the last value from the
             // previous call would sit there lit.
-            let speaking = app.voice_live.get() && session::stats().speaking;
-            if speaking != app.speaking.get() {
-                app.speaking.set(speaking);
+            let room = app.in_voice.get();
+            let live = app.voice_live.get() && !room.is_empty();
+            let now = live && session::stats().speaking;
+
+            if now != app.speaking.get() {
+                app.speaking.set(now);
+            }
+
+            quiet_for = if now { 0 } else { quiet_for.saturating_add(ACTIVITY_MS) };
+
+            // Rising edge immediately; falling edge only once it has held.
+            let should_tell = if now { true } else { quiet_for < QUIET_MS };
+            if live && should_tell != told_the_room {
+                told_the_room = should_tell;
+                crate::livewire::send(Action::Speaking {
+                    channel_id: room,
+                    speaking: should_tell,
+                });
+            } else if !live && told_the_room {
+                // The call ended while we were lit. Nothing will clear it for
+                // us — the server clears on leave, but only if it hears about
+                // it, and this is the cheaper guarantee.
+                told_the_room = false;
             }
         }
     });

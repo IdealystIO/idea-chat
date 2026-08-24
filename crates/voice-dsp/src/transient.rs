@@ -50,9 +50,25 @@
 //! down for several milliseconds. It costs 3 ms of latency, against
 //! DeepFilterNet's 30 ms in the same chain.
 //!
+//! # It ducks the treble, not the whole signal
+//!
+//! A broadband duck is why the reduction has to be capped: 18 dB off
+//! *everything* for 20 ms is a hole in the voice, so the cap trades how much
+//! of the keystroke goes away against how much of the speaker goes with it.
+//!
+//! That trade is mostly avoidable. A key click is nearly all high frequency; a
+//! vowel is nearly all low. So the signal is split at [`Transients::split_hz`]
+//! and the duck is applied almost entirely to the top — which removes most of
+//! the click and leaves the part of the voice that carries it.
+//!
+//! The split is a single one-pole and its complement, so the two halves sum
+//! back to exactly the input when nothing is being ducked. A steeper crossover
+//! would separate the bands better and stop reconstructing perfectly, which is
+//! the wrong trade for a stage that is inaudible most of the time.
+//!
 //! # What this can and cannot do
 //!
-//! It ducks; it does not un-mix. A broadband gain reduction removes a keystroke
+//! It ducks; it does not un-mix. A gain reduction removes a keystroke
 //! cleanly when it lands between words, and dulls ~20 ms of speech when it
 //! lands on top of one. That is the honest limit of doing this in the time
 //! domain, and it is why the reduction is capped rather than total: a capped
@@ -74,12 +90,28 @@ pub struct Transients {
     /// The one that keeps vowels out of it: a 200 Hz tone's first difference is
     /// a couple of percent of its amplitude, a click's is nearly all of it.
     pub brightness: f32,
-    /// The most a transient may be attenuated, in dB. Capped on purpose — see
-    /// the module docs on what an uncapped duck does to a plosive.
+    /// The most a transient may be attenuated, in dB, in the upper band.
+    ///
+    /// Deeper than a broadband duck could afford. Splitting the signal is what
+    /// buys this: 18 dB off everything is a hole in the voice, while 26 dB off
+    /// the treble alone is a keystroke that stops existing and a vowel that
+    /// barely notices. Still capped, because a plosive lives up there too.
     pub max_reduction_db: f32,
     /// How long the duck takes to let go. Long enough to cover a whole click,
     /// short enough not to swallow the word after it.
     pub release_ms: f32,
+    /// Where the signal is split, in Hz. Everything above this takes the full
+    /// duck; below it takes [`low_share`](Self::low_share) of it.
+    ///
+    /// Around the top of the first formant, so vowels sit below and clicks sit
+    /// above.
+    pub split_hz: f32,
+    /// How much of the reduction the low band takes, `0.0..=1.0`.
+    ///
+    /// Not zero: a key bottoming out has a thump as well as a tick, and
+    /// removing only the tick leaves something that still reads as a keystroke.
+    /// Not one either — that is the broadband duck this split exists to avoid.
+    pub low_share: f32,
 }
 
 impl Default for Transients {
@@ -89,8 +121,10 @@ impl Default for Transients {
             brightness: 0.30,
             // Enough that a keystroke stops being the loudest thing in the
             // room, not so much that a `/t/` disappears.
-            max_reduction_db: 18.0,
+            max_reduction_db: 26.0,
             release_ms: 25.0,
+            split_hz: 1200.0,
+            low_share: 0.35,
         }
     }
 }
@@ -130,6 +164,12 @@ pub struct Declicker {
     depth: f32,
     /// Deepest duck applied since the last read. Diagnostics only.
     deepest: f32,
+    /// Lowpass state for the output split. Separate from the detector's
+    /// filters, and running on the DELAYED signal, because it is doing a
+    /// different job at a different point in time.
+    low: f32,
+    split_a: f32,
+    low_share: f32,
     /// The delay line the detector runs ahead of. See [`LOOKAHEAD_MS`].
     delay: Vec<f32>,
     /// Write cursor into `delay`; the sample it points at is the oldest.
@@ -168,6 +208,14 @@ impl Declicker {
             attack_coef: coefficient(0.4, rate),
             release_coef: coefficient(cfg.release_ms, rate),
             depth: 10f32.powf(-cfg.max_reduction_db / 20.0),
+            low: 0.0,
+            // One-pole coefficient for `split_hz`.
+            split_a: if rate == 0 {
+                1.0
+            } else {
+                1.0 - (-2.0 * std::f32::consts::PI * cfg.split_hz / rate as f32).exp()
+            },
+            low_share: cfg.low_share.clamp(0.0, 1.0),
             deepest: 1.0,
             delay: vec![0.0; ((LOOKAHEAD_MS / 1000.0) * rate as f32).max(1.0) as usize],
             cursor: 0,
@@ -235,7 +283,16 @@ impl Declicker {
             let delayed = self.delay[self.cursor];
             self.delay[self.cursor] = x;
             self.cursor = (self.cursor + 1) % self.delay.len();
-            *sample = delayed * self.gain;
+
+            // Split, duck the top, and put it back together. The two halves
+            // sum to `delayed` exactly when `gain` is 1, so a stage that is
+            // doing nothing is bit-for-bit transparent.
+            self.low += self.split_a * (delayed - self.low);
+            let high = delayed - self.low;
+            // Linear rather than proportional-in-dB: a `powf` per sample is a
+            // poor trade for a curve nobody can hear the difference in.
+            let low_gain = 1.0 - (1.0 - self.gain) * self.low_share;
+            *sample = self.low * low_gain + high * self.gain;
         }
     }
 }
@@ -373,6 +430,54 @@ mod tests {
         // And the second half is untouched entirely.
         let late = dbfs(rms(&buf[n / 2..]));
         assert!(late > before - 1.0, "the tail of the fricative is clean: {late:.1} dBFS");
+    }
+
+    // The reason for splitting. A duck used to take the voice down with the
+    // keystroke; now the low band — where the voice is — mostly survives it.
+    #[test]
+    fn the_voice_survives_a_duck_that_the_click_does_not() {
+        let control = voice(0.5, 0.2);
+        let mut typed = control.clone();
+        let at = RATE as usize / 4;
+        click_into(&mut typed, at, 0.6);
+
+        let mut out = typed.clone();
+        Declicker::new(Transients::default(), RATE).process(&mut out);
+
+        // Just after the click has finished but while the gain is still down:
+        // 8 ms to 20 ms past it, inside the 25 ms release.
+        let from = at + RATE as usize * 8 / 1000;
+        let to = at + RATE as usize * 20 / 1000;
+        let want = dbfs(rms(&control[from..to]));
+        let got = dbfs(rms(&out[from..to]));
+        assert!(
+            want - got < 4.0,
+            "the voice keeps most of its level through a duck: {want:.1} -> {got:.1} dBFS",
+        );
+    }
+
+    // The other half of the same claim: with nothing to duck, the split is
+    // bit-for-bit transparent. A crossover that coloured the signal all the
+    // time would be a poor trade for a stage that acts a few times a minute.
+    #[test]
+    fn a_stage_that_is_doing_nothing_changes_nothing() {
+        let source = voice(0.3, 0.2);
+        let mut out = source.clone();
+        // No reduction at all, so the gain never leaves 1.0.
+        Declicker::new(
+            Transients { max_reduction_db: 0.0, ..Transients::default() },
+            RATE,
+        )
+        .process(&mut out);
+
+        let delay = ((LOOKAHEAD_MS / 1000.0) * RATE as f32) as usize;
+        for (i, got) in out.iter().enumerate().skip(delay) {
+            assert!(
+                (got - source[i - delay]).abs() < 1e-6,
+                "sample {i}: {got} vs {}",
+                source[i - delay],
+            );
+        }
     }
 
     #[test]

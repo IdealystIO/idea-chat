@@ -17,7 +17,7 @@
 const { chromium } = require('playwright-core');
 
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
-const APP = process.env.APP || 'http://127.0.0.1:8090';
+const APP = process.env.APP || 'http://127.0.0.1:8091';
 const SECONDS = Number(process.env.SECONDS || 10);
 
 

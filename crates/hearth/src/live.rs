@@ -37,6 +37,14 @@ pub struct Live;
 pub struct State {
     /// Who is in which voice room, across the spaces this connection can see.
     pub voice: Vec<RoomPresence>,
+    /// Who is talking right now, by user id.
+    ///
+    /// Deliberately transient and deliberately *not* persisted: it describes
+    /// this instant, and a snapshot that restored it from anywhere would be
+    /// restoring something that has already stopped being true. A client
+    /// joining mid-sentence learns who is talking within a syllable, from the
+    /// next event.
+    pub speaking: Vec<String>,
     /// Channels with something in them you have not read.
     pub unread: Vec<String>,
     /// The channel this connection is reading, if any.
@@ -70,6 +78,25 @@ pub enum Event {
         /// Who, described exactly as the roster describes them, so the sidebar
         /// draws one person one way everywhere.
         person: MemberDto,
+    },
+    /// Someone started or stopped talking.
+    ///
+    /// The client decides this and says so, rather than the server working it
+    /// out. That is a real trust decision and it is the right one: a lying
+    /// client can make its own name light up, which is a cosmetic lie about
+    /// something everyone in the room can already hear. Detecting it on the
+    /// server would mean decoding and analysing every participant's audio on
+    /// the relay — exactly the per-listener cost the whole design avoids — to
+    /// defend against somebody pretending to talk.
+    VoiceSpeaking {
+        /// The space the room belongs to.
+        space_id: String,
+        /// The room.
+        channel_id: String,
+        /// Who.
+        user_id: String,
+        /// Whether they are talking now.
+        speaking: bool,
     },
     /// Someone is no longer in a voice room.
     VoiceLeft {
@@ -131,10 +158,33 @@ pub enum Action {
         /// The room.
         channel_id: String,
     },
+    /// I am not in any voice room.
+    ///
+    /// Sent on every fresh connection whose client is not in a call, which is
+    /// what a refresh looks like from the server's side: the browser has
+    /// forgotten it was in one, and the presence lease it left behind would
+    /// otherwise keep it drawn in the sidebar until the lease ran out.
+    ///
+    /// Distinct from `LeaveVoice`, which names a room. A reconnecting client
+    /// does not know which room it was in — that is precisely the state it
+    /// lost — so this asks the server to reconcile against whatever it holds.
+    NotInVoice,
     /// Take me out of this voice room.
     LeaveVoice {
         /// The room.
         channel_id: String,
+    },
+    /// I have started or stopped talking.
+    ///
+    /// Edge-triggered: sent when the answer changes, not continuously. A lost
+    /// edge would leave somebody lit, so the server also clears it whenever
+    /// they leave the room, and a reconnecting client re-states it.
+    Speaking {
+        /// The room this is about, so a stale message from a room already left
+        /// cannot light somebody up in the one they are in now.
+        channel_id: String,
+        /// Whether they are talking now.
+        speaking: bool,
     },
     /// I am still in the room I said I was in.
     ///
@@ -177,6 +227,19 @@ impl idea_state::Model for Live {
 
     fn apply(state: &mut State, event: &Event) {
         match event {
+            Event::VoiceSpeaking { user_id, speaking, .. } => {
+                // Only about people actually in a room this connection can
+                // see. Anything else is a highlight with nowhere to land, and
+                // it would accumulate.
+                let present = state
+                    .voice
+                    .iter()
+                    .any(|r| r.people.iter().any(|p| &p.id == user_id));
+                state.speaking.retain(|id| id != user_id);
+                if *speaking && present {
+                    state.speaking.push(user_id.clone());
+                }
+            }
             Event::VoiceJoined { space_id, channel_id, person } => {
                 // One room at a time — the same invariant the database keys on.
                 // Enforced here as well because the client folds events without
@@ -207,6 +270,10 @@ impl idea_state::Model for Live {
                 // An empty room is absence, not a room with nobody in it — so
                 // the two representations cannot disagree.
                 state.voice.retain(|r| !r.people.is_empty());
+                // Somebody who left is not talking. The edge that would have
+                // said so is exactly the one a client leaving mid-word never
+                // gets to send, so it is cleared here instead of waited for.
+                state.speaking.retain(|id| id != user_id);
             }
 
             Event::MessagePosted { channel_id, message } => {
@@ -259,6 +326,10 @@ fn remove_person(state: &mut State, user_id: &str) {
         room.people.retain(|p| p.id != user_id);
     }
     state.voice.retain(|r| !r.people.is_empty());
+    // Somebody who is not in a room is not talking in it. Without this a
+    // speaker who left mid-word stays lit for everyone, forever, because the
+    // edge that would have cleared it was never sent.
+    state.speaking.retain(|id| id != user_id);
 }
 
 #[cfg(test)]
@@ -417,6 +488,71 @@ mod tests {
         );
         assert!(s.transcript.is_empty());
         assert_eq!(s.unread, vec!["random".to_string()]);
+    }
+
+    fn arrive(state: &mut State, id: &str) {
+        Live::apply(state, &joined("s", "porch", id));
+    }
+
+    fn said(state: &mut State, id: &str, speaking: bool) {
+        Live::apply(
+            state,
+            &Event::VoiceSpeaking {
+                space_id: "s".into(),
+                channel_id: "porch".into(),
+                user_id: id.into(),
+                speaking,
+            },
+        );
+    }
+
+    #[test]
+    fn talking_and_stopping_are_one_entry_and_then_none() {
+        let mut s = State::default();
+        arrive(&mut s, "ana");
+        said(&mut s, "ana", true);
+        assert_eq!(s.speaking, vec!["ana".to_string()]);
+        said(&mut s, "ana", false);
+        assert!(s.speaking.is_empty());
+    }
+
+    /// Edge-triggered means repeats are ordinary, not errors — a reconnecting
+    /// client re-states where it is.
+    #[test]
+    fn saying_it_twice_does_not_list_someone_twice() {
+        let mut s = State::default();
+        arrive(&mut s, "ana");
+        said(&mut s, "ana", true);
+        said(&mut s, "ana", true);
+        assert_eq!(s.speaking, vec!["ana".to_string()]);
+    }
+
+    /// The failure this guards: an edge that never arrives because its sender
+    /// left mid-word. Without clearing on departure they stay lit forever.
+    #[test]
+    fn leaving_mid_word_does_not_leave_you_lit() {
+        let mut s = State::default();
+        arrive(&mut s, "ana");
+        arrive(&mut s, "theo");
+        said(&mut s, "ana", true);
+        Live::apply(
+            &mut s,
+            &Event::VoiceLeft {
+                space_id: "s".into(),
+                channel_id: "porch".into(),
+                user_id: "ana".into(),
+            },
+        );
+        assert!(s.speaking.is_empty(), "a departure clears the highlight");
+    }
+
+    /// A highlight for somebody who is not in a room has nowhere to land, and
+    /// would accumulate — one entry per stale message, never removed.
+    #[test]
+    fn somebody_not_in_a_room_is_not_listed_as_talking() {
+        let mut s = State::default();
+        said(&mut s, "stranger", true);
+        assert!(s.speaking.is_empty());
     }
 
     /// The optimistic row and the server's copy share an id, so the arriving

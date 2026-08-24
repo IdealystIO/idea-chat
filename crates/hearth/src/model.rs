@@ -258,6 +258,11 @@ pub struct App {
     pub voice_error: Signal<String>,
     /// Whether the live connection is up and the state is being kept current.
     pub live_up: Signal<bool>,
+    /// Who is talking right now, by user id, as broadcast by their clients.
+    ///
+    /// Your own row does not come from here — see `speaking`, which is local
+    /// and instant. This is everyone else.
+    pub speaking_now: Signal<Vec<String>>,
     /// Who is in each of this space's voice rooms, as the server sees it.
     ///
     /// Not derived from `in_voice`: this is everyone, including people in
@@ -362,6 +367,7 @@ impl App {
             voice_error: signal(String::new()),
             live_up: signal(false),
             voice_rooms: signal(Vec::new()),
+            speaking_now: signal(Vec::new()),
             stage: signal(String::new()),
 
             // Off by default, and this is the honest default rather than a
@@ -370,10 +376,16 @@ impl App {
             // an app was opened.
             // Remembered per device — see `crate::prefs` for why these and not
             // the account-level ones.
+            //
+            // On by default. Suppression is the behaviour people expect from a
+            // call in 2024, and a feature that has to be discovered in Settings
+            // before a call sounds right is a feature most people never get.
+            // The bundle cost of that decision is paid on the first voice join
+            // rather than on every page load — see `views::suppressor`.
             suppress: signal(crate::prefs::parsed(
                 "suppress",
                 voice_dsp::Mode::parse,
-                voice_dsp::Mode::Off,
+                voice_dsp::Mode::Client,
             )),
             sup_transients: signal(crate::prefs::parsed(
                 "suppress.transients",

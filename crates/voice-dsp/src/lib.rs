@@ -172,11 +172,11 @@ impl Strength {
         match self {
             Strength::Off => None,
             Strength::Light => {
-                Some(Transients { onset_ratio: 6.0, max_reduction_db: 10.0, ..base })
+                Some(Transients { onset_ratio: 6.0, max_reduction_db: 14.0, ..base })
             }
             Strength::Standard => Some(base),
             Strength::Strong => {
-                Some(Transients { onset_ratio: 3.0, max_reduction_db: 24.0, ..base })
+                Some(Transients { onset_ratio: 3.0, max_reduction_db: 34.0, low_share: 0.5, ..base })
             }
         }
     }

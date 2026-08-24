@@ -10,14 +10,14 @@
 #   docker exec idea-chat-postgres-1 psql -U postgres -c 'CREATE DATABASE hearth_dev'
 #   cargo build -p hearth --bin server --features server
 #   DATABASE_URL=postgres://postgres:dev@localhost:55432/hearth_dev \
-#     HEARTH_BIND=127.0.0.1:8090 REDIS_URL=redis://localhost:6399 \
+#     HEARTH_BIND=127.0.0.1:8091 REDIS_URL=redis://localhost:6399 \
 #     ./target/debug/server | tee /tmp/hearth-server.log &
 #   bash tools/auth-flows.sh
 #
 # Expects a FRESH database: it claims the instance, which only works once.
 set -u
 
-ORIGIN_URL=${ORIGIN_URL:-http://127.0.0.1:8090}
+ORIGIN_URL=${ORIGIN_URL:-http://127.0.0.1:8091}
 API=${API:-$ORIGIN_URL/_srv}
 LOG=${LOG:-/tmp/hearth-server.log}
 TMP=$(mktemp -d)

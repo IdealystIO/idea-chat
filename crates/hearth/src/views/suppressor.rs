@@ -23,11 +23,16 @@
 //!
 //! # When it mounts
 //!
-//! Whenever the setting is "This device" — call or no call. Choosing it starts
-//! the chunk fetch and the model download immediately, so the first call after
-//! choosing is not also the one that waits for 8 MB of weights. The switch key
-//! includes the call's identity, so starting a call remounts this and engages
-//! the model for that call.
+//! When the setting is "This device" **and** there is a voice room to apply it
+//! to. Not merely when the setting is on, which is what it used to be: on is
+//! now the default, and a boundary that mounted on the setting alone would
+//! download 15 MB of chunk and 8 MB of weights for every visitor who opened the
+//! app — which is the cost the split exists to avoid.
+//!
+//! So the load happens on the first voice join instead, inside a moment that is
+//! already a connection. The switch key carries the call's identity, so moving
+//! between rooms remounts this and engages the model for the call that is
+//! actually up.
 
 use runtime_core::{lazy_component, switch, ui, Element};
 use voice_dsp::Mode;
@@ -45,7 +50,13 @@ pub fn suppression_boundary(app: App) -> Element {
         // or moving to another room — remounts the body and engages the model
         // for the call that is actually up. The chunk is already loaded by
         // then, so a remount costs a model build and nothing else.
-        move || (app.suppress.get() == Mode::Client, app.voice_live.get(), app.in_voice.get()),
+        move || {
+            (
+                app.suppress.get() == Mode::Client && !app.in_voice.get().is_empty(),
+                app.voice_live.get(),
+                app.in_voice.get(),
+            )
+        },
         move |(wanted, live, _room)| {
             if *wanted {
                 ui! { Suppressor(app = app, engage = *live) }

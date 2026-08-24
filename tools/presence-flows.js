@@ -20,7 +20,7 @@ const { chromium } = require('./node_modules/playwright-core');
 
 const CHROME = process.env.CHROME ||
   '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
-const APP = 'http://localhost:8090';
+const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';
 
@@ -128,6 +128,86 @@ const runSocket = (page, room, beats) => page.evaluate(async ({ room, beats }) =
   check('three heartbeats announce nothing at all', r.duringBeats.length === 0,
     JSON.stringify(r.duringBeats));
   check('leaving announces exactly one departure', r.leaves === 1, `got ${r.leaves}`);
+
+  // --- a refresh must not leave you in the room ---
+  //
+  // The socket closing is ambiguous — a closed tab and a blip look identical
+  // from the server — so a disconnect only shortens the presence lease. What
+  // resolves it is the client coming back and saying where it is, which after
+  // a refresh is "nowhere".
+  {
+    const refresh = await page.evaluate(async (room) => {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const url = location.origin.replace(/^http/, 'ws') + '/_srv/_ws/live';
+
+      // A call, on one connection.
+      const first = new WebSocket(url);
+      await new Promise(ok => { first.onopen = ok; });
+      await sleep(400);
+      first.send(JSON.stringify({ t: 'action', a: 'join_voice', channel_id: room }));
+      await sleep(800);
+      first.close();                       // the tab goes away
+
+      // ...and comes back knowing nothing, which is what a refresh is.
+      const second = new WebSocket(url);
+      const frames = [];
+      await new Promise(ok => { second.onopen = ok; });
+      second.onmessage = e => { try { frames.push(JSON.parse(e.data)); } catch {} };
+      const until = Date.now() + 10000;
+      while (!frames.some(f => f.t === 'snapshot') && Date.now() < until) await sleep(50);
+      second.send(JSON.stringify({ t: 'action', a: 'not_in_voice' }));
+      await sleep(1200);
+      second.close();
+      return frames.filter(f => f.t === 'event' && f.event && f.event.e === 'voice_left').length;
+    }, porch.id);
+
+    check('a refreshed tab is taken out of the room it left', refresh === 1,
+      `expected one departure, got ${refresh}`);
+
+    const still = await call('space_members', [space.id], anaJar);
+    check('and saying it twice announces nothing the second time',
+      !!still.body.Ok, JSON.stringify(still.body).slice(0, 120));
+  }
+
+  // --- a second tab must not hang up the first ---
+  //
+  // The regression this exists for. A second tab is also "in no call" and says
+  // so on connect; taken at face value that ends the call running in the first
+  // one. The suite caught it the day `not_in_voice` was written, because the
+  // app page's own socket IS a second connection — but relying on that being
+  // noticed again is not a test.
+  {
+    const leaves = await page.evaluate(async (room) => {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const url = location.origin.replace(/^http/, 'ws') + '/_srv/_ws/live';
+
+      const calling = new WebSocket(url);
+      const frames = [];
+      await new Promise(ok => { calling.onopen = ok; });
+      calling.onmessage = e => { try { frames.push(JSON.parse(e.data)); } catch {} };
+      await sleep(400);
+      calling.send(JSON.stringify({ t: 'action', a: 'join_voice', channel_id: room }));
+      await sleep(800);
+
+      // A second tab, not in a call, and honest about it — while the first is
+      // still holding its lease.
+      const other = new WebSocket(url);
+      await new Promise(ok => { other.onopen = ok; });
+      await sleep(400);
+      other.send(JSON.stringify({ t: 'action', a: 'not_in_voice' }));
+      await sleep(1200);
+
+      const left = frames.filter(f => f.t === 'event' && f.event && f.event.e === 'voice_left').length;
+      calling.send(JSON.stringify({ t: 'action', a: 'leave_voice', channel_id: room }));
+      await sleep(400);
+      calling.close();
+      other.close();
+      return left;
+    }, porch.id);
+
+    check('a second tab does not hang up a call in the first', leaves === 0,
+      `expected no departure while the call was live, got ${leaves}`);
+  }
 
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

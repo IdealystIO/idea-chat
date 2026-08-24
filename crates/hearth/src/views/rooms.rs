@@ -45,10 +45,11 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
                 app.voice_error.get(),
                 // Who is standing in which room — see `App::presence_key`.
                 app.presence_key(),
-                // Whether YOU are talking. A style change, not a structural
-                // one — but the occupant rows are built inside this body, so
-                // the key has to carry it or the highlight never repaints.
+                // Who is talking. A style change, not a structural one — but
+                // the occupant rows are built inside this body, so the key has
+                // to carry it or the highlight never repaints.
                 app.speaking.get(),
+                app.speaking_now.with(|s| s.join(",")),
             )
         },
         move |_| room_list_body(app),
@@ -217,12 +218,16 @@ fn live_room_row(app: App, channel: ChannelSummary) -> Element {
 fn occupant_row(app: App, person: MemberDto) -> Element {
     let id = person.id.clone();
     let me = app.my_id();
-    // Only your own row, for now: the capture chain knows whether YOU are
-    // talking, and nothing tells us that about anyone else. Lighting up the
-    // person whose audio is arriving needs a per-peer meter on the receive
-    // side — worth doing, and a different piece of work.
+    // Your own row comes from the local signal and is instant; everyone
+    // else's comes from what their client broadcast, which costs a round trip.
+    // Lighting yourself up from an event you sent would put you 50 ms behind
+    // your own voice.
     let mine = person.id == me;
-    let speaking = mine && app.speaking.get();
+    let speaking = if mine {
+        app.speaking.get()
+    } else {
+        app.speaking_now.with(|s| s.iter().any(|id| id == &person.id))
+    };
     press(
         vec![
             ui! { Face(name = person.display_name.clone(), id = person.id.clone(), size = AvatarSize::Xs) },

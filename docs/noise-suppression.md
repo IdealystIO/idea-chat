@@ -170,10 +170,16 @@ that only works with suppression on is a speaking light nobody trusts.
 
 | stage | control | default |
 | --- | --- | --- |
-| neural model | Off / This device / Server | Off |
+| neural model | Off / This device / Server | **This device** |
 | keystrokes and knocks | Off / Light / Standard / Strong | Standard |
 | residual hiss | Off / Light / Standard / Strong | Standard |
 | even out volume | On / Off | On |
+
+On by default. Suppression is what people expect a call to do, and a feature
+that has to be found in Settings before a call sounds right is a feature most
+people never get. The bundle cost of that default is paid on the first voice
+join rather than on every page load: the lazy boundary now mounts only when
+there is a room to apply it to.
 
 Presets rather than raw decibels, because the numbers underneath are not
 independent — a declicker's threshold and its depth have to move together or

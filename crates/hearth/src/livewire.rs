@@ -176,8 +176,16 @@ async fn run(app: App, mut sock: Sock) {
                 // a heartbeat for the room we are already in as news to nobody
                 // and publishes nothing — so no tone, and no reshuffled
                 // sidebar.
+                // ...or say that we are in none, which is what a refresh looks
+                // like. The server may still hold the lease from the socket
+                // that went away, and it cannot tell that from a blip on its
+                // own — only the client knows whether it came back into the
+                // same call. Without this, a refreshed tab sits in the sidebar
+                // until its lease expires.
                 let room = app.in_voice.get();
-                if !room.is_empty() {
+                if room.is_empty() {
+                    send(Action::NotInVoice);
+                } else {
                     send(Action::StillHere { channel_id: room });
                 }
             }
@@ -260,6 +268,7 @@ fn announce(app: App, event: &Event) {
 fn take(app: App) -> State {
     State {
         voice: app.voice_rooms.with(|v| v.clone()),
+        speaking: app.speaking_now.with(|s| s.clone()),
         unread: app.unread.with(|u| u.clone()),
         // What this client is reading is a local fact the server is told, not
         // one it is asked for — so it is read from the selection rather than
@@ -272,6 +281,7 @@ fn take(app: App) -> State {
 /// Write it back out.
 fn put(app: App, state: State) {
     app.voice_rooms.set(state.voice);
+    app.speaking_now.set(state.speaking);
     app.unread.set(state.unread);
     if let Some(watching) = state.watching {
         // Only when it still describes what we are looking at: a snapshot for

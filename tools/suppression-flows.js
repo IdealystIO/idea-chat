@@ -18,7 +18,7 @@ const { chromium } = require('./node_modules/playwright-core');
 
 const CHROME = process.env.CHROME ||
   '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
-const APP = 'http://localhost:8090';
+const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';
 // What the node was started with. The refusal path is a real, supported

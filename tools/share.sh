@@ -4,6 +4,10 @@
 #   bash tools/voice-fleet.sh          # relays that check tickets
 #   bash tools/share.sh                # or: DOMAIN=you.ngrok.io bash tools/share.sh
 #
+# The DATABASE IS NOT WIPED. This instance is somebody's account and space; the
+# test suites have their own database and their own port precisely so that
+# running them cannot delete it. See tools/reset-dev.sh.
+#
 # Three things have to agree for this to work, and getting any of them wrong
 # looks like a different bug:
 #
@@ -27,7 +31,13 @@ PUBLIC="https://$DOMAIN"
 
 cargo build -p hearth --bin server --features server -q || exit 1
 
-for p in $(pgrep -x server); do kill "$p" 2>/dev/null; done
+# Only the shared instance. The test suites run their own server on another
+# port with its own database (see reset-dev.sh), and killing that from here
+# would make a `check-all` running alongside look like a flaky suite.
+if [ -f /tmp/hearth-shared.pid ]; then
+  kill "$(cat /tmp/hearth-shared.pid)" 2>/dev/null
+  rm -f /tmp/hearth-shared.pid
+fi
 pkill -x ngrok 2>/dev/null
 sleep 1
 
@@ -37,7 +47,8 @@ REDIS_URL=${REDIS_URL:-redis://localhost:6399} \
 VOICE_DIRECTOR_URL=${VOICE_DIRECTOR_URL:-http://127.0.0.1:9100} \
 VOICE_SHARED_SECRET=${VOICE_SHARED_SECRET:-a-shared-secret-for-local-testing} \
 HEARTH_ORIGINS="$PUBLIC,http://127.0.0.1:$PORT,http://localhost:$PORT" \
-  nohup ./target/debug/server > /tmp/hearth-server.log 2>&1 &
+  nohup ./target/debug/server > /tmp/hearth-shared.log 2>&1 &
+echo $! > /tmp/hearth-shared.pid
 
 for _ in $(seq 1 40); do
   curl -fsS -m 1 "http://127.0.0.1:$PORT/" >/dev/null 2>&1 && break
@@ -49,7 +60,7 @@ nohup ngrok http "$PORT" --domain "$DOMAIN" --log stdout > /tmp/ngrok.log 2>&1 &
 for _ in $(seq 1 40); do
   if curl -fsS -m 3 "$PUBLIC/" >/dev/null 2>&1; then
     echo "Hearth is public at $PUBLIC"
-    grep -E 'Browser origins allowed|voice enabled' /tmp/hearth-server.log | sed 's/^/  /'
+    grep -E 'Browser origins allowed|voice enabled' /tmp/hearth-shared.log | sed 's/^/  /'
     exit 0
   fi
   sleep 0.5

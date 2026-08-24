@@ -5,7 +5,7 @@
 # what that lets you read and write. Run it after auth-flows.sh against the
 # same server — it signs in as the accounts that one created.
 set -u
-ORIGIN_URL=${ORIGIN_URL:-http://127.0.0.1:8090}
+ORIGIN_URL=${ORIGIN_URL:-http://127.0.0.1:8091}
 API=${API:-$ORIGIN_URL/_srv}
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 A=$TMP/ana.jar; T=$TMP/theo.jar

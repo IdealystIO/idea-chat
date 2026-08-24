@@ -16,7 +16,7 @@ const { chromium } = require('playwright-core');
 const fs = require('fs');
 
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
-const APP = process.env.APP || 'http://127.0.0.1:8090';
+const APP = process.env.APP || 'http://127.0.0.1:8091';
 const LOG = process.env.LOG || '/tmp/hearth-server.log';
 const OUT = process.env.OUT || '/tmp/hearth-e2e-';
 const SHOTS = !!process.env.SHOTS;

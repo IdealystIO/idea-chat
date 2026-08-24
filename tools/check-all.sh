@@ -78,7 +78,7 @@ else
   SKIPPED=1
 fi
 
-step "9/9  presence — 5 assertions on the live event stream"
+step "9/9  presence — 8 assertions on the live event stream"
 # Judged by what the server SAYS, not what it stores. The database was
 # perfectly consistent while the server announced a join on every heartbeat,
 # so no assertion about the table could have caught it.
@@ -89,7 +89,7 @@ printf '\n'
 if [ "${SKIPPED:-0}" = 1 ] && [ "$FAILED" = 0 ]; then
   echo "Everything that ran passed — but voice was skipped, see above."
 elif [ "$FAILED" = 0 ]; then
-  echo "Everything passed. The server is still running on :8090 — open it."
+  echo "Everything passed. The test instance is on :8091; the shared one on :8090 is untouched."
 else
   echo "Something failed above."
 fi

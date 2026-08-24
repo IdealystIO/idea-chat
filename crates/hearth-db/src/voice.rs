@@ -100,6 +100,42 @@ impl Db {
         Ok(done.rows_affected() > 0)
     }
 
+    /// How stale a lease must be before a client saying "I am in no call" is
+    /// allowed to clear it.
+    ///
+    /// The subtlety this exists for: a person can have two tabs open. The
+    /// second one is not in a call and says so on connect, and taken at face
+    /// value that would hang up the call running in the first — which is not a
+    /// hypothetical, it is what the presence suite caught the first time this
+    /// was written.
+    ///
+    /// A tab that is genuinely in a call renews every `HEARTBEAT` (15 s), and a
+    /// socket that goes away leaves the lease backdated to expire in
+    /// [`PRESENCE_GRACE_SECS`]. So "older than this" separates the two: a live
+    /// tab is never this stale, and an abandoned lease always is.
+    pub const ABANDONED_AFTER_SECS: i64 = 22;
+
+    /// The room `user` is in and has stopped vouching for, if any.
+    ///
+    /// Answers the question a reconnecting client cannot: after a refresh the
+    /// browser has forgotten it was in a call, but the server has not, and
+    /// somebody has to reconcile the two. See `Action::NotInVoice`.
+    ///
+    /// Deliberately does NOT report a lease somebody is still renewing — see
+    /// [`ABANDONED_AFTER_SECS`].
+    pub async fn voice_abandoned_room_of(&self, user: Uuid) -> Result<Option<Uuid>> {
+        let row: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT channel_id FROM voice_presence
+              WHERE user_id = $1
+                AND seen_at < now() - make_interval(secs => $2)",
+        )
+        .bind(user)
+        .bind(Self::ABANDONED_AFTER_SECS as f64)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(c,)| c))
+    }
+
     /// Stop vouching for `user` without evicting them.
     ///
     /// For the one case that is genuinely ambiguous: their live socket has gone
