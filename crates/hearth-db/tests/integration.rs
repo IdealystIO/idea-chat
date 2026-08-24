@@ -29,8 +29,11 @@ async fn db() -> Option<Db> {
 /// database and run concurrently, so every fixture has to be unique — and
 /// truncating between tests would serialise the suite for no benefit.
 fn unique(prefix: &str) -> String {
+    // The TAIL of a v7 uuid, not the head: the head is the millisecond
+    // timestamp, so two fixtures built in the same millisecond collide — which
+    // is exactly what happens when the suite runs concurrently.
     let id = Uuid::now_v7().simple().to_string();
-    format!("{prefix}{}", &id[..12])
+    format!("{prefix}{}", &id[20..32])
 }
 
 async fn a_user(db: &Db, prefix: &str) -> hearth_db::User {

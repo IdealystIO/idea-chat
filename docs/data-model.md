@@ -625,3 +625,47 @@ count) for disk, or is history kept forever until someone deletes it?
 Or display name only, Discord-style, with a discriminator? Immutable handles
 are simpler to reason about in mentions and audit trails; they're also a thing
 people ask to change.
+
+---
+
+## 13. Implementation notes
+
+Written while building, and correcting the plan where it turned out to be
+wrong.
+
+**Steps 1, 2 and most of 4 are done.** `crates/hearth-db` holds the schema and
+migrations; `crates/hearth/src/api` holds the `#[server]` functions for auth,
+spaces, invites, messages, threads and read state; `crates/hearth/src/bin/server.rs`
+serves them beside the wasm bundle. Verified by 41 database tests and 51 HTTP
+assertions (`tools/auth-flows.sh`, `tools/message-flows.sh`).
+
+**Queries are runtime-checked, not `query!`-checked.** §1 argued for sqlx
+partly on compile-time checking. Using it needs either a live database at
+build time or a committed `.sqlx` regenerated on every query edit, and
+requiring Postgres to `cargo build` is a poor trade for a project whose pitch
+is easy self-hosting. The integration suite covers it against a real Postgres
+instead, and catches what a macro cannot — constraint behaviour, transaction
+semantics, the invite race.
+
+**Step 3 is bigger than this document implied.** It claimed the client would
+"light up with real data and no view changes". That is not true: `model.rs`
+keys people by display name, holds `&'static str` throughout, and gives
+messages positional identity. Moving to server data changes those types, and
+every view that reads through the accessors sees the change. It is a real
+refactor of the client, not a wiring step, and it should be planned as one.
+
+**Two bugs worth recording**, both found by driving the real thing rather than
+by unit tests:
+
+- The handle-shape constraint rejected its own tombstone, so account deletion
+  was impossible. The rule now applies to live accounts only.
+- Case-insensitive login silently didn't work. sqlx binds `&str` as `text`, so
+  `citext = $1` resolves to a case-*sensitive* comparison — while the unique
+  index still folded case on write. `ANA` could not register while `ana`
+  existed, and could not sign in either. Any test that only checked uniqueness
+  would have passed.
+
+A third, caught by the HTTP harness: the first account was created, then
+promoted to instance admin, and its session was built from the pre-promotion
+value — so the first admin was an admin in the database and a plain member in
+their own session until they signed out and back in.

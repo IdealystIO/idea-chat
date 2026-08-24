@@ -97,6 +97,22 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Message {
+    pub id: Uuid,
+    pub channel_id: Uuid,
+    /// `None` once the author's account is deleted — the message survives, the
+    /// attribution becomes "Deleted account".
+    pub author_id: Option<Uuid>,
+    pub thread_root_id: Option<Uuid>,
+    /// `None` once tombstoned.
+    pub body: Option<String>,
+    pub reply_count: i32,
+    pub created_at: OffsetDateTime,
+    pub edited_at: Option<OffsetDateTime>,
+    pub deleted_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Invite {
     pub code: String,
     pub space_id: Uuid,

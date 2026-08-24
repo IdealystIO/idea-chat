@@ -204,9 +204,80 @@ pub async fn require_moderator(db: &Db, space: Uuid, user: Uuid) -> Result<Role,
     }
 }
 
+/// Refuse unless this user can see this channel.
+///
+/// The same "not found" answer for a channel that doesn't exist and one the
+/// caller can't see. Distinguishing them would let anyone probe for the
+/// existence of private channels by id.
+pub async fn require_channel_access(db: &Db, channel: Uuid, user: Uuid) -> Result<(), ServerError> {
+    if db.can_see_channel(channel, user).await.map_err(internal)? {
+        Ok(())
+    } else {
+        Err(ServerError::failed("no such channel"))
+    }
+}
+
+/// Does this user moderate the space this channel belongs to?
+///
+/// Answers `false` for a DM, which has no space and therefore no moderator —
+/// nobody outranks anybody in a conversation between two people.
+pub async fn moderates_channel(db: &Db, channel: Uuid, user: Uuid) -> bool {
+    let Ok(Some(space)) = db.channel_space(channel).await else { return false };
+    matches!(db.role_in_space(space, user).await, Ok(Some(role)) if role.moderates())
+}
+
 // ===========================================================================
 // Projections
 // ===========================================================================
+
+/// Turn stored messages into wire messages, resolving author names.
+///
+/// Names are looked up once per distinct author for the whole batch rather
+/// than once per message: a page of fifty messages from four people is four
+/// lookups, not fifty.
+pub async fn to_dtos(db: &Db, rows: Vec<hearth_db::Message>) -> Result<Vec<MessageDto>, ServerError> {
+    use std::collections::HashMap;
+
+    let mut names: HashMap<Uuid, String> = HashMap::new();
+    for row in &rows {
+        if let Some(author) = row.author_id {
+            if !names.contains_key(&author) {
+                let name = db
+                    .user(author)
+                    .await
+                    .map_err(internal)?
+                    .map(|u| u.display_name)
+                    .unwrap_or_else(|| "Deleted account".into());
+                names.insert(author, name);
+            }
+        }
+    }
+
+    Ok(rows
+        .into_iter()
+        .map(|m| MessageDto {
+            id: m.id.to_string(),
+            channel_id: m.channel_id.to_string(),
+            author_name: m
+                .author_id
+                .and_then(|a| names.get(&a).cloned())
+                .unwrap_or_else(|| "Deleted account".into()),
+            author_id: m.author_id.map(|a| a.to_string()),
+            thread_root_id: m.thread_root_id.map(|t| t.to_string()),
+            body: m.body,
+            reply_count: m.reply_count,
+            created_at: rfc3339(m.created_at),
+            edited_at: m.edited_at.map(rfc3339),
+        })
+        .collect())
+}
+
+/// Timestamps go over the wire as RFC 3339 and are formatted client-side —
+/// "9:02" depends on the reader's timezone, which the server does not know.
+fn rfc3339(t: time::OffsetDateTime) -> String {
+    t.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| t.unix_timestamp().to_string())
+}
 
 pub fn to_me(user: User) -> Me {
     Me {

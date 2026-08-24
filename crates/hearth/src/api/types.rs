@@ -113,3 +113,39 @@ pub struct ChannelSummary {
     pub name: String,
     pub topic: Option<String>,
 }
+
+/// One message, as the client sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageDto {
+    pub id: String,
+    pub channel_id: String,
+    /// Display name at read time. Denormalised into the response rather than
+    /// looked up client-side: the client would otherwise need every author's
+    /// profile before it could render a single line.
+    pub author_name: String,
+    pub author_id: Option<String>,
+    pub thread_root_id: Option<String>,
+    /// `None` once deleted; the client renders a tombstone rather than
+    /// dropping the row, so replies keep their parent.
+    pub body: Option<String>,
+    pub reply_count: i32,
+    /// RFC 3339. Formatted client-side, because "9:02" is a presentation
+    /// decision that depends on the reader's timezone and locale.
+    pub created_at: String,
+    pub edited_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Page {
+    pub messages: Vec<MessageDto>,
+    /// Pass back as `before` to fetch older. `None` means this is the top.
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Catchup {
+    pub messages: Vec<MessageDto>,
+    /// Too much happened while you were away — refetch this channel cold
+    /// rather than trusting this partial list to be contiguous.
+    pub truncated: bool,
+}

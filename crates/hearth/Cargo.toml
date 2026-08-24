@@ -17,7 +17,7 @@ default = []
 # The wasm client build never turns this on, so none of it reaches the bundle.
 server = [
     "server/server", "server-kit/server",
-    "dep:hearth-db", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand",
+    "dep:hearth-db", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand", "dep:time",
 ]
 
 [dependencies]
@@ -37,6 +37,7 @@ cache = { workspace = true, optional = true }
 # limiter both read the one installed here, so they share a connection pool.
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"], optional = true }
 rand = { version = "0.8", optional = true }
+time = { version = "0.3", features = ["formatting"], optional = true }
 axum = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"], optional = true }
 tower-http = { version = "0.6", features = ["fs"], optional = true }

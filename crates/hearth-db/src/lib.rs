@@ -34,6 +34,7 @@ pub mod credentials;
 pub mod ids;
 pub mod instance;
 pub mod invites;
+pub mod messages;
 pub mod model;
 pub mod spaces;
 pub mod users;

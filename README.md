@@ -24,10 +24,30 @@ threads, search, a person menu and profile, moderation, seven settings, and a
 device preview.
 
 ```bash
+# the client, on its fixture
 cd crates/hearth && idealyst build --web
 idealyst serve dist/web --port 8099
-node tools/hearth-ui.js          # 28 assertions through a real browser
+node tools/hearth-ui.js          # 31 assertions through a real browser
+
+# the server: schema, auth, messages
+docker exec idea-chat-postgres-1 psql -U postgres -c 'CREATE DATABASE hearth_dev'
+cargo build -p hearth --bin server --features server
+DATABASE_URL=postgres://postgres:dev@localhost:55432/hearth_dev \
+  HEARTH_BIND=127.0.0.1:8090 REDIS_URL=redis://localhost:6399 \
+  ./target/debug/server | tee /tmp/hearth-server.log &
+bash tools/auth-flows.sh         # 34 assertions
+bash tools/message-flows.sh      # 17 assertions
 ```
+
+The server prints a one-time claim link on first boot; there is no default
+account and no default password. `crates/hearth-db` carries the schema and its
+own suite (`HEARTH_TEST_DATABASE_URL=… cargo test -p hearth-db`), which skips
+rather than fails when no database is configured.
+
+**The client still runs on its fixture** — the server is real and tested, but
+`model.rs` is not yet reading from it. That wiring is the next step, and it is
+a larger change than the build order implied: see the note at the end of
+[docs/data-model.md](docs/data-model.md).
 
 Everything visible is a stock `idea-ui` component; the ~60 `stylesheet!` blocks
 in `styles.rs` are layout only. Light/dark and four accents are token values —

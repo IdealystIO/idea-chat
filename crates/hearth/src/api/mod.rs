@@ -240,3 +240,187 @@ pub async fn create_space(
         .map_err(srv::user_facing)?;
     srv::space_summary(&db.0, space, hearth_db::Role::Owner).await
 }
+
+// ===========================================================================
+// Messages
+// ===========================================================================
+
+/// One page of a channel, oldest-first, newest page by default.
+#[server]
+pub async fn channel_page(
+    channel_id: String,
+    before: Option<String>,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<Page, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    srv::require_channel_access(&db.0, channel, user).await?;
+
+    let before = before.as_deref().map(srv::parse_id).transpose()?;
+    let rows = db.0.channel_page(channel, before).await.map_err(srv::internal)?;
+    // The cursor is the OLDEST id on this page, because paging goes backwards
+    // through history. `None` when the page came back short — there is no
+    // more, so the client can stop asking.
+    let next_cursor = (rows.len() as i64 == hearth_db::messages::PAGE)
+        .then(|| rows.first().map(|m| m.id.to_string()))
+        .flatten();
+    Ok(Page { messages: srv::to_dtos(&db.0, rows).await?, next_cursor })
+}
+
+/// Everything in a channel after a cursor — the reconnect path.
+#[server]
+pub async fn channel_since(
+    channel_id: String,
+    after: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<Catchup, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    srv::require_channel_access(&db.0, channel, user).await?;
+    let (rows, truncated) = db
+        .0
+        .channel_since(channel, srv::parse_id(&after)?)
+        .await
+        .map_err(srv::internal)?;
+    Ok(Catchup { messages: srv::to_dtos(&db.0, rows).await?, truncated })
+}
+
+/// A thread: its root message, then its replies.
+#[server]
+pub async fn thread(
+    root_id: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<Vec<MessageDto>, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let rows = db.0.thread(srv::parse_id(&root_id)?).await.map_err(srv::internal)?;
+    // Authorize against the channel the thread lives in, not the thread id —
+    // otherwise holding a message id would be enough to read a private one.
+    let Some(first) = rows.first() else { return Ok(Vec::new()) };
+    srv::require_channel_access(&db.0, first.channel_id, user).await?;
+    srv::to_dtos(&db.0, rows).await
+}
+
+/// Post a message. `id` is minted by the client, which makes a retry
+/// idempotent — resending after a dropped connection returns the message
+/// already stored rather than posting a second one.
+#[server(tags(limit = "30/min"))]
+pub async fn send_message(
+    id: String,
+    channel_id: String,
+    body: String,
+    thread_root_id: Option<String>,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<MessageDto, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    srv::require_channel_access(&db.0, channel, user).await?;
+    let root = thread_root_id.as_deref().map(srv::parse_id).transpose()?;
+
+    let message = db
+        .0
+        .post_message(srv::parse_id(&id)?, channel, user, &body, root)
+        .await
+        .map_err(srv::user_facing)?;
+    Ok(srv::to_dtos(&db.0, vec![message]).await?.remove(0))
+}
+
+#[server(tags(limit = "30/min"))]
+pub async fn edit_message(
+    id: String,
+    body: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<MessageDto, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let message = db
+        .0
+        .edit_message(srv::parse_id(&id)?, user, &body)
+        .await
+        .map_err(srv::user_facing)?;
+    Ok(srv::to_dtos(&db.0, vec![message]).await?.remove(0))
+}
+
+/// Delete a message. Its author always may; a moderator may delete anything in
+/// a space they moderate.
+#[server(tags(limit = "30/min"))]
+pub async fn delete_message(
+    id: String,
+    channel_id: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<(), ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    srv::require_channel_access(&db.0, channel, user).await?;
+
+    let as_moderator = srv::moderates_channel(&db.0, channel, user).await;
+    let done = db
+        .0
+        .delete_message(srv::parse_id(&id)?, user, as_moderator)
+        .await
+        .map_err(srv::internal)?;
+    if done {
+        Ok(())
+    } else {
+        Err(ServerError::failed("that message is not yours to delete"))
+    }
+}
+
+#[server]
+pub async fn mark_read(
+    channel_id: String,
+    upto: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<(), ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    srv::require_channel_access(&db.0, channel, user).await?;
+    db.0.mark_read(user, channel, srv::parse_id(&upto)?).await.map_err(srv::internal)
+}
+
+/// Which of my channels have something new — the unread pips, in one call.
+#[server]
+pub async fn unread(
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<Vec<String>, ServerError> {
+    let user = srv::parse_id(&who.0.user_id)?;
+    Ok(db
+        .0
+        .unread_channels(user)
+        .await
+        .map_err(srv::internal)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect())
+}
+
+/// Open (or find) the conversation with someone.
+#[server]
+pub async fn open_dm(
+    with_user: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+) -> Result<ChannelSummary, ServerError> {
+    let me = srv::parse_id(&who.0.user_id)?;
+    let them = srv::parse_id(&with_user)?;
+    let channel = db.0.dm_between(me, them).await.map_err(srv::user_facing)?;
+    let name = db
+        .0
+        .user(them)
+        .await
+        .map_err(srv::internal)?
+        .map(|u| u.display_name)
+        .unwrap_or_else(|| "Deleted account".into());
+    Ok(ChannelSummary {
+        id: channel.id.to_string(),
+        kind: "dm".into(),
+        name,
+        topic: None,
+    })
+}
