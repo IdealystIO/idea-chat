@@ -81,24 +81,26 @@ pub enum JoinTab {
 pub enum ChannelKind {
     Text,
     Voice,
-    Video,
-    Share,
     Dm,
 }
 
 impl ChannelKind {
+    /// `video` and `share` fold into `Voice` rather than being their own
+    /// kinds. A voice room *is* the video room: camera and screen share are
+    /// things you turn on once you are in one, not separate places to be. The
+    /// old values are still accepted because databases written before this
+    /// change still hold them — they now render as the voice rooms they always
+    /// effectively were.
     pub fn parse(s: &str) -> ChannelKind {
         match s {
-            "voice" => ChannelKind::Voice,
-            "video" => ChannelKind::Video,
-            "share" => ChannelKind::Share,
+            "voice" | "video" | "share" => ChannelKind::Voice,
             "dm" => ChannelKind::Dm,
             _ => ChannelKind::Text,
         }
     }
 
-    /// Text channels and DMs render the message column; the three live kinds
-    /// render the room.
+    /// Text channels and DMs render the message column; voice rooms are not a
+    /// place the main column ever goes — see [`App::view`].
     pub fn is_chat(self) -> bool {
         matches!(self, ChannelKind::Text | ChannelKind::Dm)
     }
@@ -235,7 +237,15 @@ pub struct App {
     pub deafened: Signal<bool>,
     pub cam: Signal<bool>,
     pub sharing: Signal<bool>,
+    /// The room you are connected to. Independent of what you are reading.
     pub in_voice: Signal<String>,
+    /// The room whose conference view is open, or empty.
+    ///
+    /// Separate from [`in_voice`] because being *in* a call and *looking at*
+    /// one are different things. Joining a room must not move you off the
+    /// channel you were reading, so connection lives in `in_voice` and the
+    /// main column only shows the call when you explicitly ask for it.
+    pub stage: Signal<String>,
 
     // --- preferences ---
     pub dark: Signal<bool>,
@@ -303,6 +313,7 @@ impl App {
             cam: signal(false),
             sharing: signal(false),
             in_voice: signal(String::new()),
+            stage: signal(String::new()),
 
             dark: signal(true),
             accent: signal(crate::theme::Accent::Indigo),
@@ -349,13 +360,18 @@ impl App {
         self.channel_kind() == ChannelKind::Dm
     }
 
+    /// What the main column shows.
+    ///
+    /// A voice room is never selected as the channel — clicking one connects
+    /// you and leaves you where you were reading. The call view appears only
+    /// when [`stage`](Self::stage) is set, which takes an explicit second act.
     pub fn view(&self) -> View {
         if self.settings_open.get() {
             View::Settings
-        } else if self.channel_kind().is_chat() {
-            View::Chat
-        } else {
+        } else if !self.stage.get().is_empty() {
             View::Live
+        } else {
+            View::Chat
         }
     }
 
@@ -488,18 +504,49 @@ impl App {
         self.menu.set(String::new());
     }
 
+    /// Connect to a room. Does not move you off what you are reading.
+    ///
+    /// Clicking a voice room joins it immediately — there is no separate
+    /// "connect" step and no confirmation. Switching rooms while connected is
+    /// just another join.
+    pub fn join_voice(&self, id: &str) {
+        self.in_voice.set(id.to_string());
+    }
+
     pub fn leave_voice(&self) {
         self.in_voice.set(String::new());
         self.sharing.set(false);
+        self.cam.set(false);
+        // Nothing to look at once you are out of the call.
+        self.stage.set(String::new());
     }
 
-    pub fn toggle_voice(&self) {
-        let here = self.channel_id.get();
-        if self.in_voice.get() == here {
-            self.leave_voice();
-        } else {
-            self.in_voice.set(here);
+    /// Open the call view in the main column.
+    pub fn open_stage(&self, id: &str) {
+        self.stage.set(id.to_string());
+        self.settings_open.set(false);
+    }
+
+    /// Put the main column back on the channel you were reading.
+    pub fn close_stage(&self) {
+        self.stage.set(String::new());
+    }
+
+    /// The name of the room you are connected to, for the tray and the header.
+    pub fn voice_room_name(&self) -> String {
+        let id = self.in_voice.get();
+        if id.is_empty() {
+            return String::new();
         }
+        self.spaces
+            .with(|spaces| {
+                spaces
+                    .iter()
+                    .flat_map(|s| s.channels.iter())
+                    .find(|c| c.id == id)
+                    .map(|c| c.name.clone())
+            })
+            .unwrap_or_default()
     }
 
     /// Deafening implies muting: you cannot be in a conversation you cannot
@@ -616,5 +663,8 @@ mod tests {
     fn an_unknown_channel_kind_degrades_to_text() {
         assert_eq!(ChannelKind::parse("holodeck"), ChannelKind::Text);
         assert_eq!(ChannelKind::parse("voice"), ChannelKind::Voice);
+        // Rooms written before video and share were folded into voice.
+        assert_eq!(ChannelKind::parse("video"), ChannelKind::Voice);
+        assert_eq!(ChannelKind::parse("share"), ChannelKind::Voice);
     }
 }

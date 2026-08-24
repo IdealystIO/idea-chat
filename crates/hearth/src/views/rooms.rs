@@ -3,7 +3,7 @@
 //! pinned to the bottom of both.
 
 use icons_lucide::{
-    HASH, HEADPHONES, HEADPHONE_OFF, MIC, MIC_OFF, MONITOR_UP, PLUS, VIDEO,
+    HASH, HEADPHONES, HEADPHONE_OFF, MAXIMIZE, MIC, MIC_OFF, PHONE_OFF, PLUS,
 };
 use idea_ui::{
     shape, size, tone, typography_kind, variant, AvatarSize, Button, IconButton, IconButtonSize,
@@ -23,8 +23,6 @@ use crate::views::person_menu::person_target;
 fn channel_icon(kind: ChannelKind) -> IconData {
     match kind {
         ChannelKind::Voice => HEADPHONES,
-        ChannelKind::Video => VIDEO,
-        ChannelKind::Share => MONITOR_UP,
         _ => HASH,
     }
 }
@@ -34,7 +32,10 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
     // Keyed on the loaded data and the scope — which channel is *selected* is
     // a re-style read inside each row's own style closure, not a rebuild.
     switch(
-        move || (app.revision.get(), app.scope.get(), app.space_id.get()),
+        // `in_voice` is here because the tray strip appears and disappears with
+        // it — that is structural, not a re-style. Row highlighting still reads
+        // it inside each row's own style closure and needs no rebuild.
+        move || (app.revision.get(), app.scope.get(), app.space_id.get(), app.in_voice.get()),
         move |_| room_list_body(app),
     )
 }
@@ -134,7 +135,12 @@ fn channel_row(app: App, channel: ChannelSummary) -> Element {
     )
 }
 
-/// A voice, video or share room.
+/// A voice room. Clicking it connects you, there and then.
+///
+/// It deliberately does not navigate. Joining a call is not a reason to stop
+/// reading what you were reading — the tray at the bottom becomes the whole
+/// interface for being in a room, and the call view is a second, optional act
+/// (click the room again once connected).
 ///
 /// The occupant list under each room is not wired yet — presence needs the
 /// live socket, and inventing a roster from nothing would be a lie the UI
@@ -142,8 +148,11 @@ fn channel_row(app: App, channel: ChannelSummary) -> Element {
 fn live_room_row(app: App, channel: ChannelSummary) -> Element {
     let id = channel.id.clone();
     let for_style = id.clone();
+    let for_click = id.clone();
     let kind = ChannelKind::parse(&channel.kind);
-    let active = move || app.channel_id.get() == for_style && !app.settings_open.get();
+    // Highlighted because you are IN it, not because it is selected — a voice
+    // room is never the selected channel.
+    let active = move || app.in_voice.get() == for_style;
 
     let label: Element = text(channel.name.clone())
         .with_style(|| StyleApplication::new(styles::RoomRowName::sheet()))
@@ -159,7 +168,14 @@ fn live_room_row(app: App, channel: ChannelSummary) -> Element {
             StyleApplication::new(styles::RoomRow::sheet())
                 .with("active", if active() { "on" } else { "off" })
         },
-        move || net::go_channel(app, &id),
+        move || {
+            // Already in it? Then this click means "show me the call".
+            if app.in_voice.get() == for_click {
+                app.open_stage(&for_click);
+            } else {
+                app.join_voice(&for_click);
+            }
+        },
     )
 }
 
@@ -243,16 +259,20 @@ fn tray(app: App) -> Element {
     let deafened = app.deafened.get();
     let mic_on = app.mic.get();
 
+    // The strip IS the call interface. Everything you routinely do while in a
+    // room — see that you are connected, open the call, leave — is here, so
+    // that joining never has to take over the main column.
     let strip: Vec<Element> = if in_voice.is_empty() {
         Vec::new()
     } else {
-        let room_name = app
-            .space()
-            .and_then(|s| s.channels.iter().find(|c| c.id == in_voice).map(|c| c.name.clone()))
-            .unwrap_or_default();
+        let room_name = app.voice_room_name();
+        let open_room = in_voice.clone();
         let name_node: Element = text(room_name)
             .with_style(|| StyleApplication::new(styles::Ellipsis::sheet()))
             .into();
+        let status: Element = ui! {
+            Muted(label = "Voice connected".to_string(), kind = typography_kind::Overline)
+        };
         vec![ui! {
             view(style = || StyleApplication::new(styles::VoiceStrip::sheet())) {
                 view(style = || StyleApplication::new(styles::Row::sheet())) {
@@ -260,13 +280,24 @@ fn tray(app: App) -> Element {
                     view(style = || StyleApplication::new(styles::LevelBar::sheet()).with("step", "b"))
                     view(style = || StyleApplication::new(styles::LevelBar::sheet()).with("step", "c"))
                 }
-                name_node
-                Button(
-                    label = "Leave".to_string(),
+                view(style = || StyleApplication::new(styles::Ellipsis::sheet())) {
+                    status
+                    name_node
+                }
+                IconButton(
+                    glyph = String::new(),
+                    icon = Some(MAXIMIZE),
+                    tone = tone::Neutral,
+                    variant = variant::Ghost,
+                    size = IconButtonSize::Sm,
+                    on_click = cb(move || app.open_stage(&open_room)),
+                )
+                IconButton(
+                    glyph = String::new(),
+                    icon = Some(PHONE_OFF),
                     tone = tone::Danger,
                     variant = variant::Ghost,
-                    size = size::Sm,
-                    shape = shape::Md,
+                    size = IconButtonSize::Sm,
                     on_click = cb(move || app.leave_voice()),
                 )
             }

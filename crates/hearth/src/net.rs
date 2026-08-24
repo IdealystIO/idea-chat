@@ -375,6 +375,10 @@ pub fn go_channel(app: App, channel_id: &str) {
     }
     app.last_chat.set(id.clone());
     app.settings_open.set(false);
+    // Reading something is a request to see it. The call view occupies the same
+    // column, so it steps aside — this does not leave the room, which is the
+    // whole point of keeping connection and view separate.
+    app.stage.set(String::new());
     app.thread_root.set(String::new());
     app.search_open.set(false);
     app.draft.set(String::new());

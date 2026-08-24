@@ -145,6 +145,31 @@ const clickText = async (p, label) => {
   check('and went to the server', calls.includes('send_message'));
   await shot(ana, '04-posted');
 
+  // --- voice rooms: joining must not move you ---
+  // The whole contract of a voice room is that it is a connection, not a
+  // destination. Clicking one while reading #general has to leave you reading
+  // #general, with the tray showing you are connected; the call view is a
+  // second, deliberate click.
+  await clickText(ana, 'The Porch');
+  await ana.waitForTimeout(700);
+  check('joining a room connects you', await has(ana, 'Voice connected'));
+  check('and does not move you off the channel you were reading',
+    (await has(ana, 'First message in a real database.')) && !(await has(ana, 'Back to chat')));
+  await shot(ana, '04b-joined');
+
+  await clickText(ana, 'The Porch');
+  await ana.waitForTimeout(700);
+  check('clicking it again opens the call view', await has(ana, 'Back to chat'));
+  check('and the call view offers camera and screen share, not a separate room',
+    (await has(ana, 'Camera off')) && (await has(ana, 'Share screen')));
+  await shot(ana, '04c-stage');
+
+  await clickText(ana, 'Back to chat');
+  await ana.waitForTimeout(700);
+  check('leaving the call view returns you to the channel',
+    await has(ana, 'First message in a real database.'));
+  check('and you are still connected', await has(ana, 'Voice connected'));
+
   // --- it is really persisted ---
   await ana.reload({ waitUntil: 'load' });
   await ana.waitForTimeout(3500);

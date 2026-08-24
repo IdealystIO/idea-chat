@@ -15,30 +15,33 @@ TEST_DB=${TEST_DB:-postgres://postgres:dev@localhost:55432/hearth}
 FAILED=0
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 verdict() { if [ "$1" = 0 ]; then echo "  PASS"; else echo "  FAIL"; FAILED=1; fi; }
+# Every step below pipes into `tail`, and `$?` after a pipeline is the exit
+# status of the LAST command in it — `tail`, which succeeds no matter what the
+# suite did. This reported "Everything passed" while five browser checks were
+# failing. Always take the status of the command that actually ran the tests.
+run() { "$@" 2>&1 | tail -"${TAIL:-3}"; verdict "${PIPESTATUS[0]}"; }
 
-step "1/6  build — client (wasm target check) and server"
-cargo check -p hearth --target wasm32-unknown-unknown -q 2>&1 | tail -3
-verdict $?
-cargo check -p hearth --features server -q 2>&1 | tail -3
-verdict $?
+step "1/6  build — client (wasm bundle) and server"
+# A real bundle, not `cargo check`. Step 6 loads whatever is in dist/web, so a
+# check-only step here means the browser test can pass against stale wasm from
+# an earlier build — which is exactly how a broken client once went green.
+( cd crates/hearth && idealyst build --web ) 2>&1 | tail -2
+verdict "${PIPESTATUS[0]}"
+run cargo check -p hearth --features server -q
 
 step "2/6  unit tests — client model, ids, invite codes"
-cargo test -p hearth --lib -q 2>&1 | tail -3
-verdict $?
+run cargo test -p hearth --lib -q
 
 step "3/6  data layer — 41 tests against real Postgres"
-HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q 2>&1 | tail -4
-verdict $?
+TAIL=4 run env HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q
 
 step "4/6  auth flows — 34 assertions over HTTP"
 cargo build -p hearth --bin server --features server -q || exit 1
 bash tools/reset-dev.sh >/dev/null || exit 1
-bash tools/auth-flows.sh | tail -1
-verdict $?
+TAIL=1 run bash tools/auth-flows.sh
 
 step "5/6  message flows — 17 assertions over HTTP"
-bash tools/message-flows.sh | tail -1
-verdict $?
+TAIL=1 run bash tools/message-flows.sh
 
 step "6/6  the whole app — 27 assertions, two browsers"
 if [ ! -d crates/hearth/dist/web/pkg ]; then
@@ -46,8 +49,7 @@ if [ ! -d crates/hearth/dist/web/pkg ]; then
   FAILED=1
 else
   bash tools/reset-dev.sh >/dev/null || exit 1
-  node tools/hearth-e2e.js | tail -1
-  verdict $?
+  TAIL=1 run node tools/hearth-e2e.js
 fi
 
 printf '\n'

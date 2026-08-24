@@ -1,21 +1,27 @@
-//! Live rooms — voice, video, and screen share.
+//! The call view — what a voice room looks like when you ask to see it.
+//!
+//! This is not where you go to join a room; clicking a room in the list
+//! already did that, and the tray is the interface for being in one. This view
+//! is the optional conference surface, opened deliberately and closed back to
+//! whatever you were reading. Camera and screen share are controls in here,
+//! not separate kinds of room.
 //!
 //! The room itself is real (it is a channel on the server); who is *in* it is
 //! not. Presence needs the live socket, so this shows you and nobody else
 //! rather than inventing a roster. That is deliberately visible in the UI:
 //! an empty room says it is empty.
 
-use icons_lucide::{MIC, MIC_OFF, MONITOR, MONITOR_UP, PLUS, VIDEO, VIDEO_OFF};
+use icons_lucide::{MIC, MIC_OFF, MONITOR_UP, PHONE_OFF, PLUS, VIDEO, VIDEO_OFF};
 use idea_ui::{
-    shape, size, tone, typography_kind, variant, AvatarSize, Button, Grid, Stack, StackAlign,
-    StackAxis, StackGap, StackPadding, ToneRef, VariantRef,
+    shape, size, tone, typography_kind, variant, AvatarSize, Button, Grid, Stack, StackGap,
+    StackPadding, ToneRef, VariantRef,
 };
 use runtime_core::{component, switch, ui, Element, StyleApplication};
 
-use crate::model::{App, ChannelKind};
+use crate::model::App;
 use crate::net;
 use crate::styles;
-use crate::views::bits::{cb, press, Face, Glyph, Muted, Spring, Strong};
+use crate::views::bits::{cb, press, Face, Glyph, Muted, Strong};
 
 #[component]
 pub fn LiveRoom(#[prop(static)] app: App) -> Element {
@@ -23,7 +29,7 @@ pub fn LiveRoom(#[prop(static)] app: App) -> Element {
         move || {
             (
                 app.revision.get(),
-                app.channel_id.get(),
+                app.stage.get(),
                 app.in_voice.get(),
                 app.mic.get(),
                 app.cam.get(),
@@ -35,7 +41,7 @@ pub fn LiveRoom(#[prop(static)] app: App) -> Element {
 }
 
 fn live_body(app: App) -> Element {
-    let body = if app.channel_kind() == ChannelKind::Share { stage(app) } else { tiles(app) };
+    let body = tiles(app);
     let bar = controls(app);
 
     ui! {
@@ -46,43 +52,9 @@ fn live_body(app: App) -> Element {
     }
 }
 
-/// The screen-share layout.
-fn stage(app: App) -> Element {
-    let sharing = app.sharing.get();
-    let headline = if sharing {
-        format!("{} is sharing", app.my_name())
-    } else {
-        "Nobody is sharing yet".to_string()
-    };
-
-    ui! {
-        Stack(
-            axis = StackAxis::Row,
-            gap = StackGap::Md,
-            padding = StackPadding::Lg,
-            align = StackAlign::Stretch,
-        ) {
-            view(style = || StyleApplication::new(styles::Stage::sheet())) {
-                view(style = || StyleApplication::new(styles::StageBar::sheet())) {
-                    view(style = || StyleApplication::new(styles::LiveDot::sheet()))
-                    Strong(label = headline, kind = typography_kind::BodySm)
-                    Spring()
-                }
-                view(style = || StyleApplication::new(styles::StageSurface::sheet())) {
-                    Glyph(data = Some(MONITOR), size = 34.0)
-                    Muted(
-                        label = "Screen sharing is not carried yet.".to_string(),
-                        kind = typography_kind::BodySm,
-                    )
-                }
-            }
-        }
-    }
-}
-
 /// The grid layout: you, and an invite slot.
 fn tiles(app: App) -> Element {
-    let joined = app.in_voice.get() == app.channel_id.get();
+    let joined = !app.in_voice.get().is_empty() && app.in_voice.get() == app.stage.get();
     let mut cells: Vec<Element> = Vec::new();
     if joined {
         cells.push(tile(app));
@@ -142,7 +114,7 @@ fn tile(app: App) -> Element {
 
 /// The floating control bar.
 fn controls(app: App) -> Element {
-    let joined = app.in_voice.get() == app.channel_id.get();
+    let joined = !app.in_voice.get().is_empty() && app.in_voice.get() == app.stage.get();
     let mic_on = app.mic.get();
     let cam_on = app.cam.get();
     let sharing = app.sharing.get();
@@ -187,17 +159,31 @@ fn controls(app: App) -> Element {
 
             view(style = || StyleApplication::new(styles::CallBarRule::sheet()))
 
+            // Two different exits, and they are not the same thing: one puts
+            // the main column back where it was and keeps you in the call, the
+            // other hangs up. Conflating them is how people leave a call by
+            // accident when they only wanted to read something.
             Button(
-                label = if joined { "Leave room".to_string() } else { "Join room".to_string() },
-                tone = if joined { ToneRef::from(tone::Danger) } else { ToneRef::from(tone::Primary) },
+                label = "Back to chat".to_string(),
+                tone = tone::Neutral,
+                variant = variant::Ghost,
+                size = size::Md,
+                shape = shape::Md,
+                on_click = cb(move || app.close_stage()),
+            )
+            Button(
+                label = "Leave room".to_string(),
+                leading_icon = Some(PHONE_OFF),
+                tone = tone::Danger,
                 variant = if joined {
                     VariantRef::from(variant::Soft)
                 } else {
-                    VariantRef::from(variant::Filled)
+                    VariantRef::from(variant::Ghost)
                 },
                 size = size::Md,
                 shape = shape::Md,
-                on_click = cb(move || app.toggle_voice()),
+                disabled = !joined,
+                on_click = cb(move || app.leave_voice()),
             )
         }
     }

@@ -128,7 +128,14 @@ mod client {
     #[component]
     fn MainColumn(#[prop(static)] app: App) -> Element {
         switch(
-            move || (app.channel_id.get(), app.settings_open.get(), app.thread_root.get()),
+            move || {
+                (
+                    app.channel_id.get(),
+                    app.settings_open.get(),
+                    app.thread_root.get(),
+                    app.stage.get(),
+                )
+            },
             move |_| main_column_body(app),
         )
     }
@@ -187,6 +194,7 @@ mod client {
                     app.settings_open.get(),
                     app.show_people.get(),
                     app.revision.get(),
+                    app.stage.get(),
                 )
             },
             move |_| header_body(app),
@@ -195,9 +203,18 @@ mod client {
 
     fn header_body(app: App) -> Element {
         let settings = app.settings_open.get();
-        let title = if settings { "Settings".to_string() } else { app.channel_title() };
+        let on_stage = !app.stage.get().is_empty();
+        let title = if settings {
+            "Settings".to_string()
+        } else if on_stage {
+            app.voice_room_name()
+        } else {
+            app.channel_title()
+        };
         let subtitle = if settings {
             String::new()
+        } else if on_stage {
+            "You're in this room".to_string()
         } else if app.viewing_dm() {
             "Just the two of you".to_string()
         } else if app.channel_kind().is_chat() {
@@ -207,7 +224,7 @@ mod client {
         } else {
             String::new()
         };
-        let in_space = app.scope.get() == Scope::Space;
+        let in_space = app.scope.get() == Scope::Space && !on_stage;
         let people_on = app.show_people.get();
 
         let subtitle_node: Vec<Element> = if subtitle.is_empty() {

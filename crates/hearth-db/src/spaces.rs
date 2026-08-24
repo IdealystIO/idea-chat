@@ -15,7 +15,9 @@ const STARTER_CHANNELS: &[(&str, ChannelKind)] = &[
     ("random", ChannelKind::Text),
     ("photos", ChannelKind::Text),
     ("The Porch", ChannelKind::Voice),
-    ("Movie Night", ChannelKind::Video),
+    // A voice room, not a "video room". Camera and screen share are things you
+    // turn on once you are in one — there is no separate place to go for them.
+    ("Movie Night", ChannelKind::Voice),
 ];
 
 impl Db {
