@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/voice-proto",
+    "crates/voice-dsp",
     "crates/voice-auth",
     "crates/idea-state",
     "crates/voice-coord",
@@ -25,6 +26,7 @@ license = "MIT"
 
 [workspace.dependencies]
 voice-proto = { path = "crates/voice-proto" }
+voice-dsp   = { path = "crates/voice-dsp" }
 voice-auth  = { path = "crates/voice-auth" }
 idea-state  = { path = "crates/idea-state" }
 voice-coord = { path = "crates/voice-coord" }
@@ -41,6 +43,7 @@ idea-ui-nav        = { path = "../idealyst-native/crates/ui/idea-ui-nav" }
 icons-lucide       = { path = "../idealyst-native/crates/ui/icons-lucide" }
 microphone         = { path = "../idealyst-native/crates/sdk/client/microphone" }
 media-stream       = { path = "../idealyst-native/crates/sdk/client/media-stream" }
+denoise            = { path = "../idealyst-native/crates/sdk/client/denoise" }
 net                = { path = "../idealyst-native/crates/sdk/client/net" }
 server             = { path = "../idealyst-native/crates/api/server" }
 server-kit         = { path = "../idealyst-native/crates/api/server-kit" }

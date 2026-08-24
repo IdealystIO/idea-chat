@@ -1,0 +1,17 @@
+[package]
+name = "voice-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Voice signal conditioning: where suppression runs, how much, and the levelling that follows it."
+
+# Deliberately dependency-free, for the same reason `voice-proto` is: this is
+# vocabulary BOTH ends need. The client decides what to ask for, the relay
+# decides what to honour, and the two must agree on the words. Dragging
+# `deep_filter` (or anything else heavy) in here would make the shared
+# vocabulary unbuildable on the target that only needs to name a mode.
+#
+# The neural suppression itself lives in the `denoise` SDK and is wired in by
+# each side separately — see `voice-server/src/suppress.rs` (native, embedded
+# model) and `voice-client/src/suppress.rs` (web, fetched model).
+[dependencies]

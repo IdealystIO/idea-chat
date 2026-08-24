@@ -18,6 +18,11 @@ runtime-scene = { workspace = true }
 idea-ui = { workspace = true }
 microphone = { workspace = true }
 media-stream = { workspace = true }
+voice-dsp = { workspace = true }
+# Client-side neural suppression. On web the model is NOT in the wasm binary —
+# it is fetched at first join and handed to `Denoiser::with_weights`. See
+# `suppress.rs` for what that costs and why it is still worth it.
+denoise = { workspace = true }
 net = { workspace = true }
 voice-proto = { workspace = true }
 serde = { version = "1", features = ["derive"] }
@@ -31,8 +36,8 @@ serde = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
-    "Document", "Window", "Element", "Node", "HtmlElement",
-    "HtmlAudioElement", "HtmlMediaElement", "MediaStream", "Location",
+    "Document", "Window", "Element", "Node", "HtmlElement", "console",
+    "HtmlAudioElement", "HtmlMediaElement", "MediaStream", "Location", "Performance",
 ] }
 
 [package.metadata.idealyst.app]

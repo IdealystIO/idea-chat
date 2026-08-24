@@ -1,4 +1,4 @@
-//! Settings. Seven of them, and a list of what deliberately isn't here.
+//! Settings. A short list, and a longer list of what deliberately isn't here.
 //!
 //! Each row is a question with two or three answers, rendered as a pill group
 //! rather than a switch: the options are the documentation. A row that reads
@@ -9,6 +9,7 @@ use idea_ui::{shape, size, tone, typography_kind, variant, Badge, Button, Stack,
 use runtime_core::{switch, component, ui, Element, StyleApplication};
 
 use crate::model::{App, Notify};
+use voice_dsp::Mode;
 use crate::net;
 use crate::styles;
 use crate::views::bits::{cb, Muted, SectionLabel, Strong};
@@ -83,11 +84,12 @@ fn on_off(current: bool, set: impl Fn(bool) + 'static) -> Vec<Element> {
 
 #[component]
 pub fn SettingsPage(#[prop(static)] app: App) -> Element {
-    switch(move || (app.dark.get(), app.accent.get(), app.notify.get(), app.quiet_hours.get(), app.compact.get(), app.read_receipts.get(), app.mic.get(), app.cam.get()), move |_| settings_body(app))
+    switch(move || (app.dark.get(), app.accent.get(), app.notify.get(), app.quiet_hours.get(), app.compact.get(), app.read_receipts.get(), app.mic.get(), app.cam.get(), app.suppress.get(), app.in_voice.get()), move |_| settings_body(app))
 }
 
 fn settings_body(app: App) -> Element {
     let notify = app.notify.get();
+    let suppress = app.suppress.get();
     let compact = app.compact.get();
     let dark = app.dark.get();
 
@@ -96,7 +98,7 @@ fn settings_body(app: App) -> Element {
             view(style = || StyleApplication::new(styles::SettingsColumn::sheet())) {
                 view(style = || StyleApplication::new(styles::Column::sheet())) {
                     Typography(content = "Settings".to_string(), kind = typography_kind::H1)
-                    Muted(label = "Seven of them. That's the whole list.".to_string())
+                    Muted(label = "A short list. That's the whole list.".to_string())
                 }
 
                 group("Notifications", vec![
@@ -130,6 +132,18 @@ fn settings_body(app: App) -> Element {
                         "Off is a perfectly normal way to be on a call.",
                         on_off(app.cam.get(), move |v| app.cam.set(v)),
                     ),
+                    row(
+                        "Noise suppression",
+                        // Says what each choice costs, because the choice is
+                        // not "better or worse" — it is who pays.
+                        "Neural, on top of your browser's. On this device costs an 8 MB download and some CPU; on the server costs neither, but the noise still travels.",
+                        vec![
+                            option("Off", suppress == Mode::Off, move || app.suppress.set(Mode::Off)),
+                            option("This device", suppress == Mode::Client, move || app.suppress.set(Mode::Client)),
+                            option("Server", suppress == Mode::Server, move || app.suppress.set(Mode::Server)),
+                        ],
+                    ),
+                    suppression_note(app),
                 ])
 
                 group("Appearance & privacy", vec![
@@ -182,6 +196,40 @@ fn settings_body(app: App) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// What the current choice actually means, right now.
+///
+/// Three different things need saying and only one of them at a time, which is
+/// why this is a row rather than help text on the control: the setting is a
+/// *request*, and the answer depends on the relay, on whether a model has been
+/// fetched, and on whether a call is even up. A static caption could only ever
+/// describe one of those.
+fn suppression_note(app: App) -> Element {
+    let text = match app.suppress.get() {
+        Mode::Off => {
+            "Your browser's own suppression is doing the work — the same as any other video call."
+        }
+        Mode::Client => {
+            "DeepFilterNet runs here, before anything is sent. The first call after choosing this downloads the model, so it connects more slowly than the ones after it."
+        }
+        Mode::Server => {
+            "DeepFilterNet runs on the relay. Nothing to download — but the relay has to be willing, and it says so when you connect. If it declines you get an ordinary call, not a failed one."
+        }
+    };
+    // Only meaningful once there is a call to describe. Changing the setting
+    // mid-call is honest about not applying until the next one, because the
+    // model is built at join and cannot be swapped underneath a live socket.
+    let live = if app.in_voice.get().is_empty() {
+        String::new()
+    } else {
+        " Takes effect on your next call.".to_string()
+    };
+    ui! {
+        view(style = || StyleApplication::new(styles::SettingsRow::sheet())) {
+            Muted(label = format!("{text}{live}"), kind = typography_kind::BodySm)
         }
     }
 }

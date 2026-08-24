@@ -336,7 +336,42 @@ now does — it waits for `Phase::Ready`. That is the right behaviour anyway, so
 the cost here is only the time spent finding out why. A failed handshake should
 resolve the future with `Err` and drop its callbacks without invoking them.
 
-## 13. Small things
+## 13. `denoise` on native is unusable from a server without a thread of your own
+
+The SDK is an `AudioStream -> AudioStream` transformer, which is exactly the
+right shape for the client it was written for. On a server it collides with
+`tokio`: `AudioStream` is `!Send` (it holds a main-thread native source on the
+platform it was designed for), so neither the input nor the output handle can
+live in a `tokio::spawn` future — and every connection a relay serves is one.
+
+The `Send` half, `AudioWriter`, has no such problem. So the shape that works is
+one dedicated OS thread per process that owns every `!Send` handle, with
+connections holding only writers and pushing into them
+(`voice-server/src/suppress.rs`). That is about eighty lines of plumbing to use
+an SDK whose actual inference already runs on its own worker thread.
+
+Two things would remove it:
+
+- **Make the handles `Send` on non-web targets.** The `!Send`-ness is a web
+  constraint (`Rc`, a main-thread `MediaStreamTrack`) that the native path
+  inherits without needing.
+- **Expose the framing engine directly** — a `feed(&[f32], rate, channels)`
+  that emits blocks through a callback, with no stream on either side. That is
+  what `Engine` already is internally, and it is what a server, a file
+  transcoder, and a test all actually want.
+
+Neither is urgent: the workaround is contained, and the SDK's *audio* work is
+excellent — one implementation, no per-OS code, and 0.11 ms of CPU per 10 ms
+hop on a Ryzen 7 7700X. It is only the ownership model that assumes a client.
+
+Second, smaller note on the same crate: `Denoiser::new()` embeds the model on
+native but there is no equivalent constant for the model's **bytes**, so a
+server that wants to hand the same weights to something else has no handle on
+them. And `DfParams::from_bytes` requiring `&'static [u8]` propagates a
+one-time leak into every web caller — worth wrapping in the SDK (it copies the
+bytes internally anyway) rather than making each app write `Box::leak`.
+
+## 14. Small things
 
 - **A bare `view` is `display: block`, not a flex column.** idea-ui's own
   documentation says containers are "flex-column by default", which is true of

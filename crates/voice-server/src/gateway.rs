@@ -195,6 +195,10 @@ struct NodeQuery {
     /// audio. A gateway that checked and forwarded would just be a second
     /// place to get it wrong.
     token: Option<String>,
+    /// Also forwarded verbatim, and for the same reason: what conditioning a
+    /// room gets is the node's decision, so the gateway's job is to carry the
+    /// question rather than to answer it.
+    suppress: Option<String>,
 }
 
 /// WebSocket proxy to one node.
@@ -210,10 +214,19 @@ async fn node_ws(
     };
     let room = q.room.unwrap_or_else(|| "lobby".into());
     let id = q.id.unwrap_or(0);
+    // Rebuilt rather than forwarded, because the node id in the path is ours
+    // and must not travel on. The cost of rebuilding is that every parameter
+    // has to be named here to survive the hop — a parameter added at both ends
+    // and forgotten in the middle reaches the node as a default, and looks
+    // exactly like a feature that does not work.
     let mut upstream = format!("{}/ws?room={}&id={}", target.trim_end_matches('/'), room, id);
     if let Some(token) = q.token.filter(|t| !t.is_empty()) {
         upstream.push_str("&token=");
         upstream.push_str(&token);
+    }
+    if let Some(suppress) = q.suppress.filter(|s| !s.is_empty()) {
+        upstream.push_str("&suppress=");
+        upstream.push_str(&suppress);
     }
     let (_, ws_origin) = public_origin(&headers);
 

@@ -7,7 +7,17 @@ description = "idea-chat voice fleet: the `voice-node` relay and the `voice-dire
 
 [dependencies]
 voice-proto = { workspace = true }
+voice-dsp = { workspace = true }
 voice-auth = { workspace = true }
+# Server-side neural suppression. The model is EMBEDDED on native, so a node
+# needs no asset and no download — unlike the web client, which must fetch it.
+denoise = { workspace = true }
+# `media_stream::AudioStream` is the denoise SDK's input and output type, so
+# feeding a relay's packets through it means speaking that vocabulary here too.
+media-stream = { workspace = true }
+# `Denoiser::process` is async and this crate's suppression host is a plain OS
+# thread, not a tokio task — see `suppress.rs` for why it cannot be either.
+pollster = "0.3"
 voice-coord = { workspace = true }
 async-trait = "0.1"
 # Gateway: HTTP reverse proxy + the client half of the WebSocket proxy.
@@ -15,11 +25,17 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-tungstenite = "0.21"
 http = "1"
 axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Measures what suppression actually costs on this machine, which is the only
+# way to answer "can the relay afford this per participant".
+[[bin]]
+name = "dfn-bench"
+path = "src/bin/dfn_bench.rs"
 
 [[bin]]
 name = "voice-node"

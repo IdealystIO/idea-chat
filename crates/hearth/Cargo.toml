@@ -55,6 +55,9 @@ idea-ui = { workspace = true }
 idea-ui-nav = { workspace = true }
 # The client/server reducer this app is prototyping — see `src/live.rs`.
 idea-state = { workspace = true }
+# Names where noise suppression runs. Both halves of the app need the same
+# word for it, and this crate is that word.
+voice-dsp = { workspace = true }
 icons-lucide = { workspace = true }
 
 [[bin]]
@@ -93,6 +96,9 @@ voice-client = { path = "../voice-client" }
 gloo-timers = { version = "0.3", features = ["futures"] }
 # For the voice stats seam in `voice.rs` — see `install_stats_probe`.
 wasm-bindgen = "0.2"
+# The suppression benchmark on that same seam returns a Promise: the model has
+# to be fetched before it can be timed.
+wasm-bindgen-futures = "0.4"
 # The page origin, so server-fn calls are same-origin and the browser attaches
 # the session cookie; and a clock for optimistic timestamps.
 web-sys = { version = "0.3", features = [

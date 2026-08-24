@@ -110,11 +110,32 @@ async fn main() {
         _ => None,
     };
 
-    let mut app: Router = server::router().fallback_service(
-        ServeDir::new(&web_dir)
-            .append_index_html_on_directories(true)
-            .not_found_service(ServeDir::new(&web_dir)),
-    );
+    // The noise-suppression model, served from its own directory rather than
+    // from `dist/web`, because `idealyst build` owns that one and an 8 MB file
+    // sitting in a directory something else regenerates is a file that
+    // disappears on a Tuesday. Absent is fine: client-side suppression reports
+    // that it cannot start and the call goes ahead without it.
+    let assets_dir = project_dir.join("assets");
+    if !assets_dir.join("DeepFilterNet3_onnx.tar.gz").exists() {
+        eprintln!(
+            "hearth: no noise-suppression model in {} — run ./tools/fetch-model.sh.",
+            assets_dir.display(),
+        );
+        eprintln!("        On-device suppression will be unavailable; on-server is unaffected.");
+    }
+
+    let mut app: Router = server::router()
+        // A route, not another layer of `ServeDir` fallback. Chaining them
+        // through `not_found_service` serves the right bytes with the OUTER
+        // service's 404 still attached — a response that is correct and
+        // unusable at the same time, and invisible unless you look at the
+        // status rather than the body.
+        .nest_service("/assets", ServeDir::new(&assets_dir))
+        .fallback_service(
+            ServeDir::new(&web_dir)
+                .append_index_html_on_directories(true)
+                .not_found_service(ServeDir::new(&web_dir)),
+        );
 
     if let Some(voice) = voice {
         app = app.merge(voice);

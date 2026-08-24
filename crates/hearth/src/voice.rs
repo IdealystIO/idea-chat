@@ -73,15 +73,20 @@ pub fn join_room(app: App, channel_id: &str) {
             }
         };
 
-        // `Processed` — browser echo cancellation and noise suppression on.
-        // The loopback demo wants them off, because there the signal you are
-        // listening for IS your own voice out of the speakers; a real call is
-        // the case AEC exists for.
+        // `Processed` — browser echo cancellation on. The loopback demo wants
+        // it off, because there the signal you are listening for IS your own
+        // voice out of the speakers; a real call is the case AEC exists for.
+        //
+        // The MODE is a separate axis and decides the neural pass: it also
+        // turns the browser's own noise suppression off, because stacking the
+        // two sounds worse than either. See `voice_dsp`.
+        let mode = app.suppress.get();
         let joined = session::join(
             &ticket.relay,
             &ticket.room,
             ticket.participant,
             Capture::Processed,
+            mode,
             Some(&ticket.token),
         )
         .await;
@@ -170,7 +175,7 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{}}}"#,
+        r#"{{"sent":{},"recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}"}}"#,
         s.sent,
         s.received,
         s.dropped,
@@ -178,6 +183,10 @@ fn stats_json() -> String {
         s.sample_rate,
         (s.mic_peak * 100.0) as u32,
         (s.remote_peak * 100.0) as u32,
+        // What the room is ACTUALLY getting, per the node — not what was
+        // asked for. A test that asserted the request would pass against a
+        // relay that quietly refused it.
+        s.suppression.as_str(),
     )
 }
 
@@ -205,4 +214,22 @@ pub fn install_stats_probe() {
     // Handed to JS for the life of the page; dropping it would leave a dead
     // function object behind that throws when called.
     cb.forget();
+
+    // The suppression benchmark, on the same seam and for the same reason:
+    // what DeepFilterNet costs in wasm cannot be inferred from what it costs
+    // natively, and it decides whether on-device suppression is a feature or a
+    // stutter. Returns a Promise, because the model has to be fetched first.
+    //
+    // It starts nothing and changes nothing — a call runs the model over
+    // synthetic audio and reports timings. Nobody's microphone is involved.
+    let bench = Closure::wrap(Box::new(|seconds: u32| -> js_sys::Promise {
+        wasm_bindgen_futures::future_to_promise(async move {
+            match voice_client::suppress::bench(seconds).await {
+                Ok(json) => Ok(JsValue::from_str(&json)),
+                Err(e) => Err(JsValue::from_str(&e)),
+            }
+        })
+    }) as Box<dyn Fn(u32) -> js_sys::Promise>);
+    let _ = js_sys::Reflect::set(&global, &JsValue::from_str("__hearthDenoiseBench"), bench.as_ref());
+    bench.forget();
 }

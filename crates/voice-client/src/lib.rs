@@ -22,6 +22,9 @@ mod playback;
 // this crate proves is the loop the chat app uses, rather than a second
 // implementation that can drift from it.
 pub mod session;
+// Public for the same reason: Hearth chooses where suppression runs, and the
+// model fetch behind `Mode::Client` is a cost its UI has to be able to explain.
+pub mod suppress;
 
 use idea_ui::{install_idea_theme, light_theme, Stack, StackGap, StackPadding, Typography};
 use runtime_core::{rx, signal, text, ui, Element, Signal};
@@ -171,7 +174,19 @@ pub fn app() -> Element {
 
             let active = active.clone();
             runtime_core::driver::spawn_async(async move {
-                match session::join(&base, &room_name, my_id, capture, None).await {
+                // The loopback demo stays on the ordinary path: it exists to prove the
+                // transport, and a neural pass in the middle would make "did the
+                // audio arrive" and "did the model like it" the same question.
+                match session::join(
+                    &base,
+                    &room_name,
+                    my_id,
+                    capture,
+                    voice_dsp::Mode::Off,
+                    None,
+                )
+                .await
+                {
                     Ok(sess) => {
                         status.set(format!("Live in '{room_name}' as {my_id} — talk"));
                         *active.borrow_mut() = Some(sess);

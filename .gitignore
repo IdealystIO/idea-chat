@@ -2,3 +2,8 @@ target/
 node_modules/
 pkg/
 dist/
+
+# The DeepFilterNet model, placed by tools/fetch-model.sh. 8 MB of weights
+# that already exist in every contributor’s cargo checkout — committing them
+# would put the same bytes in the repo for no gain.
+crates/hearth/assets/

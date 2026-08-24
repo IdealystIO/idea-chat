@@ -264,6 +264,13 @@ pub struct App {
     /// rooms you are not in. Seeing that three people are already talking is
     /// most of the reason to join them.
     pub voice_rooms: Signal<Vec<crate::api::types::RoomPresence>>,
+    /// Where neural noise suppression should run for calls from this client.
+    ///
+    /// A *request*. `Server` spends the relay fleet's CPU, so the node decides
+    /// whether to honour it and answers on the socket; what the room actually
+    /// got is [`voice_effect`](App::voice_effect), read back from the live
+    /// session rather than assumed from this.
+    pub suppress: Signal<voice_dsp::Mode>,
     /// The room whose conference view is open, or empty.
     ///
     /// Separate from [`in_voice`] because being *in* a call and *looking at*
@@ -345,6 +352,11 @@ impl App {
             voice_rooms: signal(Vec::new()),
             stage: signal(String::new()),
 
+            // Off by default, and this is the honest default rather than a
+            // timid one: on-device costs an 8 MB model fetch, on-server costs
+            // someone else's CPU, and neither should start happening because
+            // an app was opened.
+            suppress: signal(voice_dsp::Mode::Off),
             dark: signal(true),
             accent: signal(crate::theme::Accent::Indigo),
             notify: signal(Notify::Mentions),

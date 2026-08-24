@@ -29,6 +29,12 @@ sleep 1
 export COORD_BACKEND=postgres
 export POSTGRES_URL="postgres://postgres:dev@localhost:55432/$COORD_DB"
 export VOICE_SHARED_SECRET="$SECRET"
+# Server-side noise suppression, permitted. Off by default in the binary — a
+# node should relay unless someone decided otherwise — so the local fleet turns
+# it on explicitly, which is also what makes `suppression-flows.js` able to
+# test the granted path AND the refused one (start without this to get the
+# refusal).
+export VOICE_DENOISE=${VOICE_DENOISE:-on}
 
 PORT=$DIRECTOR_PORT nohup ./target/debug/voice-director > /tmp/voice-director-local.log 2>&1 &
 sleep 2

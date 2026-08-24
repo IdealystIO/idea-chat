@@ -62,6 +62,18 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
+    // Said out loud for the same reason the ticket mode is: this decides
+    // whether the node spends its own CPU on behalf of whoever connects, and a
+    // capacity decision that is only visible in an environment variable is one
+    // nobody checks until the machine is already saturated.
+    if voice_server::suppress::allowed() {
+        println!("[node] server-side noise suppression PERMITTED ({}=on)", voice_server::suppress::ENV_ALLOW);
+        println!("       ~0.11 ms of CPU per 10 ms hop per talking participant.");
+    } else {
+        println!("[node] server-side noise suppression off — clients asking for it");
+        println!("       are told so and get an ordinary relay. Set {}=on to allow it.", voice_server::suppress::ENV_ALLOW);
+    }
+
     println!("voice-node {id} listening on ws://{addr}/ws?room=<name>&id=<n>");
 
     let app = voice_server::router(coord.clone());

@@ -21,6 +21,7 @@
 //! later; the relay's fan-out is unaffected by that change.
 
 pub mod coord;
+pub mod suppress;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -145,6 +146,9 @@ impl Rooms {
 pub struct NodeState {
     rooms: Rooms,
     coord: Option<NodeCoord>,
+    /// The node's one suppression host. Present whether or not suppression is
+    /// permitted — see [`suppress::Suppression::start`].
+    suppress: suppress::Suppression,
 }
 
 #[derive(serde::Deserialize)]
@@ -153,6 +157,10 @@ struct JoinParams {
     id: Option<u32>,
     /// A `voice_auth` ticket, when the deployment requires one.
     token: Option<String>,
+    /// What conditioning the client is asking for. A REQUEST, not a setting:
+    /// only `server` asks anything of this node, and the node answers on the
+    /// socket rather than silently.
+    suppress: Option<String>,
 }
 
 /// The shared secret tickets are signed with, if this node requires them.
@@ -181,6 +189,7 @@ async fn ws_handler(
 ) -> Response {
     let room = params.room.unwrap_or_else(|| "lobby".to_string());
     let id = params.id.unwrap_or(0);
+    let asked = params.suppress.as_deref().map(voice_dsp::Mode::parse).unwrap_or_default();
 
     // Checked before the upgrade, so a refusal is an HTTP status the client can
     // read rather than a socket that opens and then dies for no stated reason.
@@ -197,7 +206,7 @@ async fn ws_handler(
         }
     }
 
-    ws.on_upgrade(move |socket| relay(socket, state, room, id)).into_response()
+    ws.on_upgrade(move |socket| relay(socket, state, room, id, asked)).into_response()
 }
 
 /// Ask the store whether this node may serve `room`.
@@ -225,7 +234,7 @@ async fn admit(coord: &Option<NodeCoord>, room: &str) -> Admission {
 
 /// Drive one participant: pump their inbound frames into the room, and the
 /// room's frames (minus their own) back out.
-async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32) {
+async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked: voice_dsp::Mode) {
     let (mut sink, mut stream) = socket.split();
 
     let (epoch, participants) = match admit(&state.coord, &room).await {
@@ -253,6 +262,68 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32) {
         eprintln!("[dup] room={room} id={id} — already connected; both sides hear silence");
         let _ = sink.send(Message::Text(DUPLICATE_ID.to_string())).await;
     }
+
+    // What the client asked for, and what this node will actually do. The two
+    // are separate values on purpose: `Server` is the only mode that spends
+    // this machine's CPU, so it is the only one that can be refused, and a
+    // refusal presented as a grant is unanswerable from the far side.
+    let granted = match asked {
+        voice_dsp::Mode::Server if suppress::allowed() => voice_dsp::Mode::Server,
+        voice_dsp::Mode::Server => {
+            eprintln!(
+                "[suppress] room={room} id={id} asked for server-side; \
+                 refused ({}=on is not set)",
+                suppress::ENV_ALLOW,
+            );
+            voice_dsp::Mode::Off
+        }
+        // Nothing for this node to do. `Client` is echoed rather than
+        // normalised to `Off` because the client IS suppressing — the frame
+        // reports what the room hears, not what this process did.
+        other => other,
+    };
+
+    let feed = if granted == voice_dsp::Mode::Server {
+        let out = tx.clone();
+        let mut seq = 0u32;
+        // 48 kHz mono is not a guess: it is DeepFilterNet's only output
+        // format, so the packets leaving here always carry it regardless of
+        // what the sender's microphone was running at.
+        let sink = Box::new(move |block: &[f32], pts: u64| {
+            let packet =
+                voice_proto::Packet::from_f32(id, seq, 48_000, 1, pts, block);
+            seq = seq.wrapping_add(1);
+            // Fails only when the room has no other listeners, which is the
+            // ordinary state of a room of one.
+            let _ = out.send((id, Arc::new(packet.encode())));
+        });
+        match state.suppress.open(voice_dsp::Tuning::default(), sink).await {
+            Ok(feed) => {
+                println!("[suppress] room={room} id={id} server-side suppression up");
+                Some(feed)
+            }
+            Err(e) => {
+                // The call is still a call. Relaying raw is a worse call, not
+                // a failed one, so this degrades rather than disconnects.
+                eprintln!("[suppress] room={room} id={id} could not start: {e} — relaying raw");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Say what the room is getting, always — including "nothing". A client
+    // that asked for suppression and quietly did not get it would spend the
+    // call wondering whether the model simply is not very good.
+    let effective = if feed.is_some() { granted } else if granted == voice_dsp::Mode::Server {
+        voice_dsp::Mode::Off
+    } else {
+        granted
+    };
+    let _ = sink
+        .send(Message::Text(format!("{}{}", suppress::INFO_PREFIX, effective.as_str())))
+        .await;
 
     // Room -> this participant.
     let room_out = room.clone();
@@ -283,14 +354,21 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32) {
             match msg {
                 Message::Binary(bytes) => {
                     // Validate the header before fanning out, so one malformed
-                    // client cannot spray garbage at everyone else. The payload
-                    // is relayed untouched — this is a guard, not a transform.
+                    // client cannot spray garbage at everyone else.
                     match voice_proto::Packet::decode(&bytes) {
-                        Ok(pkt) => {
+                        Ok(pkt) => match feed.as_ref() {
+                            // Suppressed: the raw packet goes no further. What
+                            // the room hears is what comes back out of the
+                            // model, so forwarding this one too would put every
+                            // talker in the room twice.
+                            Some(feed) => feed.push(pkt.sample_rate, pkt.channels, &pkt.to_f32()),
+                            // Relayed untouched — a guard, not a transform.
                             // `send` fails only with no receivers, which is
                             // normal for a room of one.
-                            let _ = tx.send((pkt.sender, Arc::new(bytes)));
-                        }
+                            None => {
+                                let _ = tx.send((pkt.sender, Arc::new(bytes)));
+                            }
+                        },
                         Err(e) => eprintln!("[drop] id={id} malformed packet: {e}"),
                     }
                 }
@@ -341,5 +419,5 @@ pub fn router(coord: Option<NodeCoord>) -> Router {
         // The web client is served from a different origin by `idealyst dev`,
         // so the relay has to be reachable cross-origin.
         .layer(CorsLayer::permissive())
-        .with_state(NodeState { rooms, coord })
+        .with_state(NodeState { rooms, coord, suppress: suppress::Suppression::start() })
 }

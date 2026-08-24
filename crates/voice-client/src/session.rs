@@ -63,6 +63,40 @@ static NO_CAPACITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 static CONNECT_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// How many times this session was moved to another node.
 static REDIRECTS: AtomicU32 = AtomicU32::new(0);
+/// What conditioning the room is actually getting, as reported by the node.
+///
+/// Stored as a `Mode` discriminant rather than the mode this client ASKED for,
+/// because the two differ whenever a node declines server-side suppression —
+/// and that difference is the only thing that explains a call which still
+/// sounds noisy with the feature switched on.
+static SUPPRESSION: AtomicU32 = AtomicU32::new(0);
+
+fn mode_code(mode: voice_dsp::Mode) -> u32 {
+    match mode {
+        voice_dsp::Mode::Off => 0,
+        voice_dsp::Mode::Client => 1,
+        voice_dsp::Mode::Server => 2,
+    }
+}
+
+fn mode_of(code: u32) -> voice_dsp::Mode {
+    match code {
+        1 => voice_dsp::Mode::Client,
+        2 => voice_dsp::Mode::Server,
+        _ => voice_dsp::Mode::Off,
+    }
+}
+
+/// Say something on the platform's console.
+///
+/// Not a logging framework — one line, used where a failure degrades instead
+/// of propagating and would otherwise leave no trace at all.
+fn web_log(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(message));
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{message}");
+}
 
 /// A snapshot of live counters, read once per frame by the UI.
 #[derive(Clone, Copy, PartialEq)]
@@ -89,6 +123,9 @@ pub struct Stats {
     pub connect_failed: bool,
     /// Times this session followed a redirect to another node.
     pub redirects: u32,
+    /// The conditioning the room is actually getting — the node's answer, not
+    /// this client's request.
+    pub suppression: voice_dsp::Mode,
 }
 
 /// Read the atomics. Cheap enough to call every frame.
@@ -105,6 +142,7 @@ pub fn stats() -> Stats {
         no_capacity: NO_CAPACITY.load(Ordering::Relaxed),
         connect_failed: CONNECT_FAILED.load(Ordering::Relaxed),
         redirects: REDIRECTS.load(Ordering::Relaxed),
+        suppression: mode_of(SUPPRESSION.load(Ordering::Relaxed)),
     }
 }
 
@@ -119,6 +157,7 @@ fn reset_stats() {
     NO_CAPACITY.store(false, Ordering::Relaxed);
     CONNECT_FAILED.store(false, Ordering::Relaxed);
     REDIRECTS.store(0, Ordering::Relaxed);
+    SUPPRESSION.store(0, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +236,10 @@ pub struct Session {
     sender: SharedSender,
     /// Held to keep capture alive; the subscription below borrows from it.
     _mic: AudioStream,
+    /// The client-side DeepFilterNet chain, when this call has one. Dropping it
+    /// tears the model down — which is why it is held here and not left to the
+    /// end of `join`.
+    _suppression: Option<crate::suppress::Suppressed>,
     _mic_sub: AudioSubscription,
     /// Shared with the receive task, which inserts new peers as they are heard.
     peers: Rc<RefCell<HashMap<u32, PeerSink>>>,
@@ -258,6 +301,7 @@ pub async fn join(
     room: &str,
     id: u32,
     capture: Capture,
+    mode: voice_dsp::Mode,
     ticket: Ticket<'_>,
 ) -> Result<Session, String> {
     reset_stats();
@@ -268,16 +312,47 @@ pub async fn join(
     //    These processing flags are WEB-ONLY in the microphone SDK (Android is
     //    a documented no-op, and there is no Apple VoiceProcessingIO path), so
     //    on native none of this applies — that is the `audio-processing` gap.
+    //
+    //    Echo cancellation and noise suppression come apart here. AEC stays on
+    //    for every real call: it needs the far-end reference signal, which only
+    //    the browser has, and DeepFilterNet explicitly does not do it. The
+    //    browser's NOISE suppression stands down the moment a neural pass is
+    //    going to run, because running both is worse than running either —
+    //    see `voice_dsp`.
     let config = AudioStreamConfig::default()
         .mono()
         .with_auto_gain_control(true)
         .with_echo_cancellation(capture == Capture::Processed)
-        .with_noise_suppression(capture == Capture::Processed);
+        .with_noise_suppression(capture == Capture::Processed && mode.browser_noise_suppression());
 
     let mic = Microphone::new()
         .open_stream(config)
         .await
         .map_err(|e| format!("microphone: {e}"))?;
+
+    // 1b. Client-side suppression, if that is where it was asked to run. The
+    //     model fetch lives behind this call and is the slow part of a first
+    //     join; failure degrades to an ordinary call rather than refusing to
+    //     connect, because a noisy call beats no call.
+    let suppression = if mode == voice_dsp::Mode::Client {
+        match crate::suppress::insert(&mic, voice_dsp::Tuning::default()).await {
+            Ok(chain) => {
+                SUPPRESSION.store(mode_code(voice_dsp::Mode::Client), Ordering::Relaxed);
+                Some(chain)
+            }
+            Err(e) => {
+                // Loud, because the alternative is a user who turned the
+                // feature on, heard no difference, and has no way to find out
+                // that it never started.
+                web_log(&format!("[suppress] client-side suppression unavailable: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // What the packetiser reads: the cleaned stream when there is one.
+    let source: &AudioStream = suppression.as_ref().map(|s| &s.stream).unwrap_or(&mic);
 
     // 2. Placement. A `ws://` origin bypasses the director for single-node use;
     //    anything else is asked where the room lives.
@@ -289,7 +364,13 @@ pub async fn join(
 
     // 3. Transport. Binary frames, because the framework's typed Socket is JSON
     //    text on send. This is the seam that becomes QUIC datagrams later.
-    let mut url = format!("{}/ws?room={}&id={}", node_url.trim_end_matches('/'), room, id);
+    let mut url = format!(
+        "{}/ws?room={}&id={}&suppress={}",
+        node_url.trim_end_matches('/'),
+        room,
+        id,
+        mode.as_str(),
+    );
     if let Some(t) = ticket {
         url.push_str("&token=");
         url.push_str(t);
@@ -303,7 +384,7 @@ pub async fn join(
     let mic_sub = {
         let sender = sender.clone();
         let seq = std::cell::Cell::new(0u32);
-        mic.subscribe(move |frame: &AudioFrame| {
+        source.subscribe(move |frame: &AudioFrame| {
             MIC_PEAK.store(voice_proto::peak(frame.samples).to_bits(), Ordering::Relaxed);
             SAMPLE_RATE.store(frame.sample_rate, Ordering::Relaxed);
 
@@ -338,13 +419,21 @@ pub async fn join(
         socket,
         room.to_string(),
         id,
+        mode,
         ticket.map(str::to_string),
         sender.clone(),
         peers.clone(),
         closed.clone(),
     );
 
-    Ok(Session { sender, _mic: mic, _mic_sub: mic_sub, peers, closed })
+    Ok(Session {
+        sender,
+        _mic: mic,
+        _suppression: suppression,
+        _mic_sub: mic_sub,
+        peers,
+        closed,
+    })
 }
 
 /// Own the socket and pump it until it closes, following redirects.
@@ -358,6 +447,10 @@ fn spawn_receive_loop(
     socket: WebSocket,
     room: String,
     id: u32,
+    // Re-presented on a redirect for the same reason the ticket is: the node
+    // we are sent to makes its own decision, and dropping the request here
+    // would silently turn server-side suppression off mid-call.
+    mode: voice_dsp::Mode,
     // Carried so a redirect can re-present it. The node we are sent to runs the
     // same check as the one that sent us, so dropping the ticket here turns the
     // cold-room race into an authentication failure — which would look exactly
@@ -378,8 +471,13 @@ fn spawn_receive_loop(
                 Pump::Finished => break,
                 Pump::Redirect(url) if hops < 3 => {
                     hops += 1;
-                    let mut next =
-                        format!("{}/ws?room={}&id={}", url.trim_end_matches('/'), room, id);
+                    let mut next = format!(
+                        "{}/ws?room={}&id={}&suppress={}",
+                        url.trim_end_matches('/'),
+                        room,
+                        id,
+                        mode.as_str(),
+                    );
                     if let Some(t) = ticket.as_deref() {
                         next.push_str("&token=");
                         next.push_str(t);
@@ -439,6 +537,12 @@ async fn pump(
                 }
                 if t.contains("no-capacity") {
                     NO_CAPACITY.store(true, Ordering::Relaxed);
+                }
+                // The node's answer to what we asked for. Overwrites the
+                // optimistic value set at join, so a refused server-side
+                // request shows as `off` rather than as what we hoped for.
+                if let Some(mode) = t.strip_prefix("info:suppress=") {
+                    SUPPRESSION.store(mode_code(voice_dsp::Mode::parse(mode)), Ordering::Relaxed);
                 }
                 continue;
             }
