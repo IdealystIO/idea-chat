@@ -214,6 +214,14 @@ pub fn install_stats_probe() {
 /// becomes a subscription and the interval goes away.
 const PRESENCE_POLL_MS: u32 = 8_000;
 
+/// How long to wait before the first poll.
+///
+/// Short, because the loop starts while the app is still signing in: its first
+/// pass finds no space selected and would otherwise sleep a full interval
+/// before looking again — which is the whole of the "occupants appear a few
+/// seconds late" delay, and it happened on every load.
+const FIRST_POLL_MS: u32 = 400;
+
 /// Keep the sidebar's occupant lists current for whichever space is open.
 ///
 /// Started once, lives as long as the page. It follows the selection rather
@@ -221,8 +229,19 @@ const PRESENCE_POLL_MS: u32 = 8_000;
 /// second poller running against the old one.
 pub fn watch_presence(app: App) {
     spawn_async(async move {
+        // What we last asked about. A poll every N seconds is fine for "has
+        // anyone moved"; it is far too slow for "I just opened a different
+        // space", which needs an answer now — otherwise the sidebar shows the
+        // previous space's rooms as empty until the timer comes round.
+        let mut asked_about = String::new();
         loop {
             let space = app.space_id.get();
+            if space != asked_about {
+                asked_about = space.clone();
+                if !space.is_empty() {
+                    refresh_presence(app);
+                }
+            }
             if !space.is_empty() {
                 match api::voice_presence(space.clone()).await {
                     // Only apply if the selection has not moved on while the
@@ -238,7 +257,7 @@ pub fn watch_presence(app: App) {
             } else if !app.voice_rooms.with(|r| r.is_empty()) {
                 app.voice_rooms.set(Vec::new());
             }
-            sleep(PRESENCE_POLL_MS).await;
+            sleep(if asked_about.is_empty() { FIRST_POLL_MS } else { PRESENCE_POLL_MS }).await;
         }
     });
 }

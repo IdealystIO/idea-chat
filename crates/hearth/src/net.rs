@@ -131,6 +131,9 @@ async fn load_shell(app: App, after_auth: bool) {
             app.spaces.set(data.spaces);
             app.dms.set(data.dms);
             app.unread.set(data.unread);
+            // Arrives with everything else, so a room with people in it is
+            // drawn with them the first time rather than filling in later.
+            app.voice_rooms.set(data.voice);
 
             // Land somewhere: the first space's first text channel, or direct
             // messages if this account has no spaces at all.
@@ -191,6 +194,7 @@ pub fn refresh_shell(app: App) {
             app.spaces.set(data.spaces);
             app.dms.set(data.dms);
             app.unread.set(data.unread);
+            app.voice_rooms.set(data.voice);
             app.touch();
         }
     });

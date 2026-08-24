@@ -266,12 +266,25 @@ const peakOver = async (pages, ms) => {
   // The claim is that this works for people who are NOT in the call — you
   // should be able to see three people talking before deciding to join them.
   // So the third browser watches without joining anything.
+  // Opened AFTER the other two are already talking, and measured from the
+  // moment the shell appears: the room's occupants have to be part of the
+  // first paint, not something that arrives later. They used to come from a
+  // poll whose first pass ran before the space was known, so a room with
+  // people in it rendered empty and filled in up to eight seconds later.
   const w = await open('wren', 'a third passphrase');
-  await w.waitForTimeout(1000);
   check('a watcher is signed in and in no call', !(await has(w, 'Voice connected')));
 
-  await w.waitForTimeout(10000);
-  const seen = await occupantsUnder(w, 'The Porch');
+  const shellAt = Date.now();
+  let seen = null;
+  while (Date.now() - shellAt < 3000) {
+    seen = await occupantsUnder(w, 'The Porch');
+    if (seen && seen.length) break;
+    await w.waitForTimeout(50);
+  }
+  const occupantsAfter = Date.now() - shellAt;
+  console.log(`        occupants on screen ${occupantsAfter}ms after the shell`);
+  check('the room is drawn with its people, not filled in later',
+    occupantsAfter < 2000, `took ${occupantsAfter}ms`);
   console.log(`        watcher sees under The Porch: ${JSON.stringify(seen)}`);
   check('the sidebar lists the people in the room, to someone not in it',
     !!seen && seen.includes('Ana Ruiz') && seen.includes('Theo Lang'), JSON.stringify(seen));

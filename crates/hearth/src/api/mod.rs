@@ -507,6 +507,13 @@ pub async fn bootstrap(
             .into_iter()
             .map(|id| id.to_string())
             .collect(),
+        // Who is in which voice room, for every space this account belongs to.
+        //
+        // Here rather than in a request of its own because it is part of the
+        // state the app opens with, not something it discovers afterwards. Sent
+        // separately it arrived up to a poll late, so a room with people in it
+        // rendered empty first and filled in seconds later.
+        voice: srv::group_presence(db.0.voice_for_user(user).await.map_err(srv::internal)?),
     })
 }
 
@@ -571,24 +578,7 @@ pub async fn voice_presence(
         return Err(ServerError::failed("no such space"));
     }
 
-    let here = db.0.voice_in_space(space).await.map_err(srv::internal)?;
-
-    // Already ordered by (channel, arrival), so grouping is a single pass.
-    let mut out: Vec<RoomPresence> = Vec::new();
-    for occ in here {
-        let channel_id = occ.channel_id.to_string();
-        let person = MemberDto {
-            id: occ.user_id.to_string(),
-            handle: occ.handle,
-            display_name: occ.display_name,
-            role: format!("{:?}", occ.role).to_lowercase(),
-        };
-        match out.last_mut() {
-            Some(room) if room.channel_id == channel_id => room.people.push(person),
-            _ => out.push(RoomPresence { channel_id, people: vec![person] }),
-        }
-    }
-    Ok(out)
+    Ok(srv::group_presence(db.0.voice_in_space(space).await.map_err(srv::internal)?))
 }
 
 #[server]

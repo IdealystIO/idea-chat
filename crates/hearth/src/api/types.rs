@@ -180,6 +180,11 @@ pub struct Bootstrap {
     pub spaces: Vec<SpaceSummary>,
     pub dms: Vec<DmDto>,
     pub unread: Vec<String>,
+    /// Who is in which voice room, across every space you are in.
+    ///
+    /// Part of the opening state rather than a request that follows it: a room
+    /// with people in it should never render empty and then fill in.
+    pub voice: Vec<RoomPresence>,
 }
 
 /// Permission to be in one voice room, for a couple of minutes.

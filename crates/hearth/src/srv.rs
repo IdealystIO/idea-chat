@@ -193,6 +193,30 @@ pub fn participant_number(id: Uuid) -> u32 {
     }
 }
 
+/// Group occupants into one entry per room.
+///
+/// The query already returns them ordered by (channel, arrival), so this is a
+/// single pass and the arrival order survives into the UI.
+pub fn group_presence(rows: Vec<hearth_db::VoiceOccupant>) -> Vec<crate::api::types::RoomPresence> {
+    use crate::api::types::{MemberDto, RoomPresence};
+
+    let mut out: Vec<RoomPresence> = Vec::new();
+    for occ in rows {
+        let channel_id = occ.channel_id.to_string();
+        let person = MemberDto {
+            id: occ.user_id.to_string(),
+            handle: occ.handle,
+            display_name: occ.display_name,
+            role: format!("{:?}", occ.role).to_lowercase(),
+        };
+        match out.last_mut() {
+            Some(room) if room.channel_id == channel_id => room.people.push(person),
+            _ => out.push(RoomPresence { channel_id, people: vec![person] }),
+        }
+    }
+    out
+}
+
 pub fn parse_id(s: &str) -> Result<Uuid, ServerError> {
     Uuid::parse_str(s).map_err(|_| ServerError::failed("malformed id"))
 }

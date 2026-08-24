@@ -84,6 +84,30 @@ impl Db {
         .await?)
     }
 
+    /// Everyone in any voice room of any space `user` belongs to.
+    ///
+    /// The whole picture in one query, so the first payload of a session can
+    /// carry it. Asking per space would mean the sidebar filling in a space at
+    /// a time as answers arrived, which is exactly the staggered load this is
+    /// meant to remove.
+    pub async fn voice_for_user(&self, user: Uuid) -> Result<Vec<VoiceOccupant>> {
+        Ok(sqlx::query_as::<_, VoiceOccupant>(
+            "SELECT p.channel_id, p.user_id, u.handle, u.display_name, m.role
+               FROM voice_presence p
+               JOIN channels c      ON c.id = p.channel_id
+               JOIN users u         ON u.id = p.user_id
+               JOIN space_members m ON m.space_id = c.space_id AND m.user_id = p.user_id
+              WHERE c.space_id IN (SELECT space_id FROM space_members WHERE user_id = $1)
+                AND p.seen_at > now() - make_interval(secs => $2)
+                AND u.deleted_at IS NULL
+              ORDER BY p.channel_id, p.joined_at",
+        )
+        .bind(user)
+        .bind(PRESENCE_TTL_SECS as f64)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Drop rows nobody is behind any more.
     ///
     /// Reads already filter on freshness, so this is only housekeeping — it
