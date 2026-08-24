@@ -5,10 +5,17 @@
 //! Everything the *user* produces (sent messages, thread replies, mutes,
 //! moderation, removals) lives in signals on [`App`].
 //!
-//! The split matters beyond the fixture: `SEED` is the shape a server
-//! response has to arrive in, and every view reads rooms and messages through
-//! the accessors below rather than touching the tables. Swapping the seed for
-//! a live sync feed is a change to this module and nowhere else.
+//! This is a **presentation model**, not a domain model. Everything is
+//! `&'static str`, there is no serde, people are keyed by display name,
+//! timestamps are display strings (`"9:02"`, `"Yest"`), and a message's
+//! identity is its position in a room (`room:index`). None of that survives
+//! contact with a server — a real model needs stable IDs, real timestamps,
+//! authorship separate from display name, and membership.
+//!
+//! What the split does buy is a seam. Views read rooms, messages and people
+//! through the accessors below rather than touching the tables, so replacing
+//! what is behind the accessors doesn't reach into the views. That is a
+//! smaller claim than "this is the server's shape", and it is the true one.
 
 use runtime_core::{signal, Signal};
 

@@ -33,10 +33,17 @@ Everything visible is a stock `idea-ui` component; the ~60 `stylesheet!` blocks
 in `styles.rs` are layout only. Light/dark and four accents are token values —
 one closure re-themes every component and every app stylesheet at once.
 
-The seed content in `model.rs` is the design's own fixture. It is deliberately
-the shape a server response has to arrive in: every view reads through the
-accessors there, so wiring this to the real backend is a change to that module
-and nowhere else.
+`model.rs` is a **presentation model over the design's fixture** — not a domain
+model, and not a wire format. It is `&'static str` throughout with no serde;
+people are keyed by display name, timestamps are display strings (`"9:02"`,
+`"Yest"`), and a message's identity is its position (`room:index`). It exists to
+render the design, and it is honest about that.
+
+What it does buy is a seam: every view reads rooms, messages and people through
+the accessors in that module rather than touching the tables, so the views don't
+have to change when a real model lands behind them. The domain model itself —
+stable IDs, real timestamps, authorship, membership, read state — has not been
+designed yet.
 
 **[docs/hearth-framework-findings.md](docs/hearth-framework-findings.md)** is
 the other deliverable — what cost debugging time or forced a departure from the
