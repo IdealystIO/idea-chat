@@ -25,6 +25,7 @@ use std::cell::RefCell;
 
 use runtime_core::driver::spawn_async;
 use voice_client::session::{self, Capture, Session};
+use voice_client::suppress;
 
 use crate::api;
 use crate::live::Action;
@@ -44,6 +45,19 @@ thread_local! {
     /// old value is what actually closes the previous socket, so switching
     /// rooms cannot leave two microphones publishing.
     static LIVE: RefCell<Option<Session>> = const { RefCell::new(None) };
+
+    /// Which suppression swap is the current one.
+    ///
+    /// Bumped synchronously by every request, so a swap that takes a few
+    /// hundred milliseconds to build its model can tell "still wanted" from
+    /// "superseded" when it finishes.
+    ///
+    /// A counter rather than a read of `app.suppress`, and that is the whole
+    /// point: `Signal::set` STAGES. The caller sets the signal on the line
+    /// before this runs, and reading it back — even after an await — can still
+    /// return the previous value, so the guard threw away the swap it was
+    /// meant to protect and the setting silently did nothing.
+    static SWAP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Join `channel_id`, asking the server for permission first.
@@ -114,6 +128,114 @@ pub fn join_room(app: App, channel_id: &str) {
             }
         }
     });
+}
+
+/// Change where suppression runs, on the call that is already up.
+///
+/// The setting is a signal and the UI writes it either way; this is what makes
+/// it *audible* now rather than on the next call. Only the client half can move
+/// mid-call: `Mode::Server` is settled when the relay socket is opened, and the
+/// node has already built (or declined to build) a model by the time anyone
+/// touches this — so that one genuinely does wait, and the settings page says
+/// so.
+///
+/// `mode` is passed rather than read back out of `app.suppress`, because
+/// `Signal::set` stages: the caller has just set it, and a read here would
+/// still return the previous value.
+pub fn set_suppression(app: App, mode: voice_dsp::Mode) {
+    // Nothing to swap. The next join reads the setting like it always did.
+    if LIVE.with(|slot| slot.borrow().is_none()) {
+        return;
+    }
+    if mode == voice_dsp::Mode::Server {
+        note("server-side is decided when the call connects — this one keeps what it has");
+        return;
+    }
+
+    // Claim this swap before anything can await. Synchronous, so two rapid
+    // clicks are ordered by the clicks and not by whose model finished first.
+    let generation = SWAP.with(|g| {
+        let next = g.get() + 1;
+        g.set(next);
+        next
+    });
+
+    spawn_async(async move {
+        // Nothing below touches the session until everything is ready, and
+        // nothing holds a `RefCell` borrow across an await — which is how a
+        // reactive app panics on its own re-entry.
+        if LIVE.with(|slot| slot.borrow().is_none()) {
+            note("the call ended before the setting could be applied");
+            return;
+        }
+
+        // A NEW capture device, not the running one. Whether the browser is
+        // suppressing is fixed when the microphone is opened, so a swap that
+        // reused the existing track would leave WebRTC's suppressor stacked
+        // under DeepFilterNet — the one combination the design forbids, and
+        // audible as a thin, over-processed voice rather than a clean one.
+        let mic = match session::open_capture(Capture::Processed, mode).await {
+            Ok(mic) => mic,
+            Err(e) => {
+                app.voice_error.set(e);
+                return;
+            }
+        };
+
+        let built = match mode {
+            voice_dsp::Mode::Client => {
+                match suppress::prepare(&mic, voice_dsp::Tuning::default()).await {
+                    Ok(prepared) => Some(prepared),
+                    Err(e) => {
+                        // Say so, and leave the call exactly as it was. A
+                        // half-applied setting is worse than one that did not
+                        // apply: the old chain and the old microphone are both
+                        // still running, so the call keeps working.
+                        app.voice_error.set(e);
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        // The call may have ended, or moved rooms, while the model was
+        // building. Installing into a session that is no longer the live one
+        // is not possible — `LIVE` holds at most one — but installing into a
+        // NEW one would be wrong, because its chain was built for whatever
+        // mode it joined with. Checking the mode still matches is the cheap
+        // way to say "this answer is stale".
+        if SWAP.with(|g| g.get()) != generation {
+            note("superseded — the setting was changed again while this loaded");
+            return;
+        }
+
+        LIVE.with(|slot| {
+            let borrowed = slot.borrow();
+            let Some(session) = borrowed.as_ref() else {
+                note("the call ended while the model was loading");
+                return;
+            };
+            let chain = match built {
+                Some(prepared) => prepared.install(session.wire()),
+                None => suppress::direct(&mic, session.wire()),
+            };
+            session.install(mic, chain, mode);
+            note(&format!("switched to {} mid-call", mode.as_str()));
+        });
+        app.voice_error.set(String::new());
+    });
+}
+
+/// Say what happened to a setting that did not visibly do anything.
+///
+/// Every path out of `set_suppression` that is not "it worked" is a case where
+/// somebody moved a control and heard no difference. None of them are errors
+/// worth a banner, and all of them are worth being able to find — a silent
+/// no-op is indistinguishable from a broken feature.
+fn note(what: &str) {
+    use wasm_bindgen::JsValue;
+    web_sys::console::log_1(&JsValue::from_str(&format!("[suppress] {what}")));
 }
 
 /// Hang up. Idempotent — leaving a room you are not in is not an error.

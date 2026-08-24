@@ -553,6 +553,53 @@ pub async fn audit(db: &Db, user: Option<Uuid>, kind: &str) {
     }
 }
 
+/// How often to look for expired presence leases.
+///
+/// Short relative to `PRESENCE_GRACE_SECS`, so a closed tab disappears within
+/// a few seconds of its grace running out rather than at the end of a long
+/// interval — this is the delay someone watching the sidebar actually sees.
+#[cfg(feature = "server")]
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reap expired presence leases and announce each departure once.
+///
+/// The counterpart to `Db::voice_fading`: a socket closing shortens a lease,
+/// and this is what eventually collects one that nobody renewed. Splitting it
+/// this way is what makes a network blip free — the lease outlives the blip,
+/// the client re-asserts on reconnect, and nobody is told anything, because
+/// nothing happened.
+///
+/// A sweep that found nothing publishes nothing, which is the overwhelmingly
+/// common case: this is quiet unless somebody actually vanished.
+#[cfg(feature = "server")]
+pub fn sweep_presence(db: Db, hub: LiveHub) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SWEEP_EVERY).await;
+            let gone = match db.voice_sweep().await {
+                Ok(rows) => rows,
+                // Keep sweeping. A failed sweep is a delayed departure, not a
+                // reason to stop reaping for the life of the process.
+                Err(e) => {
+                    eprintln!("hearth: presence sweep failed: {e}");
+                    continue;
+                }
+            };
+            for (user, channel, space) in gone {
+                println!("[presence] lease expired: user={user} room={channel}");
+                hub.publish(
+                    &idea_state::Topic::space(&space.to_string()),
+                    crate::live::Event::VoiceLeft {
+                        space_id: space.to_string(),
+                        channel_id: channel.to_string(),
+                        user_id: user.to_string(),
+                    },
+                );
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

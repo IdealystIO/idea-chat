@@ -163,6 +163,23 @@ async fn run(app: App, mut sock: Sock) {
                 if !open.is_empty() && asked.as_deref() != Some(open.as_str()) {
                     watch(&open);
                 }
+                // Re-assert the call, immediately, for the same reason.
+                //
+                // The call is a different socket and survived whatever
+                // happened to this one; the server shortened our presence lease
+                // on the way out and is waiting to see whether anyone renews
+                // it. Waiting for the next scheduled heartbeat would leave up
+                // to fifteen seconds in which we could be reaped and announced
+                // as having left a call we never left.
+                //
+                // Costs nothing when the lease is still ours: the server treats
+                // a heartbeat for the room we are already in as news to nobody
+                // and publishes nothing — so no tone, and no reshuffled
+                // sidebar.
+                let room = app.in_voice.get();
+                if !room.is_empty() {
+                    send(Action::StillHere { channel_id: room });
+                }
             }
             Down::Event { seq, event } => match cursor.step(seq) {
                 Step::Apply => {

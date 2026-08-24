@@ -532,6 +532,38 @@ the server replies with everything after each cursor (capped, with a
 message ids are UUIDv7 and therefore ordered, "everything after" is one indexed
 range scan — no per-connection sequence numbers to maintain.
 
+### Voice presence is a lease, not a socket
+
+Who is in a voice room lives in `voice_presence`, keyed on `user_id` so being in
+two calls at once is not a state the database can hold. A client renews its row
+every 15 s over the live socket (`Action::StillHere`), and a row older than
+`PRESENCE_TTL_SECS` is not presence — it is a ghost.
+
+The subtlety is what happens when the **live socket** closes, which is a
+different socket from the one carrying the call. It used to end the call
+outright, on the reasoning that a closed tab says nothing on its way out. But
+nothing at that moment can tell a closed tab from a tunnel that blinked, and
+answering wrongly is loud: everyone in the room hears a leave tone and then a
+join tone, and the person jumps to the bottom of the sidebar. On a tunnelled
+connection that happened every few seconds.
+
+So a closing socket **stops vouching** instead of evicting — `voice_fading`
+shortens the lease to `PRESENCE_GRACE_SECS` rather than deleting the row — and
+three things finish the job:
+
+- the client re-asserts presence on its first snapshot after reconnecting, so a
+  blip costs nothing and, because a heartbeat for a room you are already in is
+  news to nobody, publishes nothing;
+- a sweeper (`srv::sweep_presence`) reaps expired leases every 5 s and publishes
+  one `VoiceLeft` for each, so a genuinely closed tab disappears for everyone
+  rather than only for whoever reconnects next;
+- `voice_fading` never *lengthens* a lease, so disconnecting cannot buy someone
+  a fresh grace period.
+
+The heartbeat's 15 s is safe against background-tab timer throttling because
+Chrome exempts pages capturing or playing audio, which every page in a call is
+doing by definition.
+
 ## 9. Where chat meets the existing voice tier
 
 `voice-server` is a separate binary that must not grow a dependency on the chat

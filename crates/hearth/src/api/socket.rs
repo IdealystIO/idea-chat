@@ -63,10 +63,15 @@ pub async fn live(
 
     let mut sub = hub.0.connect(&user.to_string(), topics);
 
-    // Whatever room this connection put the user in, so hanging up the socket
-    // takes them out of it. A closed tab is the common case and it says
-    // nothing on its way out; without this the only thing removing them would
-    // be the presence TTL, which is a backstop rather than a mechanism.
+    // Whatever room this connection put the user in, so that hanging up the
+    // socket can stop vouching for them.
+    //
+    // Stop vouching, NOT evict. This socket carries chat, presence and
+    // everything else; the CALL is a different socket to a relay, and it is
+    // still up. Ending the call because this one hiccuped is how a tunnel blip
+    // turned into everyone hearing a leave tone, then a join tone, and the
+    // person jumping to the bottom of the sidebar — several times a minute.
+    // See `Db::voice_fading`.
     let mut in_room: Option<String> = None;
 
     // The channel this connection is reading. Held here rather than looked up,
@@ -136,8 +141,16 @@ pub async fn live(
     };
 
     if let Some(channel_id) = in_room {
-        // Best effort on the way out. If this fails the TTL still catches it.
-        let _ = leave(&db.0, &hub.0, user, &channel_id).await;
+        // Shorten the lease rather than cancelling it: nothing here can tell a
+        // closed tab from a network that blinked, and answering that question
+        // wrongly is loud. A client that comes back re-asserts presence on its
+        // first snapshot and nothing happened; one that does not is reaped by
+        // the sweeper, which announces the departure once.
+        //
+        // Best effort — if it fails the lease simply runs its full term.
+        if let Ok(channel) = srv::parse_id(&channel_id) {
+            let _ = db.0.voice_fading(user, channel).await;
+        }
     }
     outcome
 }

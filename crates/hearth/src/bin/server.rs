@@ -53,8 +53,18 @@ async fn main() {
     // The live state, loaded from the database once so a restart does not
     // forget who is in a call, then kept current by the events themselves.
     let hub: srv::LiveHub = idea_state::hub::Hub::new(srv::LiveStore::load(&db).await);
-    server::install_state(hub);
 
+    // Presence is a lease, and this is the only thing that reaps one. Nothing
+    // else removes somebody who did not say they were leaving — a socket
+    // closing shortens their lease (`Db::voice_fading`) but does not end their
+    // call, because the call is a different socket and is usually still up.
+    //
+    // Without this task an expired lease would be invisible to reads and never
+    // announced, so every client already connected would keep drawing a ghost
+    // until it happened to reconnect.
+    srv::sweep_presence(db.clone(), hub.clone());
+
+    server::install_state(hub);
     server::install_state(srv::AppDb(db));
     server::install_state(sessions.clone());
     server::install_state(bootstrap);

@@ -221,6 +221,13 @@ const peakOver = async (pages, ms) => {
   });
   const open = async (handle, password) => {
     const p = await browser.newPage({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+    // A suite that cannot see the page's own console is blind to exactly the
+    // failures that present as "the setting did nothing".
+    p.on('console', m => {
+      const t = m.text();
+      if (t.startsWith('[suppress]')) console.log(`        ${handle}: ${t}`);
+    });
+    p.on('pageerror', e => console.log(`        ${handle}: PAGE ERROR ${String(e).slice(0, 160)}`));
     await p.goto(APP + '/', { waitUntil: 'load' });
     await p.waitForTimeout(3000);
     await fill(p, 'Handle or email', handle);
@@ -243,29 +250,32 @@ const peakOver = async (pages, ms) => {
   check('and say what each choice costs',
     (await has(a, '8 MB download')) && (await has(a, 'the noise still travels')));
 
-  /// Set both tabs to `option`, join The Porch, and report what the relay said.
-  const callWith = async (option) => {
-    for (const p of [a, t]) {
-      // Settings is a toggle on the rail; the avatar button is at the bottom.
-      if (!(await has(p, 'Noise suppression'))) {
-        await p.mouse.click(35, 872);
-        await p.waitForTimeout(1000);
-      }
-      const picked = await pickInRow(p, 'Noise suppression', option);
-      if (!picked) throw new Error(`no "${option}" option in the noise suppression row`);
-      await p.waitForTimeout(600);
-      // Verify the pick landed. The note under the row says something
-      // different for each mode, which makes it the one thing on the page that
-      // can distinguish "clicked the right pill" from "clicked a pill". An
-      // earlier version of this suite skipped the check and spent three modes
-      // testing the same call.
-      const note = await noteFor(p);
-      if (note !== option) {
-        throw new Error(`picked "${option}" but the page describes "${note}"`);
-      }
-      await p.mouse.click(35, 872);   // back out of settings
+  /// Choose a suppression mode in one tab, and confirm the page agrees.
+  const setMode = async (p, option) => {
+    // Settings is a toggle on the rail; the avatar button is at the bottom.
+    if (!(await has(p, 'Noise suppression'))) {
+      await p.mouse.click(35, 872);
       await p.waitForTimeout(1000);
     }
+    const picked = await pickInRow(p, 'Noise suppression', option);
+    if (!picked) throw new Error(`no "${option}" option in the noise suppression row`);
+    await p.waitForTimeout(600);
+    // Verify the pick landed. The note under the row says something different
+    // for each mode, which makes it the one thing on the page that can
+    // distinguish "clicked the right pill" from "clicked a pill". An earlier
+    // version of this suite skipped the check and spent three modes testing
+    // the same call.
+    const note = await noteFor(p);
+    if (note !== option) {
+      throw new Error(`picked "${option}" but the page describes "${note}"`);
+    }
+    await p.mouse.click(35, 872);   // back out of settings
+    await p.waitForTimeout(1000);
+  };
+
+  /// Set both tabs to `option`, join The Porch, and report what the relay said.
+  const callWith = async (option) => {
+    for (const p of [a, t]) await setMode(p, option);
 
     await clickRoom(a, 'The Porch');
     await clickRoom(t, 'The Porch');
@@ -345,6 +355,55 @@ const peakOver = async (pages, ms) => {
       check('on-server — a refused request still carries the call',
         Math.max(sa.remote, st.remote) > 0, JSON.stringify([sa, st]));
     }
+  }
+
+  // --- changing your mind without hanging up ---
+  //
+  // The setting used to be read only at join, so turning suppression on while
+  // already in a call did nothing until you left and came back — which is not
+  // what anyone expects a settings toggle to mean. The capture chain is now
+  // swapped under the running socket.
+  {
+    for (const p of [a, t]) await setMode(p, 'Off');
+    await clickRoom(a, 'The Porch');
+    await clickRoom(t, 'The Porch');
+    await a.waitForTimeout(9000);
+    const [before] = await peakOver([a, t], 1000);
+    check('mid-call — the call starts unsuppressed', before.suppress === 'off',
+      JSON.stringify(before));
+
+    await setMode(a, 'This device');
+    // Long enough for the replacement chain's leveller to settle. It starts at
+    // unity gain by design — the first frames of a call should sound like the
+    // microphone, not like a gain sweep — so the first second or two after a
+    // swap is a transient, not a steady state.
+    await a.waitForTimeout(9000);
+    const [after, afterT] = await peakOver([a, t], 4000);
+    console.log(`        swap   before: ${JSON.stringify(before)}`);
+    console.log(`        swap   after : ${JSON.stringify(after)}`);
+
+    check('mid-call — suppression turns on without rejoining', after.suppress === 'client',
+      JSON.stringify(after));
+    // The discriminator. A rejoin resets every counter, so a value that is
+    // still climbing from where it was is proof the socket was never dropped —
+    // which is the whole claim, and the one thing "it says client now" cannot
+    // establish on its own.
+    check('mid-call — it is the same call, not a silent rejoin',
+      after.recv > before.recv && after.sent > before.sent,
+      `counters must keep climbing: ${JSON.stringify([before, after])}`);
+    check('mid-call — audio keeps flowing to the far side', afterT.recv > 0,
+      JSON.stringify(afterT));
+    // Judged from theo's seat, not ana's. `remote` on ana is what she RECEIVES
+    // from theo — the wrong end of the room — and her local `mic` meter is a
+    // max over a window with two browsers and two models competing for the
+    // machine, which made it read a transient often enough to be useless as
+    // evidence. What the swap claims is that the far side stops hearing the
+    // noise, so that is what is checked.
+    check(`mid-call — theo stops hearing ana's tone (${baseline}% -> ${afterT.remote}%)`,
+      afterT.remote * 4 <= baseline, JSON.stringify(afterT));
+
+    await hangUp(a);
+    await hangUp(t);
   }
 
   await browser.close();

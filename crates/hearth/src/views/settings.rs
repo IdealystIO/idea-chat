@@ -138,9 +138,9 @@ fn settings_body(app: App) -> Element {
                         // not "better or worse" — it is who pays.
                         "Neural, on top of your browser's. On this device costs an 8 MB download and some CPU; on the server costs neither, but the noise still travels.",
                         vec![
-                            option("Off", suppress == Mode::Off, move || app.suppress.set(Mode::Off)),
-                            option("This device", suppress == Mode::Client, move || app.suppress.set(Mode::Client)),
-                            option("Server", suppress == Mode::Server, move || app.suppress.set(Mode::Server)),
+                            option("Off", suppress == Mode::Off, move || pick(app, Mode::Off)),
+                            option("This device", suppress == Mode::Client, move || pick(app, Mode::Client)),
+                            option("Server", suppress == Mode::Server, move || pick(app, Mode::Server)),
                         ],
                     ),
                     suppression_note(app),
@@ -200,6 +200,19 @@ fn settings_body(app: App) -> Element {
     }
 }
 
+/// Choose where suppression runs, and apply it to the call in progress.
+///
+/// Two writes rather than one, because the setting and the running call are
+/// genuinely two things: the signal is what the next join will read, and
+/// `set_suppression` is what makes the current one change. Passing the mode
+/// explicitly matters — `Signal::set` stages, so reading it back on the next
+/// line would still give the old value.
+fn pick(app: App, mode: Mode) {
+    app.suppress.set(mode);
+    #[cfg(target_arch = "wasm32")]
+    crate::voice::set_suppression(app, mode);
+}
+
 /// What the current choice actually means, right now.
 ///
 /// Three different things need saying and only one of them at a time, which is
@@ -219,10 +232,11 @@ fn suppression_note(app: App) -> Element {
             "DeepFilterNet runs on the relay. Nothing to download — but the relay has to be willing, and it says so when you connect. If it declines you get an ordinary call, not a failed one."
         }
     };
-    // Only meaningful once there is a call to describe. Changing the setting
-    // mid-call is honest about not applying until the next one, because the
-    // model is built at join and cannot be swapped underneath a live socket.
-    let live = if app.in_voice.get().is_empty() {
+    // Only meaningful once there is a call to describe — and only the server
+    // choice has to wait. The client chain is swapped under the running call
+    // (see `voice::set_suppression`); the node's decision is made when the
+    // relay socket opens and cannot be revisited without opening another.
+    let live = if app.in_voice.get().is_empty() || app.suppress.get() != Mode::Server {
         String::new()
     } else {
         " Takes effect on your next call.".to_string()

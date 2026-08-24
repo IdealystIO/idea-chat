@@ -38,7 +38,7 @@
 use std::cell::RefCell;
 
 use denoise::Denoiser;
-use media_stream::{AudioFrame, AudioStream, AudioSubscription};
+use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
 use voice_dsp::{Leveler, Tuning};
 
 /// Where the model is served from, relative to the app's origin.
@@ -95,25 +95,53 @@ pub async fn weights() -> Result<&'static [u8], String> {
     Ok(leaked)
 }
 
-/// A running client-side suppression chain. Dropping it returns capture to the
-/// raw microphone stream.
+/// The stage between the microphone and the wire.
 ///
-/// Field order is teardown order: the levelling subscription stops first, so
-/// the engine is never asked for output after the thing that consumes it has
-/// gone away.
-pub struct Suppressed {
-    /// Levelling, applied to the model's output before anything reads it.
-    _leveling: AudioSubscription,
-    /// The cleaned stream, which is what the session packetises.
-    pub stream: AudioStream,
+/// Exactly one is installed at a time, and swapping it is what makes the
+/// setting take effect on a call already in progress. Dropping a `Chain` stops
+/// it feeding the wire; dropping the neural one also tears down the model.
+///
+/// Field order is teardown order: the subscription that writes stops before
+/// the stream it reads from goes away.
+pub struct Chain {
+    _stage: Stage,
 }
 
-/// Insert DeepFilterNet between `mic` and whatever comes next.
+enum Stage {
+    /// The microphone, forwarded verbatim.
+    ///
+    /// A copy per hop that a direct subscription would not need — the wire
+    /// stream exists so the packetiser has ONE thing to read for the life of
+    /// the call, and 480 floats every 10 ms is a cheap price for being able to
+    /// change your mind mid-call.
+    Direct { _sub: AudioSubscription },
+    /// DeepFilterNet, then levelling.
+    Neural { _sub: AudioSubscription, _clean: AudioStream },
+}
+
+/// Forward the microphone to `out` untouched.
+pub fn direct(mic: &AudioStream, out: AudioWriter) -> Chain {
+    let sub = mic.subscribe(move |frame: &AudioFrame| {
+        out.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples);
+    });
+    Chain { _stage: Stage::Direct { _sub: sub } }
+}
+
+/// A neural chain that is running but not yet connected to anything.
 ///
-/// Returns a stream carrying levelled 48 kHz mono. The caller keeps `mic`
-/// alive: the denoise pipeline subscribes to it, and a dropped input stream
-/// stops producing.
-pub async fn insert(mic: &AudioStream, tuning: Tuning) -> Result<Suppressed, String> {
+/// The two-phase build is the point. Fetching the model and planning the graph
+/// takes a few hundred milliseconds, and doing that *after* unplugging the
+/// current chain would drop the caller's audio for the duration — an audible
+/// hole every time somebody changes a setting. So the model is built while the
+/// old chain is still feeding the wire, and the swap itself is two moves with
+/// nothing between them.
+pub struct Prepared {
+    clean: AudioStream,
+    tuning: Tuning,
+}
+
+/// Build a neural chain without installing it. See [`Prepared`].
+pub async fn prepare(mic: &AudioStream, tuning: Tuning) -> Result<Prepared, String> {
     let weights = weights().await?;
 
     let mut denoiser = Denoiser::with_weights(weights).post_filter(tuning.post_filter);
@@ -125,29 +153,35 @@ pub async fn insert(mic: &AudioStream, tuning: Tuning) -> Result<Suppressed, Str
         .await
         .map_err(|e| format!("noise suppression could not start: {e}"))?;
 
-    // Levelling has nowhere else to go on this side. The SDK hands back a
-    // stream, not a callback chain, so the only place to touch the samples is
-    // in a subscriber — and the samples a subscriber sees are borrowed, so
-    // this stage re-publishes through a second stream rather than editing in
-    // place. One extra copy per 10 ms hop, which is 480 floats.
-    let (levelled, writer) = AudioStream::new();
-    let mut leveler = tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
-    let mut scratch: Vec<f32> = Vec::new();
-    let sub = clean.subscribe(move |frame: &AudioFrame| match leveler.as_mut() {
-        Some(leveler) => {
-            scratch.clear();
-            scratch.extend_from_slice(frame.samples);
-            leveler.process(&mut scratch);
-            writer.write_pcm_f32(frame.sample_rate, frame.channels, &scratch);
-        }
-        None => writer.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples),
-    });
+    Ok(Prepared { clean, tuning })
+}
 
-    // The denoised stream must outlive this function: `levelled` is what the
-    // caller holds, and nothing else refers to `clean`.
-    levelled.attach_stopper(move || drop(clean));
+impl Prepared {
+    /// Connect the prepared model to `out`.
+    ///
+    /// Levelling happens here because a subscriber sees borrowed samples: this
+    /// stage copies once, levels in place, and republishes. One extra copy per
+    /// 10 ms hop, which is 480 floats.
+    pub fn install(self, out: AudioWriter) -> Chain {
+        let mut leveler = self.tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
+        let mut scratch: Vec<f32> = Vec::new();
+        let sub = self.clean.subscribe(move |frame: &AudioFrame| match leveler.as_mut() {
+            Some(leveler) => {
+                scratch.clear();
+                scratch.extend_from_slice(frame.samples);
+                leveler.process(&mut scratch);
+                out.write_pcm_f32(frame.sample_rate, frame.channels, &scratch);
+            }
+            None => out.write_pcm_f32(frame.sample_rate, frame.channels, frame.samples),
+        });
+        Chain { _stage: Stage::Neural { _sub: sub, _clean: self.clean } }
+    }
+}
 
-    Ok(Suppressed { _leveling: sub, stream: levelled })
+/// Build and install a neural chain in one step, for a chain that is not
+/// replacing anything.
+pub async fn neural(mic: &AudioStream, out: AudioWriter, tuning: Tuning) -> Result<Chain, String> {
+    Ok(prepare(mic, tuning).await?.install(out))
 }
 
 /// Time this machine's DeepFilterNet, in the browser, on the real bundle.

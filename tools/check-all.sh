@@ -65,7 +65,7 @@ else
   SKIPPED=1
 fi
 
-step "8/8  noise suppression — 14 assertions, both modes, a real relay"
+step "8/8  noise suppression — 19 assertions, both modes, a real relay"
 # Needs the same fleet, and needs it to PERMIT server-side suppression —
 # tools/voice-fleet.sh sets VOICE_DENOISE=on. A fleet started without it is not
 # a failure, it is a different (also supported) configuration, so the suite is

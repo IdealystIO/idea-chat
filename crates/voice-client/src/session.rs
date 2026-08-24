@@ -234,13 +234,25 @@ pub struct Session {
     /// Swapped when a redirect moves us to another node, so the capture
     /// callback keeps publishing without knowing the connection changed.
     sender: SharedSender,
-    /// Held to keep capture alive; the subscription below borrows from it.
-    _mic: AudioStream,
-    /// The client-side DeepFilterNet chain, when this call has one. Dropping it
-    /// tears the model down — which is why it is held here and not left to the
-    /// end of `join`.
-    _suppression: Option<crate::suppress::Suppressed>,
-    _mic_sub: AudioSubscription,
+    /// The raw microphone. Every capture chain reads from it.
+    ///
+    /// Replaceable, because the browser's own noise suppression is fixed when
+    /// the device is opened — so changing where suppression runs means opening
+    /// it again with different flags. See [`open_capture`].
+    mic: RefCell<AudioStream>,
+    /// What the packetiser reads, for the life of the call.
+    ///
+    /// The indirection is what makes suppression switchable mid-call: the thing
+    /// that turns audio into packets subscribes ONCE, to this, and whichever
+    /// chain is installed writes into it. Re-subscribing the packetiser instead
+    /// would restart its sequence numbering, which is a gap to every receiver.
+    _wire: AudioStream,
+    /// The write end of `_wire`, handed to whichever chain is installed.
+    wire_writer: AudioWriter,
+    /// The stage between the microphone and the wire. Replaced by
+    /// [`Session::install`]; dropping it stops that stage feeding the wire.
+    chain: RefCell<Option<crate::suppress::Chain>>,
+    _wire_sub: AudioSubscription,
     /// Shared with the receive task, which inserts new peers as they are heard.
     peers: Rc<RefCell<HashMap<u32, PeerSink>>>,
     /// Set when the session is torn down, so the receive task stops rather than
@@ -254,6 +266,52 @@ impl Session {
         for peer in self.peers.borrow().values() {
             peer.playing.set_volume(volume);
         }
+    }
+
+    /// The raw capture stream, cloned.
+    ///
+    /// Exposed so a replacement chain can be BUILT before this session is
+    /// borrowed to install it — the build is async and holding a `RefCell`
+    /// borrow across an await is how a reactive app panics on its own
+    /// re-entry.
+    pub fn capture(&self) -> AudioStream {
+        self.mic.borrow().clone()
+    }
+
+    /// Where a capture chain writes.
+    pub fn wire(&self) -> AudioWriter {
+        self.wire_writer.clone()
+    }
+
+    /// Put `chain` between the microphone and the wire, in place of whatever
+    /// was there.
+    ///
+    /// The old chain is dropped FIRST. Installing before dropping would leave
+    /// two stages writing into the same wire for an instant, and the far side
+    /// would hear the overlap as a stutter — the one artefact a noise
+    /// suppression setting must not produce on its way to being switched on.
+    /// `mic` replaces the capture device — it must be the one `chain` reads
+    /// from, or the new stage will be fed by a microphone that is about to be
+    /// dropped.
+    pub fn install(
+        &self,
+        mic: AudioStream,
+        chain: crate::suppress::Chain,
+        mode: voice_dsp::Mode,
+    ) {
+        {
+            let mut slot = self.chain.borrow_mut();
+            slot.take();
+            *slot = Some(chain);
+        }
+        // After the chain, so the old device is released only once nothing is
+        // reading it. Dropping it first would silence the call for as long as
+        // the swap takes.
+        *self.mic.borrow_mut() = mic;
+        // Only the client half of the story: `Mode::Server` is settled at
+        // connect and reported by the node, so it is not something this can
+        // claim. See `voice::set_suppression`.
+        SUPPRESSION.store(mode_code(mode), Ordering::Relaxed);
     }
 }
 
@@ -290,6 +348,43 @@ pub enum Capture {
     Raw,
 }
 
+/// Open the microphone with the processing flags this mode wants.
+///
+/// `mono()` keeps the wire cost down; the rate is whatever the device gives,
+/// and it travels in every packet so nothing resamples.
+///
+/// These processing flags are WEB-ONLY in the microphone SDK (Android is a
+/// documented no-op, and there is no Apple VoiceProcessingIO path), so on
+/// native none of this applies — that is the `audio-processing` gap.
+///
+/// Echo cancellation and noise suppression come apart here. AEC stays on for
+/// every real call: it needs the far-end reference signal, which only the
+/// browser has, and DeepFilterNet explicitly does not do it. The browser's
+/// NOISE suppression stands down the moment a neural pass is going to run,
+/// because running both is worse than running either — see `voice_dsp`.
+///
+/// Public because that last rule is why changing the mode on a live call has
+/// to reopen the device rather than just swapping the chain: whether WebRTC is
+/// suppressing is a property of the captured track, fixed when it was opened.
+/// A swap that only changed the neural stage would leave the two stacked,
+/// which is the one combination the whole design exists to prevent. Reopening
+/// does not prompt — the permission has already been granted.
+pub async fn open_capture(
+    capture: Capture,
+    mode: voice_dsp::Mode,
+) -> Result<AudioStream, String> {
+    let config = AudioStreamConfig::default()
+        .mono()
+        .with_auto_gain_control(true)
+        .with_echo_cancellation(capture == Capture::Processed)
+        .with_noise_suppression(capture == Capture::Processed && mode.browser_noise_suppression());
+
+    Microphone::new()
+        .open_stream(config)
+        .await
+        .map_err(|e| format!("microphone: {e}"))
+}
+
 /// Proof that the caller may be in this room, when the relay asks for it.
 ///
 /// `None` is the loopback demo, where the node admits anyone. Hearth always
@@ -306,53 +401,36 @@ pub async fn join(
 ) -> Result<Session, String> {
     reset_stats();
 
-    // 1. Capture. `mono()` keeps the wire cost down; the rate is whatever the
-    //    device gives, and it travels in every packet so nothing resamples.
-    //
-    //    These processing flags are WEB-ONLY in the microphone SDK (Android is
-    //    a documented no-op, and there is no Apple VoiceProcessingIO path), so
-    //    on native none of this applies — that is the `audio-processing` gap.
-    //
-    //    Echo cancellation and noise suppression come apart here. AEC stays on
-    //    for every real call: it needs the far-end reference signal, which only
-    //    the browser has, and DeepFilterNet explicitly does not do it. The
-    //    browser's NOISE suppression stands down the moment a neural pass is
-    //    going to run, because running both is worse than running either —
-    //    see `voice_dsp`.
-    let config = AudioStreamConfig::default()
-        .mono()
-        .with_auto_gain_control(true)
-        .with_echo_cancellation(capture == Capture::Processed)
-        .with_noise_suppression(capture == Capture::Processed && mode.browser_noise_suppression());
+    // 1. Capture, configured for this mode. See `open_capture`.
+    let mic = open_capture(capture, mode).await?;
 
-    let mic = Microphone::new()
-        .open_stream(config)
-        .await
-        .map_err(|e| format!("microphone: {e}"))?;
+    // 1b. The wire: one stream, for the life of the call, that the packetiser
+    //     reads. What feeds it is swappable — see `Session::install`.
+    let (wire, wire_writer) = AudioStream::new();
 
-    // 1b. Client-side suppression, if that is where it was asked to run. The
+    //     Client-side suppression, if that is where it was asked to run. The
     //     model fetch lives behind this call and is the slow part of a first
     //     join; failure degrades to an ordinary call rather than refusing to
     //     connect, because a noisy call beats no call.
-    let suppression = if mode == voice_dsp::Mode::Client {
-        match crate::suppress::insert(&mic, voice_dsp::Tuning::default()).await {
+    let chain = if mode == voice_dsp::Mode::Client {
+        match crate::suppress::neural(&mic, wire_writer.clone(), voice_dsp::Tuning::default())
+            .await
+        {
             Ok(chain) => {
                 SUPPRESSION.store(mode_code(voice_dsp::Mode::Client), Ordering::Relaxed);
-                Some(chain)
+                chain
             }
             Err(e) => {
                 // Loud, because the alternative is a user who turned the
                 // feature on, heard no difference, and has no way to find out
                 // that it never started.
                 web_log(&format!("[suppress] client-side suppression unavailable: {e}"));
-                None
+                crate::suppress::direct(&mic, wire_writer.clone())
             }
         }
     } else {
-        None
+        crate::suppress::direct(&mic, wire_writer.clone())
     };
-    // What the packetiser reads: the cleaned stream when there is one.
-    let source: &AudioStream = suppression.as_ref().map(|s| &s.stream).unwrap_or(&mic);
 
     // 2. Placement. A `ws://` origin bypasses the director for single-node use;
     //    anything else is asked where the room lives.
@@ -384,7 +462,7 @@ pub async fn join(
     let mic_sub = {
         let sender = sender.clone();
         let seq = std::cell::Cell::new(0u32);
-        source.subscribe(move |frame: &AudioFrame| {
+        wire.subscribe(move |frame: &AudioFrame| {
             MIC_PEAK.store(voice_proto::peak(frame.samples).to_bits(), Ordering::Relaxed);
             SAMPLE_RATE.store(frame.sample_rate, Ordering::Relaxed);
 
@@ -428,9 +506,11 @@ pub async fn join(
 
     Ok(Session {
         sender,
-        _mic: mic,
-        _suppression: suppression,
-        _mic_sub: mic_sub,
+        mic: RefCell::new(mic),
+        _wire: wire,
+        wire_writer,
+        chain: RefCell::new(Some(chain)),
+        _wire_sub: mic_sub,
         peers,
         closed,
     })

@@ -34,7 +34,7 @@ comes back, and that audio still crosses the room. See
 ```bash
 bash tools/voice-fleet.sh                       # sets VOICE_DENOISE=on
 bash tools/reset-dev.sh
-node tools/suppression-flows.js                 # 14 assertions
+node tools/suppression-flows.js                 # 19 assertions
 NODE_ALLOWS=0 node tools/suppression-flows.js   # against a fleet without VOICE_DENOISE
 ```
 

@@ -15,7 +15,26 @@ use crate::{model::*, Db, Result};
 /// badly, a laptop that slept, a network that went away without saying so. The
 /// client renews well inside this window (see `HEARTBEAT`), so the only rows
 /// this excludes are the ones nobody is behind.
+///
+/// Three missed heartbeats. That is the tolerance budget for a network blip,
+/// and it has to be a budget rather than zero: presence is a **lease**, and the
+/// thing renewing it is a WebSocket that laptops, tunnels and sleeping Wi-Fi
+/// interrupt regularly. Ending someone's call the instant that socket hiccups
+/// is what made the sidebar shuffle and the join tone fire every few seconds.
+///
+/// Background-tab throttling would break this — a throttled timer fires once a
+/// minute — except that Chrome exempts pages capturing or playing audio, which
+/// every page in a call is doing by definition.
 pub const PRESENCE_TTL_SECS: i64 = 45;
+
+/// How long someone gets after their live socket goes away.
+///
+/// A closing socket stops *vouching* for someone rather than evicting them:
+/// [`Db::voice_fading`] backdates the lease so it expires in this long unless a
+/// heartbeat renews it. A reconnect re-asserts presence immediately (the client
+/// does that on every snapshot), so a blip costs nothing — while a genuinely
+/// closed tab is gone within this window instead of the full TTL.
+pub const PRESENCE_GRACE_SECS: i64 = 20;
 
 impl Db {
     /// Record that `user` is in `channel`, or that they still are.
@@ -79,6 +98,38 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(done.rows_affected() > 0)
+    }
+
+    /// Stop vouching for `user` without evicting them.
+    ///
+    /// For the one case that is genuinely ambiguous: their live socket has gone
+    /// away, and nothing here can tell a closed tab from a tunnel that blinked.
+    /// Deleting the row answers that question wrongly half the time, and the
+    /// wrong half is loud — everyone in the room hears them leave and rejoin,
+    /// and they move to the bottom of the list.
+    ///
+    /// So the lease is shortened instead of cancelled. Come back within
+    /// [`PRESENCE_GRACE_SECS`] and nothing happened; do not, and the sweeper
+    /// reaps it and announces the departure once.
+    ///
+    /// Scoped to the channel, like [`voice_absent`](Self::voice_absent), and
+    /// for the same reason: a socket closing after its owner already moved
+    /// rooms must not shorten the lease on the room they are actually in.
+    ///
+    /// Never *lengthens* a lease — `LEAST` means a row that is already closer
+    /// to expiry than the grace period stays where it is.
+    pub async fn voice_fading(&self, user: Uuid, channel: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE voice_presence
+                SET seen_at = LEAST(seen_at, now() - make_interval(secs => $3))
+              WHERE user_id = $1 AND channel_id = $2",
+        )
+        .bind(user)
+        .bind(channel)
+        .bind((PRESENCE_TTL_SECS - PRESENCE_GRACE_SECS) as f64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Everyone currently in any voice room of `space`, oldest arrival first.
@@ -148,18 +199,28 @@ impl Db {
         .await?)
     }
 
-    /// Drop rows nobody is behind any more.
+    /// Reap expired leases, and say who they belonged to.
     ///
-    /// Reads already filter on freshness, so this is only housekeeping — it
-    /// keeps a table that is written on every heartbeat from accumulating the
-    /// remains of every call ever made.
-    pub async fn voice_sweep(&self) -> Result<u64> {
-        let done = sqlx::query(
-            "DELETE FROM voice_presence WHERE seen_at < now() - make_interval(secs => $1)",
+    /// This is the *only* thing that removes someone who did not say they were
+    /// leaving, which is what makes presence a lease rather than a property of
+    /// whichever socket happened to be open. It returns the rows it took so the
+    /// caller can announce each departure exactly once — a sweep that silently
+    /// deleted them would leave every other client drawing a ghost until it
+    /// next reconnected.
+    ///
+    /// Reads already filter on freshness, so a row that has expired but not yet
+    /// been swept is invisible either way. The sweep exists to turn that into
+    /// an *event*.
+    pub async fn voice_sweep(&self) -> Result<Vec<(Uuid, Uuid, Uuid)>> {
+        Ok(sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+            "DELETE FROM voice_presence p
+              USING channels c
+              WHERE c.id = p.channel_id
+                AND p.seen_at < now() - make_interval(secs => $1)
+          RETURNING p.user_id, p.channel_id, c.space_id",
         )
-        .bind((PRESENCE_TTL_SECS * 4) as f64)
-        .execute(&self.pool)
-        .await?;
-        Ok(done.rows_affected())
+        .bind(PRESENCE_TTL_SECS as f64)
+        .fetch_all(&self.pool)
+        .await?)
     }
 }
