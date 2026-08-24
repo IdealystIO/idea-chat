@@ -21,7 +21,7 @@ verdict() { if [ "$1" = 0 ]; then echo "  PASS"; else echo "  FAIL"; FAILED=1; f
 # failing. Always take the status of the command that actually ran the tests.
 run() { "$@" 2>&1 | tail -"${TAIL:-3}"; verdict "${PIPESTATUS[0]}"; }
 
-step "1/9  build — client (wasm bundle) and server"
+step "1/10  build — client (wasm bundle) and server"
 # A real bundle, not `cargo check`. Step 6 loads whatever is in dist/web, so a
 # check-only step here means the browser test can pass against stale wasm from
 # an earlier build — which is exactly how a broken client once went green.
@@ -29,21 +29,21 @@ step "1/9  build — client (wasm bundle) and server"
 verdict "${PIPESTATUS[0]}"
 run cargo check -p hearth --features server -q
 
-step "2/9  unit tests — client model, ids, invite codes"
+step "2/10  unit tests — client model, ids, invite codes"
 run cargo test -p hearth --lib -q
 
-step "3/9  data layer — 41 tests against real Postgres"
+step "3/10  data layer — 41 tests against real Postgres"
 TAIL=4 run env HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q
 
-step "4/9  auth flows — 34 assertions over HTTP"
+step "4/10  auth flows — 34 assertions over HTTP"
 cargo build -p hearth --bin server --features server -q || exit 1
 bash tools/reset-dev.sh >/dev/null || exit 1
 TAIL=1 run bash tools/auth-flows.sh
 
-step "5/9  message flows — 17 assertions over HTTP"
+step "5/10  message flows — 17 assertions over HTTP"
 TAIL=1 run bash tools/message-flows.sh
 
-step "6/9  the whole app — 27 assertions, two browsers"
+step "6/10  the whole app — 27 assertions, two browsers"
 if [ ! -d crates/hearth/dist/web/pkg ]; then
   echo "  no wasm bundle — run: (cd crates/hearth && idealyst build --web)"
   FAILED=1
@@ -52,7 +52,7 @@ else
   TAIL=1 run node tools/hearth-e2e.js
 fi
 
-step "7/9  voice — 23 assertions, two browsers and a real relay"
+step "7/10  voice — 23 assertions, two browsers and a real relay"
 # Skipped rather than failed when the fleet is not up: it is a separate set of
 # processes, and a red suite for "you did not start the relay" trains people to
 # ignore the colour. The skip is loud and does NOT count as a pass.
@@ -65,7 +65,7 @@ else
   SKIPPED=1
 fi
 
-step "8/9  noise suppression — 21 assertions, both modes, a real relay"
+step "8/10  noise suppression — 21 assertions, both modes, a real relay"
 # Needs the same fleet, and needs it to PERMIT server-side suppression —
 # tools/voice-fleet.sh sets VOICE_DENOISE=on. A fleet started without it is not
 # a failure, it is a different (also supported) configuration, so the suite is
@@ -78,12 +78,24 @@ else
   SKIPPED=1
 fi
 
-step "9/9  presence — 8 assertions on the live event stream"
+step "9/10  presence — 8 assertions on the live event stream"
 # Judged by what the server SAYS, not what it stores. The database was
 # perfectly consistent while the server announced a join on every heartbeat,
 # so no assertion about the table could have caught it.
 bash tools/reset-dev.sh >/dev/null || exit 1
 TAIL=1 run node tools/presence-flows.js
+
+step "10/10  voice activity — 7 assertions against a speech-like fixture"
+# Chromium's DEFAULT fake device is a pure tone, which a working suppressor
+# removes — so a VAD suite built on it measures the suppressor, not the VAD.
+# This one plays tools/fixtures/speech-like.wav, which has a known duty cycle.
+if curl -fsS -m 2 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+  bash tools/reset-dev.sh >/dev/null || exit 1
+  TAIL=1 run node tools/vad-flows.js
+else
+  echo "  SKIP — no fleet on :9100. Start one with: bash tools/voice-fleet.sh"
+  SKIPPED=1
+fi
 
 printf '\n'
 if [ "${SKIPPED:-0}" = 1 ] && [ "$FAILED" = 0 ]; then

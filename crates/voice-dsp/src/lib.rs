@@ -45,7 +45,7 @@ mod verdict;
 pub use level::{Leveler, Leveling};
 pub use residual::{Expander, Residual};
 pub use transient::{Declicker, Transients};
-pub use verdict::{model_gain_db, rms, Alignment, MODEL_HOPS};
+pub use verdict::{model_gain_db, rms, Alignment, Meter, MODEL_HOPS};
 
 /// Where neural noise suppression runs for a session.
 ///

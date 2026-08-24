@@ -160,8 +160,28 @@ Two details that are easy to get wrong:
   exactly that reason: the audio leaving is from the previous block while the
   verdict being applied is from the current one.
 
+### Both sides must be measured the same way
+
+The model emits a block every 10 ms. A microphone does not — on this machine it
+delivers about twelve frames a second, roughly 85 ms each. So "the input energy
+for this hop" is a quantity that mostly does not exist.
+
+Accumulating input between output blocks and resetting each time is the obvious
+answer and is wrong: seven hops in eight then find an empty accumulator, read
+zero input, and conclude the model *added* 100 dB. The symptoms were a speaking
+indicator that never went out and a residual stage that never once ran, both
+while reporting that everything was fine — the ratio was being computed, it was
+just meaningless.
+
+`voice_dsp::Meter` carries a level across the gaps with a real time constant,
+and takes the duration of each block, so it settles identically whether it is
+fed 85 ms frames or 10 ms ones. Both sides run one with the same constant. The
+ratio is clamped to ±40 dB as well, because a division that meant nothing
+should not arrive downstream as a confident number.
+
 The same verdict is the **voice-activity indicator** — the sidebar highlights
-your own row while you are talking. It is a neural speech decision rather than
+your own row while you are talking, and everyone else's row from what their
+client broadcast (`Event::VoiceSpeaking`). It is a neural speech decision rather than
 an energy threshold, and it is free, having already been computed. Without a
 model in the chain the indicator falls back to level, because a speaking light
 that only works with suppression on is a speaking light nobody trusts.

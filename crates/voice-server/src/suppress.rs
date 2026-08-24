@@ -49,6 +49,10 @@ use denoise::Denoiser;
 use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
 use voice_dsp::{Alignment, Declicker, Expander, Leveler, Tuning};
 
+/// Time constant for the levels the model's verdict is computed from. Matches
+/// the client's, so the two modes are the same experiment with the work moved.
+const METER_MS: f32 = 60.0;
+
 /// Environment variable that permits [`Mode::Server`](voice_dsp::Mode::Server).
 ///
 /// Off unless set: a node in an unfamiliar deployment should relay, which is
@@ -81,7 +85,7 @@ pub type Sink = Box<dyn FnMut(&[f32], u64) + Send + 'static>;
 
 /// What `open` hands back: the push end, and the accumulator the verdict is
 /// measured from.
-type Shared = (AudioWriter, Arc<Mutex<(f32, usize)>>);
+type Shared = (AudioWriter, Arc<Mutex<voice_dsp::Meter>>);
 
 enum Cmd {
     Open {
@@ -116,12 +120,14 @@ pub struct Feed {
     key: u64,
     writer: AudioWriter,
     host: mpsc::Sender<Cmd>,
-    /// Energy of everything pushed since the pipeline last emitted a block.
+    /// The level of everything pushed into the model, carried across the gaps
+    /// between packets.
     ///
-    /// The relay's half of the model's verdict — see `voice_dsp::verdict`. The
-    /// client measures this with a second microphone subscription; here the
-    /// packets are already being decoded, so it is free.
-    input: Arc<Mutex<(f32, usize)>>,
+    /// The relay's half of the model's verdict — see `voice_dsp::verdict`. NOT
+    /// an accumulator reset per output block: packets arrive at the sender's
+    /// frame rate and the model emits at its own, so most blocks would find it
+    /// empty and read the model as having added 100 dB.
+    input: Arc<Mutex<voice_dsp::Meter>>,
 }
 
 impl Feed {
@@ -131,9 +137,10 @@ impl Feed {
     /// downmixes and resamples to 48 kHz mono itself, so a client whose
     /// microphone runs at 44.1 kHz needs no special case here.
     pub fn push(&self, sample_rate: u32, channels: u16, samples: &[f32]) {
-        if let Ok(mut acc) = self.input.lock() {
-            acc.0 += samples.iter().map(|s| s * s).sum::<f32>();
-            acc.1 += samples.len();
+        if let Ok(mut meter) = self.input.lock() {
+            let frames = samples.len() / channels.max(1) as usize;
+            let dt = frames as f32 / sample_rate.max(1) as f32;
+            meter.observe(voice_dsp::rms(samples), dt);
         }
         self.writer.write_pcm_f32(sample_rate, channels, samples);
     }
@@ -243,24 +250,23 @@ fn open_pipeline(tuning: Tuning, mut sink: Sink) -> Result<(Pipeline, Shared), S
     // order). Both sides run the identical chain, so switching where
     // suppression happens is the same experiment with the work moved rather
     // than two features that share a name.
-    let energy: Arc<Mutex<(f32, usize)>> = Arc::new(Mutex::new((0.0, 0)));
+    let energy: Arc<Mutex<voice_dsp::Meter>> =
+        Arc::new(Mutex::new(voice_dsp::Meter::new(METER_MS)));
     let mut declicker = tuning.transients.map(|cfg| Declicker::new(cfg, 48_000));
     let mut leveler = tuning.leveling.map(|cfg| Leveler::new(cfg, 48_000));
     let mut expander = tuning.residual.map(|cfg| Expander::new(cfg, 48_000));
     let mut align = Alignment::new(voice_dsp::MODEL_HOPS);
+    // The output's own meter, same constant as the input's, so the ratio
+    // between them is a ratio of like for like.
+    let mut output = voice_dsp::Meter::new(METER_MS);
     let mut scratch: Vec<f32> = Vec::new();
     let measured = energy.clone();
     let sub = clean.subscribe(move |frame: &AudioFrame| {
-        let input_rms = match measured.lock() {
-            Ok(mut acc) => {
-                let rms = if acc.1 == 0 { 0.0 } else { (acc.0 / acc.1 as f32).sqrt() };
-                *acc = (0.0, 0);
-                rms
-            }
-            Err(_) => 0.0,
-        };
-        let aligned = align.delay(input_rms);
-        let gain_db = voice_dsp::model_gain_db(voice_dsp::rms(frame.samples), aligned);
+        let frames = frame.samples.len() / frame.channels.max(1) as usize;
+        let dt = frames as f32 / frame.sample_rate.max(1) as f32;
+        let out_level = output.observe(voice_dsp::rms(frame.samples), dt);
+        let in_level = measured.lock().map(|m| m.level()).unwrap_or(0.0);
+        let gain_db = voice_dsp::model_gain_db(out_level, align.delay(in_level));
 
         scratch.clear();
         scratch.extend_from_slice(frame.samples);

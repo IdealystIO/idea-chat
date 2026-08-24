@@ -83,3 +83,29 @@ node tools/presence-flows.js       # 5 assertions
 
 The lesson, for the list above: **assert on the event stream, not the table.**
 A reducer's clients see events; a consistent table proves nothing about them.
+
+## `vad-flows.js` — who is talking
+
+Runs against `fixtures/speech-like.wav` rather than Chromium's default fake
+device, and that substitution is the whole point. The default device is a pure
+**tone**; a tone is not speech; removing what is not speech is exactly what the
+suppressor does. A VAD suite built on it measures the suppressor and reports
+the indicator as broken.
+
+```bash
+bash tools/reset-dev.sh
+node tools/vad-flows.js       # 7 assertions, two browsers
+```
+
+The indicator has been wrong twice, in opposite directions, and neither showed
+up anywhere else:
+
+- **stuck on** — the model's verdict was computed against an input measurement
+  that was almost always zero. The microphone delivers ~12 frames a second and
+  the model emits 100 blocks, so an accumulator reset per block was empty seven
+  times in eight, and a zero denominator reads as "the model added 100 dB".
+- **stuck off** — the fixture was the tone described above.
+
+So the assertions are *bounds*, not targets: the claim is that the indicator
+MOVES with the audio, not that it agrees with a synthetic fixture to a
+percentage point.

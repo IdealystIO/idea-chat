@@ -97,6 +97,16 @@ pub async fn weights() -> Result<&'static [u8], String> {
     Ok(leaked)
 }
 
+/// Time constant for the levels the model's verdict is computed from.
+///
+/// Long enough to ride over a hop that happened to be quiet, short enough to
+/// follow a syllable. Both sides of the ratio use it.
+const METER_MS: f32 = 60.0;
+
+/// Below this output level nothing counts as speech, whatever the ratio says.
+/// About -54 dBFS.
+const SPEECH_FLOOR: f32 = 0.002;
+
 /// The stage between the microphone and the wire.
 ///
 /// Exactly one is installed at a time, and swapping it is what makes the
@@ -193,17 +203,24 @@ impl Prepared {
     /// The expander is driven by the model's own verdict, which is why this
     /// also measures what went *in*: see `voice_dsp::verdict`.
     pub fn install(self, out: AudioWriter) -> Chain {
-        // Input energy since the last output hop. Accumulated rather than
-        // sampled, because the microphone's frame size is not the model's hop
-        // size and sampling the latest frame would drift out of alignment on
-        // any device that does not happen to deliver 10 ms at a time.
-        let input: Arc<Mutex<(f32, usize)>> = Arc::new(Mutex::new((0.0, 0)));
+        // The input level, carried across the gaps between microphone frames.
+        //
+        // NOT an accumulator that resets per output hop. The microphone
+        // delivers about twelve frames a second and the model emits a hundred
+        // blocks, so seven hops in eight would find it empty, read zero input,
+        // and conclude the model had ADDED 100 dB — which is exactly what
+        // happened: a speaking light that never went out and a residual stage
+        // that never ran.
+        let input: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
         let mic_sub = {
             let input = input.clone();
+            let mut meter = voice_dsp::Meter::new(METER_MS);
             self.mic.subscribe(move |frame: &AudioFrame| {
-                if let Ok(mut acc) = input.lock() {
-                    acc.0 += frame.samples.iter().map(|s| s * s).sum::<f32>();
-                    acc.1 += frame.samples.len();
+                let frames = frame.samples.len() / frame.channels.max(1) as usize;
+                let dt = frames as f32 / frame.sample_rate.max(1) as f32;
+                let level = meter.observe(voice_dsp::rms(frame.samples), dt);
+                if let Ok(mut shared) = input.lock() {
+                    *shared = level;
                 }
             })
         };
@@ -213,25 +230,31 @@ impl Prepared {
         let mut expander = self.tuning.residual.map(|cfg| Expander::new(cfg, 48_000));
         let verdict_db = self.tuning.residual.map(|cfg| cfg.verdict_db).unwrap_or(-9.0);
         let mut align = Alignment::new(voice_dsp::MODEL_HOPS);
+        // The output's own meter, same constant as the input's, so the ratio
+        // between them is a ratio of like for like.
+        let mut output = voice_dsp::Meter::new(METER_MS);
         let mut scratch: Vec<f32> = Vec::new();
 
         let sub = self.clean.subscribe(move |frame: &AudioFrame| {
             // What the model did to this block, aligned across its latency.
-            let input_rms = match input.lock() {
-                Ok(mut acc) => {
-                    let rms = if acc.1 == 0 { 0.0 } else { (acc.0 / acc.1 as f32).sqrt() };
-                    *acc = (0.0, 0);
-                    rms
-                }
-                Err(_) => 0.0,
-            };
-            let aligned = align.delay(input_rms);
-            let gain_db = voice_dsp::model_gain_db(voice_dsp::rms(frame.samples), aligned);
+            let frames = frame.samples.len() / frame.channels.max(1) as usize;
+            let dt = frames as f32 / frame.sample_rate.max(1) as f32;
+            let out_level = output.observe(voice_dsp::rms(frame.samples), dt);
+            let in_level = input.lock().map(|v| *v).unwrap_or(0.0);
+            let gain_db = voice_dsp::model_gain_db(out_level, align.delay(in_level));
 
             // The model's verdict IS a voice-activity decision, and a much
             // better one than a level threshold: it is what a speech model
             // concluded, not what an envelope crossed.
-            crate::session::report_activity(gain_db > verdict_db, gain_db);
+            //
+            // Guarded by the output level as well, because a ratio is only as
+            // good as its denominator — at the start of a call there is no
+            // input measurement yet, and silence is not speech however
+            // favourably it divides.
+            crate::session::report_activity(
+                gain_db > verdict_db && out_level > SPEECH_FLOOR,
+                gain_db,
+            );
 
             scratch.clear();
             scratch.extend_from_slice(frame.samples);

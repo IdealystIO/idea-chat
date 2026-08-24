@@ -20,6 +20,24 @@
 //! [`Alignment`] is a delay line for the input measurement, sized in hops, so
 //! the comparison is between the same moment on both sides.
 //!
+//! # The two sides do not tick at the same rate
+//!
+//! The model emits a block every 10 ms. The microphone does not: on this
+//! machine it delivers about twelve frames a second, roughly 85 ms each. So
+//! "the input energy for this hop" is a quantity that mostly does not exist —
+//! for seven hops out of eight there is no new input measurement at all.
+//!
+//! Accumulating input between output hops and resetting each time looks like
+//! the obvious answer and is wrong: most hops then see an empty accumulator,
+//! read zero input, and conclude the model *added* 100 dB. The symptom was a
+//! speaking indicator that never went out and a residual stage that never once
+//! ran, both while reporting that everything was fine.
+//!
+//! [`Meter`] is the fix. It carries a level across gaps with a real time
+//! constant, and takes the duration of each block so it behaves identically
+//! whether it is fed 85 ms frames or 10 ms ones. Both sides run one, with the
+//! same constant, so the ratio between them means something.
+//!
 //! # Why this lives here rather than in either pipeline
 //!
 //! Both the client and the relay compute it, from different places — the client
@@ -51,7 +69,51 @@ pub fn rms(samples: &[f32]) -> f32 {
 /// right way to be wrong, because doing nothing to silence is free.
 pub fn model_gain_db(output_rms: f32, input_rms: f32) -> f32 {
     const FLOOR: f32 = 1.0e-9;
-    20.0 * ((output_rms + FLOOR) / (input_rms + FLOOR)).log10()
+    let db = 20.0 * ((output_rms + FLOOR) / (input_rms + FLOOR)).log10();
+    // Clamped, because the interesting range is a few dB either side of zero
+    // down to about -30, and everything outside it is a division that meant
+    // nothing. See `SANE_DB`.
+    db.clamp(-SANE_DB, SANE_DB)
+}
+
+/// How much the two sides may disagree before the ratio is treated as noise.
+///
+/// A ratio is only as good as its denominator, and at the start of a call —
+/// or during true silence — the denominator is zero. Clamping keeps a
+/// meaningless division from arriving downstream as a confident +100 dB.
+const SANE_DB: f32 = 40.0;
+
+/// A level with a time constant, fed at whatever rate the producer delivers.
+///
+/// The `dt` argument is what makes it rate-independent: an 85 ms frame moves
+/// the envelope as far as eight 10 ms ones, so the microphone side and the
+/// model side settle at the same speed even though they tick very differently.
+#[derive(Debug, Clone, Copy)]
+pub struct Meter {
+    env: f32,
+    tau_s: f32,
+}
+
+impl Meter {
+    /// A meter with a time constant in milliseconds.
+    ///
+    /// ~60 ms is long enough to ride over a hop that happened to be quiet and
+    /// short enough to follow a syllable.
+    pub fn new(tau_ms: f32) -> Meter {
+        Meter { env: 0.0, tau_s: (tau_ms / 1000.0).max(1.0e-6) }
+    }
+
+    /// Fold in a block, and return the level now.
+    pub fn observe(&mut self, rms: f32, dt_s: f32) -> f32 {
+        let alpha = 1.0 - (-dt_s.max(0.0) / self.tau_s).exp();
+        self.env += alpha * (rms - self.env);
+        self.env
+    }
+
+    /// The level, without changing it.
+    pub fn level(&self) -> f32 {
+        self.env
+    }
 }
 
 /// Holds input measurements until the output they belong to arrives.
@@ -90,6 +152,44 @@ mod tests {
         assert_eq!(rms(&[]), 0.0);
         assert_eq!(rms(&[0.0; 480]), 0.0);
         assert!((rms(&[0.5; 480]) - 0.5).abs() < 1e-6);
+    }
+
+    // The bug this whole type exists for: input measured at one rate, output
+    // at another. A meter with a real time constant settles to the same level
+    // either way; an accumulator that resets per output block does not.
+    #[test]
+    fn the_same_signal_measures_the_same_at_any_frame_rate() {
+        let mut slow = Meter::new(60.0);
+        let mut fast = Meter::new(60.0);
+        // One second of a steady 0.2, in 85 ms frames and in 10 ms ones.
+        for _ in 0..12 {
+            slow.observe(0.2, 0.085);
+        }
+        for _ in 0..100 {
+            fast.observe(0.2, 0.010);
+        }
+        assert!(
+            (slow.level() - fast.level()).abs() < 0.005,
+            "{} vs {}",
+            slow.level(),
+            fast.level(),
+        );
+    }
+
+    // A meter carries its level across a gap. An accumulator reads zero, and
+    // zero in the denominator is what produced a confident +100 dB.
+    #[test]
+    fn a_gap_between_frames_does_not_read_as_silence() {
+        let mut m = Meter::new(60.0);
+        m.observe(0.2, 0.085);
+        let after = m.level();
+        assert!(after > 0.05, "the level survives, got {after}");
+    }
+
+    #[test]
+    fn a_meaningless_ratio_is_clamped_rather_than_believed() {
+        assert_eq!(model_gain_db(0.5, 0.0), 40.0);
+        assert_eq!(model_gain_db(0.0, 0.5), -40.0);
     }
 
     #[test]
