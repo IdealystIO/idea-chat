@@ -51,19 +51,12 @@ pub struct Playing {
     element: web_sys::HtmlAudioElement,
 }
 
-impl Playing {
-    /// Output gain in `[0.0, 1.0]`.
-    pub fn set_volume(&self, volume: f32) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.element.set_volume(volume.clamp(0.0, 1.0) as f64);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = volume;
-        }
-    }
-}
+// Deliberately no `set_volume` here. An `<audio>` element has one, and it was
+// where listener volume lived first — but it cannot go above unity, so "turn
+// this person up" is inexpressible, and it exists only on web, so the native
+// path would need a second implementation with different behaviour. Gain is
+// applied to the PCM instead, one `voice_dsp::Fader` per sender, before the
+// writer. See that module for the rest of the argument.
 
 impl Drop for Playing {
     fn drop(&mut self) {

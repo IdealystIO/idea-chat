@@ -1513,6 +1513,7 @@ dependencies = [
  "voice-auth",
  "voice-client",
  "voice-dsp",
+ "voice-proto",
  "voice-server",
  "wasm-bindgen",
  "wasm-bindgen-futures",

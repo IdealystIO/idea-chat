@@ -119,6 +119,8 @@ pub fn join_room(app: App, channel_id: &str) {
                 // Only now — presence claimed at the moment of ASKING to join
                 // would show people in rooms they never reached.
                 crate::livewire::send(Action::JoinVoice { channel_id: room.clone() });
+                // After the session is in the slot: this reaches into it.
+                apply_volumes(app);
                 announce(app, room);
             }
             Err(e) => {
@@ -128,6 +130,74 @@ pub fn join_room(app: App, channel_id: &str) {
             }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Listener volume
+// ---------------------------------------------------------------------------
+
+/// Push the whole volume picture onto the live call.
+///
+/// Called after a join, because the session starts at unity and knows nothing
+/// about this device's opinions. Everything the store remembers is applied at
+/// once — including for people who are not in the room, which costs a hash map
+/// entry and means somebody who walks in twenty minutes later is already at
+/// the level they were set to rather than briefly loud.
+pub fn apply_volumes(app: App) {
+    LIVE.with(|slot| {
+        let live = slot.borrow();
+        let Some(session) = live.as_ref() else { return };
+        session.set_volume(voice_dsp::taper(crate::volume::master()));
+
+        // Two sources of a non-default gain — a stored slider position, and a
+        // mute, which is that slider at zero (see `volume::person_gain`). A
+        // muted person with no stored position has nothing under the prefix,
+        // so the mute list has to be walked separately or muting would only
+        // silence people who had also been turned down.
+        for (user_id, position) in crate::volume::everyone() {
+            set_person(session, &user_id, position, app.is_muted(&user_id));
+        }
+        for user_id in app.muted.get() {
+            set_person(session, &user_id, crate::volume::person(&user_id), true);
+        }
+    });
+}
+
+/// Push one person's gain onto the live call, if there is one.
+///
+/// Takes both halves rather than reading them: `Signal::set` stages, so a
+/// caller that has just toggled mute and then asked us to read it back would
+/// apply the value it was replacing.
+pub fn refresh_person(user_id: &str, position: f32, muted: bool) {
+    LIVE.with(|slot| {
+        if let Some(session) = slot.borrow().as_ref() {
+            set_person(session, user_id, position, muted);
+        }
+    });
+}
+
+/// Push the master onto the live call, if there is one.
+pub fn refresh_master(position: f32) {
+    LIVE.with(|slot| {
+        if let Some(session) = slot.borrow().as_ref() {
+            session.set_volume(voice_dsp::taper(position));
+        }
+    });
+}
+
+/// Translate a person into a sender number and set their gain.
+///
+/// The session deals in the `u32` a packet header carries, and the app deals
+/// in account ids; `voice_proto::participant_id` is the one place that mapping
+/// is written, and the server mints tickets through the same function. An id
+/// that will not parse is dropped rather than defaulted — a fallback number
+/// here would silently turn down whichever real person happened to own it.
+fn set_person(session: &Session, user_id: &str, position: f32, muted: bool) {
+    let Ok(uuid) = uuid::Uuid::parse_str(user_id) else { return };
+    session.set_peer_volume(
+        voice_proto::participant_id(uuid.as_bytes()),
+        crate::volume::person_gain(position, muted),
+    );
 }
 
 /// Change where suppression runs, on the call that is already up.

@@ -92,7 +92,10 @@ pub fn app() -> Element {
             if v != last_volume.get() {
                 last_volume.set(v);
                 if let Some(session) = active_for_pump.borrow().as_ref() {
-                    session.set_volume(v);
+                    // Tapered, so this slider means the same thing Hearth's
+                    // does: 100% is "as it arrived", and the bottom half of
+                    // the travel is not a cliff.
+                    session.set_volume(voice_dsp::taper(v));
                 }
             }
 

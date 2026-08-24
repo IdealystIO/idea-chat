@@ -256,6 +256,36 @@ bottom of the room list runs past the viewport and the last item —
 `side`/`align` exist as props but are static and there's no measurement
 available to app code, so the app can't choose the right side itself.
 
+## 10b. An anchored `Menu` does not survive its anchor being rebuilt
+
+`Menu` anchors to a `Ref<ViewHandle>` bound to the row that opened it. If the
+region containing that row re-renders, the handle is a new one, and the open
+menu goes with it — silently, with no error and nothing in the console.
+
+That is defensible on its own. What makes it a trap is how easy it is to key a
+region on something that changes several times a second without noticing:
+Hearth's room list was keyed on who is talking, because the speaking highlight
+is built inside it, so during a call the whole list — and any menu open on it —
+was rebuilt on every VAD event. The symptom is a menu that "sometimes doesn't
+open", which reads as a flaky click rather than as a rebuild.
+
+Two things would help, neither of them large:
+
+- `Menu` could **re-anchor** rather than unmount when its target's handle is
+  replaced, which is what a person would expect an anchored overlay to do.
+- `Slider`'s module docs already warn that a host must not re-key it mid-drag
+  ("that destroys the pointer-capturing view and the drag stalls after the
+  first move"). The same warning belongs on `Menu`, and on anything else built
+  on `anchored_overlay` — it is the same failure with a different symptom.
+
+The fix on the app side is the framework's own idiom and worth writing down,
+because it is not obvious in this direction: **a style closure is a reactive
+sink**. Reading a fast-changing signal *inside* one repaints without a rebuild,
+so the enclosing `switch` does not have to carry it in its key at all. The
+guidance that state read at build time needs a `switch`/`rx!` sink has an
+inverse — state read at build time *forces* a rebuild, and putting it in a sink
+is how you stop paying for one.
+
 ## 11. `AppShell` and `Drawer` wrap content in a block, not a flex container
 
 `idea_ui_nav::AppShell` documents its content wrapper as "Main content: fills

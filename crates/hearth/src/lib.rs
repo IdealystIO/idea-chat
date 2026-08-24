@@ -45,6 +45,9 @@ pub mod voice;
 // target, and the module already answers "nothing stored" everywhere there is
 // no storage to read.
 pub mod prefs;
+/// How loud everyone else is, on this machine. Read by the settings page, the
+/// person menu, and `voice`; stored per device in [`prefs`].
+pub mod volume;
 // The client's end of the live connection.
 #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
 pub mod livewire;

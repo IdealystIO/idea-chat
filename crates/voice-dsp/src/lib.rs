@@ -9,6 +9,12 @@
 //!            always on            Mode::Client                Mode::Server
 //! ```
 //!
+//! One stage sits on the far side of that last arrow and is not part of the
+//! choice at all: [`Fader`], the listener's own gain on each sender they hear.
+//! It is the only thing in this crate whose setting nobody else is affected by
+//! — see its module docs for why volume belongs in the PCM path rather than on
+//! an `<audio>` element.
+//!
 //! # Why this is a mode and not a pair of booleans
 //!
 //! Neural suppression twice is worse than once. DeepFilterNet is trained on
@@ -37,11 +43,13 @@
 
 #![forbid(unsafe_code)]
 
+mod fader;
 mod level;
 mod residual;
 mod transient;
 mod verdict;
 
+pub use fader::{taper, Fader, MAX_GAIN};
 pub use level::{Leveler, Leveling};
 pub use residual::{Expander, Residual};
 pub use transient::{Declicker, Transients};

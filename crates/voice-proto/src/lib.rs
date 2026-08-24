@@ -219,6 +219,32 @@ pub fn i16_to_f32(v: i16) -> f32 {
     v as f32 / i16::MAX as f32
 }
 
+/// The [`Packet::sender`] number for an account id.
+///
+/// A packet carries four bytes of sender, not sixteen — the header is per
+/// 10 ms of audio and a full account id in every one of them is bandwidth
+/// spent on something that never changes. So the number is DERIVED, and
+/// deriving it in one place is the point of this function: the server mints
+/// tickets with it, and the listener has to reverse the same mapping to know
+/// whose volume slider affects whose voice. Two spellings of this arithmetic
+/// would present as a volume control that moves the wrong person.
+///
+/// Bytes 8..12 rather than 0..4 because UUIDv7 puts a millisecond timestamp in
+/// the front: two accounts created in the same millisecond would collide on
+/// the first four bytes and be indistinguishable on the wire. Byte 8 onward is
+/// random in both v4 and v7.
+///
+/// Zero is reserved as "unset" in the relay's query string, so an id that
+/// derives to it is nudged to 1.
+pub fn participant_id(account: &[u8; 16]) -> u32 {
+    let n = u32::from_be_bytes([account[8], account[9], account[10], account[11]]);
+    if n == 0 {
+        1
+    } else {
+        n
+    }
+}
+
 /// Peak absolute amplitude of a normalized f32 buffer, for level meters.
 pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |acc, s| acc.max(s.abs()))
@@ -331,5 +357,31 @@ mod tests {
     fn peak_finds_largest_absolute_value() {
         assert_eq!(peak(&[0.0, -0.8, 0.3]), 0.8);
         assert_eq!(peak(&[]), 0.0);
+    }
+
+    #[test]
+    fn participant_ids_are_stable_and_never_zero() {
+        let mut id = [0u8; 16];
+        id[8..12].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(participant_id(&id), 0xDEADBEEF);
+        assert_eq!(participant_id(&id), participant_id(&id.clone()));
+        assert_eq!(participant_id(&[0u8; 16]), 1);
+    }
+
+    /// The front of a UUIDv7 is a timestamp, so ids minted in the same
+    /// millisecond agree there. If the derivation read those bytes, two people
+    /// who signed up together would share a sender number and the relay would
+    /// treat one as the other's echo.
+    #[test]
+    fn ids_minted_together_still_differ() {
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 16];
+        for i in 0..8 {
+            a[i] = i as u8;
+            b[i] = i as u8;
+        }
+        a[8..12].copy_from_slice(&[1, 2, 3, 4]);
+        b[8..12].copy_from_slice(&[5, 6, 7, 8]);
+        assert_ne!(participant_id(&a), participant_id(&b));
     }
 }

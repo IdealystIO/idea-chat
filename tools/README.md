@@ -84,6 +84,31 @@ node tools/presence-flows.js       # 5 assertions
 The lesson, for the list above: **assert on the event stream, not the table.**
 A reducer's clients see events; a consistent table proves nothing about them.
 
+## `volume-flows.js` — how loud everyone else is
+
+The listener's own gain, per sender. Asserts the two things that can be wrong
+in ways nothing else would notice:
+
+- **Silence for a NAMED speaker.** A listener picks a volume against a person;
+  the audio path applies it against a four-byte sender number derived from that
+  person's account id. A wrong derivation turns down somebody else, which
+  "quieter than before" cannot catch.
+- **Still connected.** Every silence check is paired with a packet count. A
+  volume control implemented by dropping packets, muting a track, or closing a
+  sink would pass "it got quieter" and fail this.
+
+```bash
+bash tools/reset-dev.sh
+node tools/volume-flows.js       # 11 assertions, two browsers
+```
+
+The menu interactions retry, and the reason is worth keeping: the roster and
+the room list are live regions, and both used to rebuild several times a second
+during a call — once per VAD event — taking any open menu with them. That is
+fixed (the highlight repaints from inside a style closure now, and the live
+reducer only bumps the revision for changes something keys on), but a rebuild
+landing between two clicks is still not a failure of the thing under test.
+
 ## `vad-flows.js` — who is talking
 
 Runs against `fixtures/speech-like.wav` rather than Chromium's default fake

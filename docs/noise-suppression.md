@@ -299,6 +299,64 @@ into a lie.
 This is worse after neural suppression than before it: the suppressor's output
 between words is far closer to true digital silence than any microphone's.
 
+## Listener volume — the only stage nobody else hears
+
+Everything above is a decision the *speaker* makes on everyone's behalf: what
+leaves the microphone is what the room gets. `voice_dsp::Fader` is the other
+half — one gain per sender, applied on the listening machine, after the wire.
+Nothing is sent, the speaker is not told, and two people in the same room can
+have completely different mixes.
+
+Two controls, and the difference matters:
+
+| | what it answers | where |
+|---|---|---|
+| **Master** | everyone is too loud | Settings → Audio & video |
+| **Per person** | everyone is fine except this one | the person's menu |
+
+They **multiply**, which is what makes the master more than a volume: turning
+somebody *up* is only possible if there is room above where they already are.
+That is why the shipped default is 70% rather than 100% — at unity the
+per-person control can only ever go down. Slider position maps to gain as
+`position²`, so 100% is exactly "as it arrived" and the bottom of the travel is
+not a cliff.
+
+Mute-for-me is this control at zero, not a second mechanism. Two paths to
+silence eventually disagree about which one wins, and the report is "unmute is
+broken" from somebody whose slider was still down.
+
+### Why not the `<audio>` element's volume
+
+It was there first, and it is wrong twice over. It cannot exceed unity, so
+"turn this person up" is inexpressible — the one case people actually reach for
+the control. And it exists only on web, so the native path would need a second
+implementation with different behaviour. Scaling the PCM before the writer has
+neither problem, costs one multiply on a path already touching every sample,
+and is testable without a browser.
+
+The fader **ramps** (20 ms) because a gain that changes between blocks is a step
+discontinuity, which is a click — the exact artefact the rest of this chain
+spends its time removing. It **limits** (-1 dBFS) because levelling already
+used the headroom, so any boost at all would clip.
+
+### The mapping is the risky part
+
+A listener chooses a volume against a *person*; the audio path applies it
+against the four-byte sender number in the packet header. That derivation lives
+in `voice_proto::participant_id` and is called by both the server minting
+tickets and the client setting gains. A second spelling of it would present as
+a slider that turns down somebody else — which is why `volume-flows.js` asserts
+silence for a *named* speaker rather than just "quieter than before".
+
+### One thing this found
+
+The roster is a live region keyed on a revision counter, and every VAD
+start/stop bumped it — so during a call the people list rebuilt several times a
+second, taking any open menu with it. A menu that cannot survive a call is a
+menu whose slider cannot be dragged during one. `livewire::put` now bumps the
+revision only for changes something actually keys on; `speaking_now` has its own
+signal and its own subscribers.
+
 ## The gate on server-side
 
 A node relays unless told otherwise. `VOICE_DENOISE=on` permits server-side
@@ -357,6 +415,7 @@ visit, exactly one after the setting is chosen.
 bash tools/voice-fleet.sh                 # sets VOICE_DENOISE=on
 node tools/suppression-flows.js           # 21 assertions, both modes, two browsers
 NODE_ALLOWS=0 node tools/suppression-flows.js   # against a fleet started with VOICE_DENOISE=off
+node tools/volume-flows.js                # 9 assertions, listener-side gain
 node tools/denoise-bench.js               # what the model costs in this browser
 cargo run --release -p voice-server --bin dfn-bench
 ```

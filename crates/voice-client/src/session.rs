@@ -195,9 +195,17 @@ fn reset_stats() {
 /// the stream drops (running its stopper), then the writer. Dropping the writer
 /// while the sink is still pulling would starve the graph rather than stop it.
 struct PeerSink {
+    /// Held, not read. This IS the output — dropping it detaches the sink and
+    /// stops the sound, which is the whole of its interface now that gain has
+    /// moved into the PCM path.
+    #[allow(dead_code)]
     playing: Playing,
     stream: AudioStream,
     writer: AudioWriter,
+    /// This listener's gain on this sender. See [`voice_dsp::Fader`] — the gain
+    /// is applied to the PCM rather than to the output element, so it works
+    /// above unity and on platforms that have no element.
+    fader: voice_dsp::Fader,
 }
 
 impl PeerSink {
@@ -207,11 +215,56 @@ impl PeerSink {
     /// network PCM, and `playback::play` binds the consumer side to an output.
     /// On web `native_source()` lazily materializes a real MediaStreamTrack for
     /// this synthetic stream, which is what makes the whole approach work.
-    fn open(sender: u32) -> Result<PeerSink, String> {
+    ///
+    /// `gain` is applied from the first sample, not ramped into: peers appear
+    /// when they first speak, and someone who was turned down before they
+    /// arrived must not be loud for the first 20 ms of the word that announced
+    /// them.
+    fn open(sender: u32, rate: u32, gain: f32) -> Result<PeerSink, String> {
         let (stream, writer) = AudioStream::new();
         let playing = playback::play(&stream)
             .map_err(|e| format!("peer {sender}: {e}"))?;
-        Ok(PeerSink { playing, stream, writer })
+        Ok(PeerSink { playing, stream, writer, fader: voice_dsp::Fader::new(rate, gain) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Listener-side volume
+// ---------------------------------------------------------------------------
+
+/// What this machine does to what it receives, per sender.
+///
+/// Held apart from the peer map on purpose, and this is the load-bearing part:
+/// a peer only exists once they have spoken, so a volume set before that has
+/// nowhere to live. Keeping the wishes separate from the sinks means turning
+/// someone down works whether or not they happen to be talking at the time.
+struct Volumes {
+    /// Applied to everyone. `1.0` is "as it arrived".
+    master: f32,
+    /// Applied to one sender on top of the master. Absent means `1.0`.
+    per: HashMap<u32, f32>,
+}
+
+/// Unity, not zero. A derived `Default` would give a master of `0.0`, which is
+/// a silent call that looks like a broken one — the wrong way round for a
+/// setting whose absence means "no opinion".
+impl Default for Volumes {
+    fn default() -> Volumes {
+        Volumes { master: 1.0, per: HashMap::new() }
+    }
+}
+
+impl Volumes {
+
+    /// The product, which is the only number the audio path ever sees.
+    ///
+    /// Multiplying rather than choosing is what makes the two controls
+    /// composable: the master is headroom, and a person set above 100% spends
+    /// it. It also means boosting somebody past unity is only possible while
+    /// the master is *below* unity, which is a real limit and the reason this
+    /// app ships a master default under 100%.
+    fn gain_for(&self, sender: u32) -> f32 {
+        self.master * self.per.get(&sender).copied().unwrap_or(1.0)
     }
 }
 
@@ -280,16 +333,48 @@ pub struct Session {
     _wire_sub: AudioSubscription,
     /// Shared with the receive task, which inserts new peers as they are heard.
     peers: Rc<RefCell<HashMap<u32, PeerSink>>>,
+    /// This listener's volume wishes, shared with the receive task so a peer
+    /// heard for the first time opens at the level they were already set to.
+    volumes: Rc<RefCell<Volumes>>,
     /// Set when the session is torn down, so the receive task stops rather than
     /// resurrecting peers after a leave.
     closed: Rc<RefCell<bool>>,
 }
 
 impl Session {
-    /// Output gain applied to every peer.
+    /// Output gain applied to every peer. `1.0` is "as it arrived".
+    ///
+    /// This is the listener's own decision and travels nowhere: nobody else in
+    /// the room can tell it happened, which is the difference between it and
+    /// every other stage in `voice_dsp`.
     pub fn set_volume(&self, volume: f32) {
-        for peer in self.peers.borrow().values() {
-            peer.playing.set_volume(volume);
+        self.volumes.borrow_mut().master = volume.max(0.0);
+        self.apply_volumes();
+    }
+
+    /// Output gain applied to one sender, on top of the master.
+    ///
+    /// Takes effect over a few milliseconds rather than instantly — see
+    /// [`voice_dsp::Fader`] — so dragging a slider is a slide and not a burst
+    /// of clicks.
+    pub fn set_peer_volume(&self, sender: u32, volume: f32) {
+        self.volumes.borrow_mut().per.insert(sender, volume.max(0.0));
+        self.apply_volumes();
+    }
+
+    /// The gain currently asked for on one sender, ignoring the master.
+    pub fn peer_volume(&self, sender: u32) -> f32 {
+        self.volumes.borrow().per.get(&sender).copied().unwrap_or(1.0)
+    }
+
+    /// Push the current wishes onto whichever peers are actually here.
+    ///
+    /// Peers that are not are unaffected by design: their fader is built from
+    /// the same table when they arrive.
+    fn apply_volumes(&self) {
+        let volumes = self.volumes.borrow();
+        for (sender, peer) in self.peers.borrow_mut().iter_mut() {
+            peer.fader.set_gain(volumes.gain_for(*sender));
         }
     }
 
@@ -504,6 +589,7 @@ pub async fn join(
     // 5. IN: drive the socket, routing each sender to its own playback chain,
     //    following a redirect if this node turns out not to own the room.
     let peers: Rc<RefCell<HashMap<u32, PeerSink>>> = Rc::new(RefCell::new(HashMap::new()));
+    let volumes = Rc::new(RefCell::new(Volumes::default()));
     let closed = Rc::new(RefCell::new(false));
     spawn_receive_loop(
         socket,
@@ -513,6 +599,7 @@ pub async fn join(
         ticket.map(str::to_string),
         sender.clone(),
         peers.clone(),
+        volumes.clone(),
         closed.clone(),
     );
 
@@ -524,6 +611,7 @@ pub async fn join(
         chain: RefCell::new(Some(chain)),
         _wire_sub: mic_sub,
         peers,
+        volumes,
         closed,
     })
 }
@@ -550,6 +638,7 @@ fn spawn_receive_loop(
     ticket: Option<String>,
     sender: SharedSender,
     peers: Rc<RefCell<HashMap<u32, PeerSink>>>,
+    volumes: Rc<RefCell<Volumes>>,
     closed: Rc<RefCell<bool>>,
 ) {
     runtime_core::driver::spawn_async(async move {
@@ -559,7 +648,7 @@ fn spawn_receive_loop(
         // cold-room race can produce.
         let mut hops = 0;
         loop {
-            match pump(&mut socket, &peers, &closed).await {
+            match pump(&mut socket, &peers, &volumes, &closed).await {
                 Pump::Finished => break,
                 Pump::Redirect(url) if hops < 3 => {
                     hops += 1;
@@ -611,6 +700,7 @@ enum Pump {
 async fn pump(
     socket: &mut WebSocket,
     peers: &Rc<RefCell<HashMap<u32, PeerSink>>>,
+    volumes: &Rc<RefCell<Volumes>>,
     closed: &Rc<RefCell<bool>>,
 ) -> Pump {
     while let Some(message) = socket.recv().await {
@@ -649,14 +739,17 @@ async fn pump(
             }
         };
 
-        let pcm = packet.to_f32();
-        REMOTE_PEAK.store(voice_proto::peak(&pcm).to_bits(), Ordering::Relaxed);
+        let mut pcm = packet.to_f32();
+
+        // The gain this listener wants on this sender, read fresh: it can be
+        // changed from the UI between any two packets.
+        let gain = volumes.borrow().gain_for(packet.sender);
 
         let mut map = peers.borrow_mut();
         let sink = match map.entry(packet.sender) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(slot) => {
-                match PeerSink::open(packet.sender) {
+                match PeerSink::open(packet.sender, packet.sample_rate, gain) {
                     Ok(sink) => {
                         let sink = slot.insert(sink);
                         PEER_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -671,6 +764,21 @@ async fn pump(
                 }
             }
         };
+
+        // A sender that changes rate mid-call needs new coefficients, not
+        // re-used ones — every time constant in the fader is derived from it.
+        // Rebuilding settled at the current gain rather than at the wish keeps
+        // a rate change from also being a volume step.
+        if sink.fader.rate() != packet.sample_rate {
+            sink.fader = voice_dsp::Fader::new(packet.sample_rate, gain);
+        }
+        sink.fader.set_gain(gain);
+        sink.fader.process(&mut pcm);
+
+        // Metered AFTER the fader, because this meter is "what you are
+        // hearing". A peak that ignored the listener's own volume would report
+        // a loud room to somebody who had turned it down.
+        REMOTE_PEAK.store(voice_proto::peak(&pcm).to_bits(), Ordering::Relaxed);
 
         // `write_pcm_f32` derives a sample-accurate PTS from a running frame
         // count rather than arrival time, which is what a playback stream

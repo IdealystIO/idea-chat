@@ -45,11 +45,9 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
                 app.voice_error.get(),
                 // Who is standing in which room — see `App::presence_key`.
                 app.presence_key(),
-                // Who is talking. A style change, not a structural one — but
-                // the occupant rows are built inside this body, so the key has
-                // to carry it or the highlight never repaints.
-                app.speaking.get(),
-                app.speaking_now.with(|s| s.join(",")),
+                // A person menu opened on an occupant renders inside this
+                // body, so opening one is structural.
+                app.menu.get(),
             )
         },
         move |_| room_list_body(app),
@@ -216,18 +214,39 @@ fn live_room_row(app: App, channel: ChannelSummary) -> Element {
 /// the room, not another place you can go. Clicking opens their profile, the
 /// same as clicking them in the roster — one person, one behaviour.
 fn occupant_row(app: App, person: MemberDto) -> Element {
+    let mine = person.id == app.my_id();
     let id = person.id.clone();
-    let me = app.my_id();
-    // Your own row comes from the local signal and is instant; everyone
-    // else's comes from what their client broadcast, which costs a round trip.
-    // Lighting yourself up from an event you sent would put you 50 ms behind
-    // your own voice.
-    let mine = person.id == me;
-    let speaking = if mine {
-        app.speaking.get()
-    } else {
-        app.speaking_now.with(|s| s.iter().any(|id| id == &person.id))
-    };
+
+    // Your own row is the one place the menu has nothing to offer — you cannot
+    // mute yourself for yourself, and your own volume is the mic button — so it
+    // keeps the older behaviour and opens your profile.
+    if mine {
+        return occupant_face(app, person, mine, move || app.profile.set(id.clone()));
+    }
+    // A distinct site from the roster: the same person is in both lists at
+    // once, and pressing them in one must not open the other's menu.
+    let person_id = person.id.clone();
+    person_target(app, "room", &person_id, move |open| {
+        occupant_face(app, person, mine, move || open())
+    })
+}
+
+/// The face-and-name part of an occupant row, given what pressing it does.
+///
+/// The speaking highlight is read INSIDE the style closure rather than
+/// captured at build time, and that is the whole reason this is shaped this
+/// way. A style closure is a reactive sink: it repaints on its own. Reading the
+/// signal outside one means the enclosing region has to be keyed on it, which
+/// meant the room list was rebuilt every time anybody started or stopped
+/// talking — taking any menu opened on one of these rows with it, several
+/// times a second, for the length of the call.
+fn occupant_face(
+    app: App,
+    person: MemberDto,
+    mine: bool,
+    on_press: impl Fn() + 'static,
+) -> Element {
+    let speaking_id = person.id.clone();
     press(
         vec![
             ui! { Face(name = person.display_name.clone(), id = person.id.clone(), size = AvatarSize::Xs) },
@@ -239,10 +258,19 @@ fn occupant_row(app: App, person: MemberDto) -> Element {
                 .into(),
         ],
         move || {
+            // Your own row comes from the local signal and is instant;
+            // everyone else's comes from what their client broadcast, which
+            // costs a round trip. Lighting yourself up from an event you sent
+            // would put you 50 ms behind your own voice.
+            let speaking = if mine {
+                app.speaking.get()
+            } else {
+                app.speaking_now.with(|s| s.iter().any(|id| id == &speaking_id))
+            };
             StyleApplication::new(styles::Occupant::sheet())
                 .with("speaking", if speaking { "on" } else { "off" })
         },
-        move || app.profile.set(id.clone()),
+        on_press,
     )
 }
 
@@ -437,7 +465,13 @@ fn tray(app: App) -> Element {
 /// Who is in this space.
 #[component]
 pub fn PeopleSidebar(#[prop(static)] app: App) -> Element {
-    switch(move || (app.revision.get(), app.menu.get()), move |_| people_body(app))
+    // `muted` is in the key because a person's row SHOWS it ("Muted for you"),
+    // and without it the label only appeared the next time something else
+    // happened to bump the revision.
+    switch(
+        move || (app.revision.get(), app.menu.get(), app.muted.get()),
+        move |_| people_body(app),
+    )
 }
 
 fn people_body(app: App) -> Element {

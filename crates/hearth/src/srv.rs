@@ -268,15 +268,13 @@ pub fn now_secs() -> u64 {
 /// other. Collisions are possible and survivable: two people who collide in
 /// the same room would each filter the other's frames as their own, which is
 /// a bad call for those two — not a security boundary, which the ticket is.
-/// Zero is avoided because the relay uses it as "unset".
+///
+/// The arithmetic lives in `voice_proto` rather than here because the CLIENT
+/// needs the same mapping: per-person volume is chosen against a person and
+/// applied against a sender number, so a second spelling of this would present
+/// as a slider that turns down the wrong voice.
 pub fn participant_number(id: Uuid) -> u32 {
-    let b = id.as_bytes();
-    let n = u32::from_be_bytes([b[8], b[9], b[10], b[11]]);
-    if n == 0 {
-        1
-    } else {
-        n
-    }
+    voice_proto::participant_id(id.as_bytes())
 }
 
 /// Group occupants into one entry per room.

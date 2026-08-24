@@ -58,6 +58,54 @@ fn full(key: &str) -> String {
     format!("hearth.{key}")
 }
 
+/// Every stored key beginning with `prefix`, with the prefix stripped, paired
+/// with its value.
+///
+/// One caller: per-person volume. The alternative is asking the server who is
+/// in the room and looking each of them up, which answers a different question
+/// — a volume set for someone who has not spoken yet still has to be in force
+/// the moment they do, and the only record that they were ever turned down is
+/// this store.
+pub fn with_prefix(prefix: &str) -> Vec<(String, String)> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok()).flatten() else {
+            return Vec::new();
+        };
+        let full_prefix = full(prefix);
+        let count = store.length().unwrap_or(0);
+        (0..count)
+            .filter_map(|i| store.key(i).ok().flatten())
+            .filter_map(|key| {
+                let rest = key.strip_prefix(&full_prefix)?.to_string();
+                let value = store.get_item(&key).ok().flatten()?;
+                Some((rest, value))
+            })
+            .collect()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = prefix;
+        Vec::new()
+    }
+}
+
+/// Forget one preference, so it falls back to its default rather than being
+/// stored as one. Keeps the store from accumulating a row per person the user
+/// once nudged and set back.
+pub fn clear(key: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok()).flatten() {
+            let _ = store.remove_item(&full(key));
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = key;
+    }
+}
+
 /// Read a preference through a parser, falling back to `default`.
 pub fn parsed<T>(key: &str, parse: impl Fn(&str) -> T, default: T) -> T {
     match get(key) {
@@ -74,4 +122,19 @@ pub fn flag(key: &str, default: bool) -> bool {
 /// Store a boolean preference.
 pub fn set_flag(key: &str, value: bool) {
     set(key, if value { "on" } else { "off" });
+}
+
+/// Read a number, falling back to `default` if it was never stored or does not
+/// parse. A corrupt value is a default, not a panic: this store is editable by
+/// anyone with a devtools console.
+pub fn number(key: &str, default: f32) -> f32 {
+    match get(key).and_then(|raw| raw.parse::<f32>().ok()) {
+        Some(v) if v.is_finite() => v,
+        _ => default,
+    }
+}
+
+/// Store a number.
+pub fn set_number(key: &str, value: f32) {
+    set(key, &format!("{value}"));
 }

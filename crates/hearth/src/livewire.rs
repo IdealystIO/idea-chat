@@ -152,7 +152,7 @@ async fn run(app: App, mut sock: Sock) {
                 // `seq`; merging it into whatever was there would preserve
                 // exactly the stale entries it exists to clear.
                 cursor = Cursor::at(seq);
-                put(app, state);
+                put(app, state, true);
                 app.live_up.set(true);
                 // A fresh connection does not know what this client is
                 // reading. Saying so is what fills the transcript, so it
@@ -222,7 +222,10 @@ fn fold(app: App, event: &Event) {
     let mut state = before.clone();
     Live::apply(&mut state, event);
     if state != before {
-        put(app, state);
+        let structural = state.voice != before.voice
+            || state.unread != before.unread
+            || state.transcript != before.transcript;
+        put(app, state, structural);
     }
 }
 
@@ -279,7 +282,15 @@ fn take(app: App) -> State {
 }
 
 /// Write it back out.
-fn put(app: App, state: State) {
+///
+/// `structural` says whether anything a `switch` keys on `revision` cares about
+/// actually moved. It is false for the one event that arrives constantly —
+/// somebody starting or stopping talking — and that distinction is load
+/// bearing: `speaking_now` has its own signal and its own subscribers, so
+/// bumping the revision for it rebuilt the whole roster several times a second
+/// during every call. A menu opened on one of those rows was destroyed and
+/// remade under the pointer, which makes a slider inside it undraggable.
+fn put(app: App, state: State, structural: bool) {
     app.voice_rooms.set(state.voice);
     app.speaking_now.set(state.speaking);
     app.unread.set(state.unread);
@@ -290,5 +301,7 @@ fn put(app: App, state: State) {
             app.messages.set(state.transcript);
         }
     }
-    app.touch();
+    if structural {
+        app.touch();
+    }
 }

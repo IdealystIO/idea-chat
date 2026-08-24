@@ -58,6 +58,10 @@ idea-state = { workspace = true }
 # Names where noise suppression runs. Both halves of the app need the same
 # word for it, and this crate is that word.
 voice-dsp = { workspace = true }
+# The packet header, for one function: the sender number a voice packet carries
+# is DERIVED from an account id, and both halves of the app have to derive it
+# the same way — see `srv::participant_number` and `voice::set_person_volume`.
+voice-proto = { workspace = true }
 icons-lucide = { workspace = true }
 
 [[bin]]

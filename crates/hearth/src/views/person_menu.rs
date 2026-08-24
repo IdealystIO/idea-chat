@@ -15,8 +15,8 @@
 use icons_lucide::{
     MESSAGE_SQUARE, VOLUME_2, VOLUME_X,
 };
-use idea_ui::{AvatarSize, Menu, MenuItem, MenuLabel, MenuSeparator};
-use runtime_core::{ui, Element, Ref, StyleApplication, ViewHandle};
+use idea_ui::{AvatarSize, ControlSize, Menu, MenuItem, MenuLabel, MenuSeparator, Slider};
+use runtime_core::{text, ui, Element, Ref, StyleApplication, ViewHandle};
 
 use crate::model::App;
 use crate::net;
@@ -99,11 +99,16 @@ fn person_menu(app: App, user_id: &str, anchor: Ref<ViewHandle>) -> Element {
             )
 
             MenuSeparator()
+            MenuLabel(text = "Volume for me".to_string())
+            volume_row(app, &user_id, muted_for_me)
             MenuItem(
                 label = if muted_for_me { "Unmute for me".to_string() } else { "Mute for me".to_string() },
                 leading = Some(glyph(if muted_for_me { VOLUME_2 } else { VOLUME_X })),
                 on_select = cb(move || {
                     app.toggle_in(app.muted, &n_mute);
+                    // The signal STAGES, so the value that matters is the one
+                    // being moved to, not the one a read would return.
+                    apply(&n_mute, !muted_for_me);
                     app.close_menu();
                 }),
             )
@@ -127,4 +132,53 @@ fn person_menu(app: App, user_id: &str, anchor: Ref<ViewHandle>) -> Element {
 /// A 15px leading icon for a menu row.
 fn glyph(data: runtime_core::IconData) -> Element {
     ui! { Glyph(data = Some(data)) }
+}
+
+/// One person's volume, as a slider, inside their menu.
+///
+/// Deliberately not a `MenuItem`: it is not a command, it is a value, and a
+/// row that dismissed the menu on the first press would be unusable as one.
+///
+/// The whole row is a listener-side setting — see [`crate::volume`]. Nothing
+/// leaves this device and the person on the other end is not told, which is
+/// what lets it sit in a menu with no confirmation attached.
+fn volume_row(app: App, user_id: &str, muted: bool) -> Element {
+    let id = user_id.to_string();
+    let on_change = std::rc::Rc::new(move |position: f32| {
+        // The signal first, so the slider tracks the drag; then the store, so
+        // it survives a refresh; then the call, so it is audible now.
+        app.person_volume.set(position);
+        crate::volume::set_person(&id, position);
+        #[cfg(target_arch = "wasm32")]
+        crate::voice::refresh_person(&id, position, muted);
+    }) as std::rc::Rc<dyn Fn(f32)>;
+
+    ui! {
+        view(style = || StyleApplication::new(styles::MenuControl::sheet())) {
+            Slider(
+                value = app.person_volume,
+                on_change = on_change,
+                min = 0.0,
+                max = crate::volume::PERSON_MAX,
+                width = 132.0,
+                size = ControlSize::Sm,
+                // Dimmed while muted rather than hidden: the level is still
+                // there and comes back with them, but dragging it would be
+                // moving a control that cannot make a sound.
+                disabled = muted,
+                leading_icon = Some(VOLUME_X),
+                trailing_icon = Some(VOLUME_2),
+            )
+            text(move || format!("{:.0}%", app.person_volume.get() * 100.0))
+                .with_style(|| StyleApplication::new(styles::VolumeReadout::sheet()))
+        }
+    }
+}
+
+/// Push a person's current volume-and-mute onto the call in progress.
+fn apply(user_id: &str, muted: bool) {
+    #[cfg(target_arch = "wasm32")]
+    crate::voice::refresh_person(user_id, crate::volume::person(user_id), muted);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (user_id, muted);
 }

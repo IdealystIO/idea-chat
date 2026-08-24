@@ -636,6 +636,33 @@ stylesheet! {
     }
 }
 
+// A control that lives inside a Menu, inset to the same text column as the
+// menu's rows so the slider lines up with the labels above and below it.
+stylesheet! {
+    pub MenuControl<IdeaThemeRef> {
+        base(t) {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            gap: t.spacing.sm(),
+            padding_vertical: t.spacing.xs(),
+            padding_horizontal: t.spacing.md(),
+        }
+    }
+}
+
+// The percentage beside a volume slider. Fixed width and tabular figures so
+// the slider does not shuffle sideways as the number gains a digit.
+stylesheet! {
+    pub VolumeReadout<IdeaThemeRef> {
+        base(t) {
+            color: t.color.text_muted(),
+            font_size: t.typography.caption_size(),
+            width: 38.0,
+            text_align: TextAlign::Right,
+        }
+    }
+}
+
 stylesheet! {
     pub Row<()> {
         base(_t) {

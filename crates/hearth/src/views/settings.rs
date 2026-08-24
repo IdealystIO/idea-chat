@@ -5,8 +5,9 @@
 //! "Tell me about — Everything / Mentions / Nothing" needs no help text to
 //! explain what the middle setting does.
 
-use idea_ui::{shape, size, tone, typography_kind, variant, Badge, Button, Stack, StackAxis, StackGap, ToneRef, Typography, VariantRef};
-use runtime_core::{switch, component, ui, Element, StyleApplication};
+use icons_lucide::{VOLUME_2, VOLUME_X};
+use idea_ui::{shape, size, tone, typography_kind, variant, Badge, Button, ControlSize, Slider, Stack, StackAxis, StackGap, ToneRef, Typography, VariantRef};
+use runtime_core::{switch, component, text, ui, Element, StyleApplication};
 
 use crate::model::{App, Notify};
 use voice_dsp::{Mode, Strength};
@@ -155,6 +156,14 @@ fn settings_body(app: App) -> Element {
                         "Camera on by default",
                         "Off is a perfectly normal way to be on a call.",
                         on_off(app.cam.get(), move |v| app.cam.set(v)),
+                    ),
+                    row(
+                        "How loud everyone is",
+                        // Says what the number is FOR, because the obvious
+                        // reading — "why would I not leave this at 100" — is
+                        // the one that makes the per-person control useless.
+                        "Only on this device, and nobody is told. Leaving room below full is what lets you turn one person up in their own menu.",
+                        vec![master_volume(app)],
                     ),
                     row(
                         "Noise suppression",
@@ -402,4 +411,41 @@ fn account_group(app: App) -> Element {
             }],
         )],
     )
+}
+
+/// The master volume slider.
+///
+/// Not `option` pills like the rest of this page, because loudness is the one
+/// setting here that is genuinely continuous — three named steps would be
+/// three guesses at somebody else's headphones.
+///
+/// Deliberately absent from the `switch` key at the top of this page: a slider
+/// that re-keys on its own value is rebuilt mid-drag, which destroys the view
+/// holding the pointer and stalls the drag after the first move. The `Slider`
+/// patches its fill in place from the signal instead.
+fn master_volume(app: App) -> Element {
+    let on_change = std::rc::Rc::new(move |position: f32| {
+        // The signal first, so the slider tracks the drag; then the store, so
+        // it survives a refresh; then the call, so it is audible now.
+        app.volume.set(position);
+        crate::volume::set_master(position);
+        #[cfg(target_arch = "wasm32")]
+        crate::voice::refresh_master(position);
+    }) as std::rc::Rc<dyn Fn(f32)>;
+
+    ui! {
+        view(style = || StyleApplication::new(styles::Row::sheet())) {
+            Slider(
+                value = app.volume,
+                on_change = on_change,
+                min = 0.0,
+                max = 1.0,
+                size = ControlSize::Sm,
+                leading_icon = Some(VOLUME_X),
+                trailing_icon = Some(VOLUME_2),
+            )
+            text(move || format!("{:.0}%", app.volume.get() * 100.0))
+                .with_style(|| StyleApplication::new(styles::VolumeReadout::sheet()))
+        }
+    }
 }

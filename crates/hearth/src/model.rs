@@ -304,6 +304,17 @@ pub struct App {
     pub compact: Signal<bool>,
     pub read_receipts: Signal<bool>,
     pub show_people: Signal<bool>,
+    /// Master listener volume, as a slider position — see [`crate::volume`].
+    ///
+    /// A signal as well as a stored preference because a slider has to move
+    /// while it is being dragged, and the store is only read at startup.
+    pub volume: Signal<f32>,
+    /// The volume slider in the person menu that is currently open.
+    ///
+    /// One signal for all of them, because only one menu is open at a time.
+    /// Seeded by [`App::open_menu`]; a per-person map of signals would be the
+    /// same value with more bookkeeping.
+    pub person_volume: Signal<f32>,
 
     // --- moderation, still local-only ---
     pub muted: Signal<Vec<String>>,
@@ -406,6 +417,8 @@ impl App {
             compact: signal(false),
             read_receipts: signal(true),
             show_people: signal(true),
+            volume: signal(crate::volume::master()),
+            person_volume: signal(crate::volume::PERSON_DEFAULT),
 
             muted: signal(Vec::new()),
         }
@@ -587,6 +600,10 @@ impl App {
         }
         self.menu.set(format!("{site}:{user_id}"));
         self.profile.set(String::new());
+        // Seeded here rather than while the menu renders: writing a signal
+        // from inside a render is how a reactive app re-enters itself, and
+        // this is the press handler that opens the menu in the first place.
+        self.person_volume.set(crate::volume::person(user_id));
     }
 
     pub fn menu_at(&self, site: &str) -> Option<String> {
