@@ -35,6 +35,22 @@ pub fn hash_password(plaintext: &str) -> Result<String> {
         .map_err(|e| DbError::Hash(e.to_string()))
 }
 
+/// Everything we require of a password, with nothing written yet.
+///
+/// Public and separate from [`Db::set_password`] because signup has to be able
+/// to ask *before* it creates an account. It used to be an inline check inside
+/// `set_password`, which runs after the `users` row is already committed — so a
+/// too-short password returned a clean error while leaving behind an account
+/// with no credentials. On a fresh instance that was fatal: the claim flow
+/// refuses to run once any account exists, so the orphan made the instance
+/// permanently unclaimable, and it had no password to sign in with either.
+pub fn validate_password(plaintext: &str) -> Result<()> {
+    if plaintext.chars().count() < 10 {
+        return Err(DbError::Invalid("passwords must be at least 10 characters"));
+    }
+    Ok(())
+}
+
 pub fn verify_hash(hash: &str, plaintext: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(hash) else { return false };
     Argon2::default().verify_password(plaintext.as_bytes(), &parsed).is_ok()
@@ -54,9 +70,7 @@ pub fn needs_rehash(hash: &str) -> bool {
 
 impl Db {
     pub async fn set_password(&self, user_id: Uuid, plaintext: &str) -> Result<()> {
-        if plaintext.chars().count() < 10 {
-            return Err(DbError::Invalid("passwords must be at least 10 characters"));
-        }
+        validate_password(plaintext)?;
         let hash = hash_password(plaintext)?;
         sqlx::query(
             "INSERT INTO credentials (id, user_id, kind, secret)

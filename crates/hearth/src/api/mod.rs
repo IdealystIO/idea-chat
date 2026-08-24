@@ -57,24 +57,40 @@ pub async fn claim_instance(
     if db.0.has_any_user().await.map_err(srv::internal)? {
         return Err(ServerError::failed("this instance has already been claimed"));
     }
+    // Check what the operator can get wrong BEFORE spending the one-time
+    // token, so a mistyped password costs a retry rather than the claim link.
+    hearth_db::users::validate_handle(&claim.handle).map_err(srv::user_facing)?;
+    hearth_db::credentials::validate_password(&claim.password).map_err(srv::user_facing)?;
+
     if !boot.consume(&claim.token) {
         return Err(ServerError::failed("that claim link is not valid"));
     }
 
-    let user = db
+    // Account, password and the admin flag in one transaction. This is the one
+    // flow where a partial write is unrecoverable: the guard above refuses to
+    // run once any account exists, so an account created without a usable
+    // password would leave the instance both unclaimable and unsignable-in.
+    let user = match db
         .0
-        .create_user(hearth_db::NewUser {
-            handle: claim.handle,
-            display_name: claim.display_name,
-            email: claim.email,
-        })
+        .create_user_with_password(
+            hearth_db::NewUser {
+                handle: claim.handle,
+                display_name: claim.display_name,
+                email: claim.email,
+            },
+            &claim.password,
+            true,
+        )
         .await
-        .map_err(srv::user_facing)?;
-    db.0.set_password(user.id, &claim.password).await.map_err(srv::user_facing)?;
-    // Take the promoted row back: the session principal is built from this
-    // value, so using the pre-promotion one would sign the first admin in as
-    // an ordinary member.
-    let user = db.0.promote_to_instance_admin(user.id).await.map_err(srv::internal)?;
+    {
+        Ok(user) => user,
+        Err(e) => {
+            // Nothing was written — hand the link back so the operator can fix
+            // the handle and try again without restarting the server.
+            boot.restore(claim.token);
+            return Err(srv::user_facing(e));
+        }
+    };
 
     srv::audit(&db.0, Some(user.id), "instance_claimed").await;
     srv::start_session(&sessions, &db.0, user).await
@@ -122,14 +138,17 @@ pub async fn register(
 
     let user = db
         .0
-        .create_user(hearth_db::NewUser {
-            handle: reg.handle,
-            display_name: reg.display_name,
-            email: reg.email,
-        })
+        .create_user_with_password(
+            hearth_db::NewUser {
+                handle: reg.handle,
+                display_name: reg.display_name,
+                email: reg.email,
+            },
+            &reg.password,
+            false,
+        )
         .await
         .map_err(srv::user_facing)?;
-    db.0.set_password(user.id, &reg.password).await.map_err(srv::user_facing)?;
 
     match db.0.redeem_invite(&reg.invite_code, user.id).await.map_err(srv::internal)? {
         hearth_db::Redemption::Joined(_) | hearth_db::Redemption::AlreadyMember(_) => {}

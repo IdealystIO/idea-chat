@@ -7,6 +7,24 @@ use crate::{ids, model::*, Db, DbError, Result};
 const COLS: &str =
     "id, handle, display_name, email, is_instance_admin, created_at, deleted_at";
 
+/// The handle rule, in Rust, matching the `users_handle_shape` constraint.
+///
+/// Duplicated from the schema on purpose. The constraint is the authority — it
+/// holds no matter who writes the row — but a check violation surfaces as an
+/// opaque database error, which the API can only report as an internal fault.
+/// Checking it here turns "something went wrong on our end" into a sentence
+/// that tells the person what to type. Keep the two in step.
+pub fn validate_handle(handle: &str) -> Result<()> {
+    let ok = (2..=32).contains(&handle.chars().count())
+        && handle.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(DbError::Invalid(
+            "handles are 2–32 characters, using lowercase letters, numbers and underscores",
+        ));
+    }
+    Ok(())
+}
+
 impl Db {
     pub async fn create_user(&self, new: NewUser) -> Result<User> {
         let id = ids::new_id();
@@ -21,6 +39,56 @@ impl Db {
         .fetch_one(&self.pool)
         .await
         .map_err(DbError::from_unique)
+    }
+
+    /// Create an account and its password together, or create neither.
+    ///
+    /// Two rows in two tables have to appear as one thing, so they go in one
+    /// transaction. Doing it as `create_user` then `set_password` — which is
+    /// what the signup paths used to do — leaves an account with no way to
+    /// authenticate whenever the second step fails, and the handle is taken
+    /// either way. The claim flow made that unrecoverable: it refuses to run
+    /// once *any* account exists, so one rejected password bricked the
+    /// instance.
+    ///
+    /// The password is validated before the transaction opens, so the common
+    /// failure costs no writes and no argon2 time.
+    pub async fn create_user_with_password(
+        &self,
+        new: NewUser,
+        password: &str,
+        instance_admin: bool,
+    ) -> Result<User> {
+        validate_handle(&new.handle)?;
+        crate::credentials::validate_password(password)?;
+        let hash = crate::credentials::hash_password(password)?;
+
+        let mut tx = self.pool.begin().await?;
+        let user = sqlx::query_as::<_, User>(&format!(
+            "INSERT INTO users (id, handle, display_name, email, is_instance_admin)
+             VALUES ($1, $2, $3, $4, $5) RETURNING {COLS}"
+        ))
+        .bind(ids::new_id())
+        .bind(&new.handle)
+        .bind(&new.display_name)
+        .bind(&new.email)
+        .bind(instance_admin)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::from_unique)?;
+
+        sqlx::query(
+            "INSERT INTO credentials (id, user_id, kind, secret)
+             VALUES ($1, $2, 'password', $3)",
+        )
+        .bind(ids::new_id())
+        .bind(user.id)
+        .bind(&hash)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(user)
     }
 
     pub async fn user(&self, id: Uuid) -> Result<Option<User>> {

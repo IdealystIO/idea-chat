@@ -69,6 +69,23 @@ impl Bootstrap {
         *held = None;
         true
     }
+
+    /// Put a consumed token back.
+    ///
+    /// The claim flow takes the token before it writes anything, so that two
+    /// simultaneous claims cannot both proceed — but that means a claim which
+    /// then fails has spent the operator's one-time link on nothing. Anything
+    /// the caller could have got wrong is checked before the token is taken;
+    /// this covers the rest, so an unexpected fault costs a retry rather than a
+    /// server restart.
+    ///
+    /// Only restores if no other token has been armed in the meantime.
+    pub fn restore(&self, token: String) {
+        let mut held = self.token.lock().expect("bootstrap lock");
+        if held.is_none() {
+            *held = Some(token);
+        }
+    }
 }
 
 /// 32 bytes of CSPRNG, hex.

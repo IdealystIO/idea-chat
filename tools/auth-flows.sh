@@ -45,6 +45,20 @@ has "a fresh instance is invite-only" "$R" '"registration_mode":"invite_only"'
 echo "--- claiming ---"
 R=$(call claim_instance "[{\"token\":\"wrong\",\"handle\":\"ana\",\"display_name\":\"Ana\",\"password\":\"a good passphrase\"}]")
 has "a wrong claim token is refused" "$R" 'not valid'
+
+# A rejected claim must write nothing and spend nothing. This flow used to
+# create the account first and validate the password second, so one typo left
+# an account with no credentials on an instance that then refused to be
+# claimed again — unclaimable and unsignable-in, fixable only by dropping the
+# database. Each rejection below is followed by proof the real claim still
+# works with the same token.
+R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"ana\",\"display_name\":\"Ana\",\"password\":\"short\"}]")
+has "a too-short password is refused" "$R" 'at least 10 characters'
+R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"Ana Ruiz!\",\"display_name\":\"Ana\",\"password\":\"a good passphrase\"}]")
+has "a malformed handle is refused" "$R" 'lowercase letters'
+no  "and is not reported as our fault" "$R" 'our end'
+R=$(call instance_status 'null')
+has "a rejected claim leaves the instance claimable" "$R" '"needs_claim":true'
 R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"ana\",\"display_name\":\"Ana Ruiz\",\"password\":\"a good passphrase\"}]" "-c $JAR")
 has "the right token claims the instance" "$R" '"handle":"ana"'
 has "the first account is instance admin" "$R" '"is_instance_admin":true'
@@ -54,6 +68,8 @@ grep -qi 'HttpOnly' $JAR && { echo "  ok   the cookie is httpOnly"; PASS=$((PASS
 
 R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"thief\",\"display_name\":\"Thief\",\"password\":\"another passphrase\"}]")
 has "the claim token cannot be reused" "$R" 'already been claimed'
+R=$(call login '[{"identifier":"ana","password":"a good passphrase"}]')
+has "the claimed account can actually sign in" "$R" '"handle":"ana"'
 R=$(call instance_status 'null')
 has "a claimed instance stops advertising a claim" "$R" '"needs_claim":false'
 
