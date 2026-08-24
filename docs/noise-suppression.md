@@ -165,11 +165,47 @@ The node says which mode it is in at startup, next to the ticket mode, for the
 same reason: a capacity decision visible only in an environment variable is one
 nobody checks until the machine is already saturated.
 
+## The bundle cost, and where it went
+
+The inference engine is ~6.8 MB of release wasm. Suppression is off by default,
+so every first visit paid for it — including the visits that never open a voice
+room.
+
+It lives in a lazily-loaded chunk now, behind a `#[lazy_component]` boundary
+(`views/suppressor.rs`). Debug build, before and after:
+
+| | main bundle | chunk |
+| --- | --- | --- |
+| before | 22.1 MB | — |
+| after | **8.6 MB** | 14.9 MB, on demand |
+
+The boundary is a component that draws nothing — it is a lifecycle hook wearing
+a component's clothes, because a component is the unit the splitter works on.
+It mounts whenever the setting is "This device", call or no call, so choosing
+the option starts the chunk fetch and the model download immediately rather
+than making your first call the one that waits for 8 MB of weights.
+
+**The rule that makes it work** is reachability: `wasm-split` moves code that
+can be reached *only* from a lazy body. There is exactly one path from the app
+into the engine — `voice::engage`, `voice::warm` and
+`voice::install_denoise_probe`, all called only from that body. A second caller
+anywhere pulls the whole engine back into the main bundle, and nothing errors;
+the chunk just stops being worth having. Two consequences worth knowing:
+
+- `session::join` no longer builds the neural chain even when suppression is on.
+  A call starts on the direct chain and the chunk swaps in, which costs the
+  first ~250 ms of a call.
+- The wasm benchmark ships inside the chunk too, so `tools/denoise-bench.js`
+  has to switch the setting on before the probe exists.
+
+`suppression-flows.js` asserts both halves: no chunk request on an ordinary
+visit, exactly one after the setting is chosen.
+
 ## Testing it
 
 ```console
 bash tools/voice-fleet.sh                 # sets VOICE_DENOISE=on
-node tools/suppression-flows.js           # 19 assertions, both modes, two browsers
+node tools/suppression-flows.js           # 21 assertions, both modes, two browsers
 NODE_ALLOWS=0 node tools/suppression-flows.js   # against a fleet started with VOICE_DENOISE=off
 node tools/denoise-bench.js               # what the model costs in this browser
 cargo run --release -p voice-server --bin dfn-bench
@@ -185,10 +221,6 @@ a loud signal — the attenuation is the positive evidence that the model ran.
 
 ## Known gaps
 
-- **The bundle cost is unmitigated.** The inference engine is compiled into
-  every build. A cargo feature that drops it, or a lazily-loaded `wasm-split`
-  chunk, would make on-device suppression cost nothing to the visitors who
-  never use it. The latter is the better answer and the larger lift.
 - **The shippable bundle size is unmeasured.** `idealyst build --web --release`
   cannot finish here: `wasm-opt` needs `binaryen`, which is not installed. Every
   size above is post-split, pre-opt, with debug info still in — real for

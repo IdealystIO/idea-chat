@@ -34,7 +34,7 @@ comes back, and that audio still crosses the room. See
 ```bash
 bash tools/voice-fleet.sh                       # sets VOICE_DENOISE=on
 bash tools/reset-dev.sh
-node tools/suppression-flows.js                 # 19 assertions
+node tools/suppression-flows.js                 # 21 assertions
 NODE_ALLOWS=0 node tools/suppression-flows.js   # against a fleet without VOICE_DENOISE
 ```
 
@@ -67,3 +67,19 @@ Copies `DeepFilterNet3_onnx.tar.gz` out of cargo's git checkout into
 `crates/hearth/assets/`, served at `/assets/…`. Not committed: it is 8 MB that
 already exists on any machine that has built the workspace, and copying from
 the checkout guarantees the model matches the engine compiled against it.
+
+## `presence-flows.js` — who the server SAYS is in a room
+
+Drives the live socket directly and counts frames, because the bug it exists
+for was invisible in the database: one row per person, `joined_at` never
+moving, `seen_at` renewed every 15 s — while the server announced a *join* on
+every heartbeat. Everyone in the room heard the connect tone every fifteen
+seconds and the speaker jumped to the bottom of the sidebar each time.
+
+```bash
+bash tools/reset-dev.sh
+node tools/presence-flows.js       # 5 assertions
+```
+
+The lesson, for the list above: **assert on the event stream, not the table.**
+A reducer's clients see events; a consistent table proves nothing about them.

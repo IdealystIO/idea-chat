@@ -408,29 +408,16 @@ pub async fn join(
     //     reads. What feeds it is swappable — see `Session::install`.
     let (wire, wire_writer) = AudioStream::new();
 
-    //     Client-side suppression, if that is where it was asked to run. The
-    //     model fetch lives behind this call and is the slow part of a first
-    //     join; failure degrades to an ordinary call rather than refusing to
-    //     connect, because a noisy call beats no call.
-    let chain = if mode == voice_dsp::Mode::Client {
-        match crate::suppress::neural(&mic, wire_writer.clone(), voice_dsp::Tuning::default())
-            .await
-        {
-            Ok(chain) => {
-                SUPPRESSION.store(mode_code(voice_dsp::Mode::Client), Ordering::Relaxed);
-                chain
-            }
-            Err(e) => {
-                // Loud, because the alternative is a user who turned the
-                // feature on, heard no difference, and has no way to find out
-                // that it never started.
-                web_log(&format!("[suppress] client-side suppression unavailable: {e}"));
-                crate::suppress::direct(&mic, wire_writer.clone())
-            }
-        }
-    } else {
-        crate::suppress::direct(&mic, wire_writer.clone())
-    };
+    //     A call always starts on the direct chain, even when suppression is
+    //     switched on. That is a code-splitting decision, not an audio one:
+    //     DeepFilterNet lives in a lazily-loaded wasm chunk, and a `join` that
+    //     could reach it would pull the whole inference engine back into the
+    //     main bundle for every visitor. The app swaps the neural chain in from
+    //     inside the chunk — see `hearth::views::suppressor`.
+    //
+    //     The microphone is already opened with the right flags for `mode`, so
+    //     the swap does not have to reopen it at join time.
+    let chain = crate::suppress::direct(&mic, wire_writer.clone());
 
     // 2. Placement. A `ws://` origin bypasses the director for single-node use;
     //    anything else is asked where the room lives.

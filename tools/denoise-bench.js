@@ -20,6 +20,64 @@ const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux
 const APP = process.env.APP || 'http://127.0.0.1:8090';
 const SECONDS = Number(process.env.SECONDS || 10);
 
+
+const HANDLE = process.env.HANDLE || 'ana';
+const PASSWORD = process.env.PASSWORD || 'a good passphrase';
+
+const fill = async (p, label, value) => {
+  await p.evaluate(({ label }) => {
+    for (const i of document.querySelectorAll('input')) {
+      const box = i.parentElement;
+      if (box && (box.innerText || '').trim().startsWith(label)) { i.dataset.target = '1'; return; }
+    }
+  }, { label });
+  const el = await p.$('input[data-target="1"]');
+  if (!el) throw new Error(`no field labelled ${label}`);
+  await el.click();
+  await el.type(value, { delay: 4 });
+  await p.evaluate(() => document.querySelectorAll('input[data-target]').forEach(i => delete i.dataset.target));
+};
+
+const clickText = async (p, label) => {
+  const at = await p.evaluate(({ label }) => {
+    const els = [...document.querySelectorAll('div,span,button')].filter(e => {
+      if ((e.innerText || '').trim() !== label) return false;
+      const r = e.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+    const el = els[els.length - 1];
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, { label });
+  if (at) await p.mouse.click(at.x, at.y);
+  return !!at;
+};
+
+// idea-ui renders a Button as a styled div, so there is no <button> to find.
+const pickInRow = async (p, rowName, option) => {
+  const at = await p.evaluate(({ rowName, option }) => {
+    const exactly = (el, s) => (el.innerText || '').trim() === s;
+    const rows = [...document.querySelectorAll('div')]
+      .filter(d => (d.innerText || '').trim().startsWith(rowName)
+        && [...d.querySelectorAll('div,span')].some(e => exactly(e, option)))
+      .sort((a, b) => a.getBoundingClientRect().height - b.getBoundingClientRect().height);
+    const row = rows[0];
+    if (!row) return null;
+    const hits = [...row.querySelectorAll('div,span')].filter(e => {
+      if (!exactly(e, option)) return false;
+      const r = e.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+    const el = hits[hits.length - 1];
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, { rowName, option });
+  if (at) await p.mouse.click(at.x, at.y);
+  return !!at;
+};
+
 (async () => {
   const browser = await chromium.launch({
     executablePath: EXE,
@@ -30,10 +88,26 @@ const SECONDS = Number(process.env.SECONDS || 10);
 
   console.log(`app: ${APP}`);
   await page.goto(APP, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(3000);
 
-  // The probe is installed with the rest of the app; wait for it rather than
-  // guessing at a load time.
+  // The benchmark lives in the lazy chunk, alongside the model it measures —
+  // installing it at boot would anchor the whole inference engine in the main
+  // bundle, which is the thing the chunk exists to avoid. So the setting has to
+  // be switched on first, which is what loads the chunk.
+  await fill(page, 'Handle or email', HANDLE);
+  await fill(page, 'Password', PASSWORD);
+  await clickText(page, 'Sign in');
+  await page.waitForTimeout(3000);
+  await page.mouse.click(35, 872);            // settings, from the rail
+  await page.waitForTimeout(1200);
+  if (!await pickInRow(page, 'Noise suppression', 'This device')) {
+    console.log('  FAIL  could not find the noise suppression setting — is this a signed-in app?');
+    await browser.close();
+    process.exit(1);
+  }
+
   await page.waitForFunction(() => typeof globalThis.__hearthDenoiseBench === 'function', { timeout: 180000 });
+  console.log('chunk      loaded on demand (the probe ships inside it)');
 
   // Model download, timed separately: it is a first-join cost, not a per-hop
   // one, and conflating them would make the model look slow instead of big.

@@ -266,11 +266,20 @@ async fn act(
                 .map_err(srv::internal)?
                 .ok_or_else(|| ServerError::failed("that room is not in a space"))?;
 
-            let already = db.voice_present(user, channel).await.map_err(srv::internal)?;
+            // TRUE means this was an ARRIVAL — see `Db::voice_present`. The
+            // name matters: this was once bound to `already`, which reads as
+            // "already here" and inverted the test below, so the server
+            // announced a join on every HEARTBEAT and never on the actual
+            // arrival. Everyone in the room heard the connect tone every
+            // fifteen seconds, and each event moved the speaker to the bottom
+            // of the sidebar — the reducer treats a join as "left wherever you
+            // were, then arrived". The database was perfectly consistent
+            // throughout, which is what made it hard to see.
+            let arrived = db.voice_present(user, channel).await.map_err(srv::internal)?;
             // A heartbeat for a room they are already in changes nothing, and
             // republishing it would wake every client in the space to be told
             // what they already know.
-            if !already {
+            if arrived {
                 let person = srv::member_dto(db, space, user).await?;
                 hub.publish(
                     &idea_state::Topic::space(&space.to_string()),

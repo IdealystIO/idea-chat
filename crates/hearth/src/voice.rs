@@ -132,12 +132,12 @@ pub fn join_room(app: App, channel_id: &str) {
 
 /// Change where suppression runs, on the call that is already up.
 ///
-/// The setting is a signal and the UI writes it either way; this is what makes
-/// it *audible* now rather than on the next call. Only the client half can move
-/// mid-call: `Mode::Server` is settled when the relay socket is opened, and the
-/// node has already built (or declined to build) a model by the time anyone
-/// touches this — so that one genuinely does wait, and the settings page says
-/// so.
+/// Handles the modes that cost nothing to reach. `Mode::Client` is deliberately
+/// **not** here: DeepFilterNet lives in a lazily-loaded wasm chunk, and a
+/// function the settings page can call would anchor the whole inference engine
+/// in the main bundle for every visitor, including the ones who never open a
+/// voice room. Turning it on mounts `views::suppressor::Suppressor` instead,
+/// and the swap happens from inside the chunk.
 ///
 /// `mode` is passed rather than read back out of `app.suppress`, because
 /// `Signal::set` stages: the caller has just set it, and a read here would
@@ -147,34 +147,73 @@ pub fn set_suppression(app: App, mode: voice_dsp::Mode) {
     if LIVE.with(|slot| slot.borrow().is_none()) {
         return;
     }
-    if mode == voice_dsp::Mode::Server {
-        note("server-side is decided when the call connects — this one keeps what it has");
-        return;
+    match mode {
+        voice_dsp::Mode::Server => {
+            note("server-side is decided when the call connects — this one keeps what it has");
+        }
+        // The chunk's job. Mounting it is what starts the load.
+        voice_dsp::Mode::Client => {}
+        voice_dsp::Mode::Off => disengage(app),
     }
+}
 
-    // Claim this swap before anything can await. Synchronous, so two rapid
-    // clicks are ordered by the clicks and not by whose model finished first.
-    let generation = SWAP.with(|g| {
-        let next = g.get() + 1;
-        g.set(next);
-        next
-    });
-
+/// Put the call back on the plain microphone.
+///
+/// Names nothing from the denoise SDK — `direct` is a subscription that
+/// forwards frames — so this whole path stays in the main bundle, which is
+/// what lets turning suppression *off* work even if the chunk never loaded.
+fn disengage(app: App) {
+    let generation = claim_swap();
     spawn_async(async move {
-        // Nothing below touches the session until everything is ready, and
-        // nothing holds a `RefCell` borrow across an await — which is how a
-        // reactive app panics on its own re-entry.
-        if LIVE.with(|slot| slot.borrow().is_none()) {
-            note("the call ended before the setting could be applied");
+        // A new capture device, because whether the BROWSER suppresses is
+        // fixed when the track is opened. Going back to `Off` has to restore
+        // WebRTC's own suppressor, which is not something the running track
+        // can be talked into.
+        let mic = match session::open_capture(Capture::Processed, voice_dsp::Mode::Off).await {
+            Ok(mic) => mic,
+            Err(e) => {
+                app.voice_error.set(e);
+                return;
+            }
+        };
+        if !still_wanted(generation) {
             return;
         }
+        LIVE.with(|slot| {
+            let borrowed = slot.borrow();
+            let Some(session) = borrowed.as_ref() else {
+                note("the call ended while the microphone was reopening");
+                return;
+            };
+            let chain = suppress::direct(&mic, session.wire());
+            session.install(mic, chain, voice_dsp::Mode::Off);
+            note("switched to off mid-call");
+        });
+        app.voice_error.set(String::new());
+    });
+}
 
-        // A NEW capture device, not the running one. Whether the browser is
-        // suppressing is fixed when the microphone is opened, so a swap that
-        // reused the existing track would leave WebRTC's suppressor stacked
-        // under DeepFilterNet — the one combination the design forbids, and
-        // audible as a thin, over-processed voice rather than a clean one.
-        let mic = match session::open_capture(Capture::Processed, mode).await {
+/// Turn client-side suppression on, from inside the lazy chunk.
+///
+/// **Only ever called from `views::suppressor::Suppressor`'s body.** That is
+/// not a style rule — it is the entire mechanism. `wasm-split` moves code that
+/// is reachable *only* from a lazy component's body into that component's
+/// chunk, so a second caller anywhere in the app would drag DeepFilterNet,
+/// `tract` and the model plumbing back into the main bundle and the split would
+/// silently stop paying for itself.
+pub fn engage(app: App) {
+    if LIVE.with(|slot| slot.borrow().is_none()) {
+        return;
+    }
+    let generation = claim_swap();
+
+    spawn_async(async move {
+        // A new capture device, not the running one. Whether the browser is
+        // suppressing is fixed when the microphone is opened, so reusing the
+        // existing track would leave WebRTC's suppressor stacked under
+        // DeepFilterNet — the one combination the design forbids, and audible
+        // as a thin, over-processed voice rather than a clean one.
+        let mic = match session::open_capture(Capture::Processed, voice_dsp::Mode::Client).await {
             Ok(mic) => mic,
             Err(e) => {
                 app.voice_error.set(e);
@@ -182,31 +221,19 @@ pub fn set_suppression(app: App, mode: voice_dsp::Mode) {
             }
         };
 
-        let built = match mode {
-            voice_dsp::Mode::Client => {
-                match suppress::prepare(&mic, voice_dsp::Tuning::default()).await {
-                    Ok(prepared) => Some(prepared),
-                    Err(e) => {
-                        // Say so, and leave the call exactly as it was. A
-                        // half-applied setting is worse than one that did not
-                        // apply: the old chain and the old microphone are both
-                        // still running, so the call keeps working.
-                        app.voice_error.set(e);
-                        return;
-                    }
-                }
+        let prepared = match suppress::prepare(&mic, voice_dsp::Tuning::default()).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                // Say so, and leave the call exactly as it was. A half-applied
+                // setting is worse than one that did not apply: the old chain
+                // and the old microphone are both still running, so the call
+                // keeps working.
+                app.voice_error.set(e);
+                return;
             }
-            _ => None,
         };
 
-        // The call may have ended, or moved rooms, while the model was
-        // building. Installing into a session that is no longer the live one
-        // is not possible — `LIVE` holds at most one — but installing into a
-        // NEW one would be wrong, because its chain was built for whatever
-        // mode it joined with. Checking the mode still matches is the cheap
-        // way to say "this answer is stale".
-        if SWAP.with(|g| g.get()) != generation {
-            note("superseded — the setting was changed again while this loaded");
+        if !still_wanted(generation) {
             return;
         }
 
@@ -216,15 +243,83 @@ pub fn set_suppression(app: App, mode: voice_dsp::Mode) {
                 note("the call ended while the model was loading");
                 return;
             };
-            let chain = match built {
-                Some(prepared) => prepared.install(session.wire()),
-                None => suppress::direct(&mic, session.wire()),
-            };
-            session.install(mic, chain, mode);
-            note(&format!("switched to {} mid-call", mode.as_str()));
+            let chain = prepared.install(session.wire());
+            session.install(mic, chain, voice_dsp::Mode::Client);
+            note("switched to client mid-call");
         });
         app.voice_error.set(String::new());
     });
+}
+
+/// Fetch the model without starting a call, from inside the lazy chunk.
+///
+/// Same rule as [`engage`]: only ever called from the lazy body. Choosing
+/// "This device" is the moment somebody has told us they want this, and it is
+/// the last moment before a call at which 8 MB can be downloaded without
+/// anybody waiting on it.
+pub fn warm(app: App) {
+    spawn_async(async move {
+        match suppress::weights().await {
+            Ok(bytes) => note(&format!("model ready ({} KB)", bytes.len() / 1024)),
+            Err(e) => {
+                // Not an error banner: nothing is broken yet, and the call that
+                // needs it will report it properly if it is still failing then.
+                let _ = &app;
+                note(&format!("model could not be fetched: {e}"));
+            }
+        }
+    });
+}
+
+/// Publish the suppression benchmark, from inside the lazy chunk.
+///
+/// Here rather than next to the other probe in [`install_stats_probe`] for the
+/// same reason [`engage`] is: it calls the model, and a probe installed at boot
+/// would anchor the inference engine in the main bundle. The cost is that the
+/// benchmark only exists once client-side suppression has been selected, which
+/// `tools/denoise-bench.js` does before looking for it.
+///
+/// Idempotent — the component remounts whenever a call starts or ends.
+pub fn install_denoise_probe() {
+    use wasm_bindgen::prelude::*;
+
+    let bench = Closure::wrap(Box::new(|seconds: u32| -> js_sys::Promise {
+        wasm_bindgen_futures::future_to_promise(async move {
+            match suppress::bench(seconds).await {
+                Ok(json) => Ok(JsValue::from_str(&json)),
+                Err(e) => Err(JsValue::from_str(&e)),
+            }
+        })
+    }) as Box<dyn Fn(u32) -> js_sys::Promise>);
+    let global = js_sys::global();
+    let _ = js_sys::Reflect::set(&global, &JsValue::from_str("__hearthDenoiseBench"), bench.as_ref());
+    // Handed to JS for the life of the page; dropping it would leave a dead
+    // function object behind that throws when called.
+    bench.forget();
+}
+
+/// Claim the next swap, synchronously.
+///
+/// A counter rather than a read of `app.suppress`, and that is the whole point:
+/// `Signal::set` STAGES. The caller sets the signal on the line before this
+/// runs, and reading it back — even after an await — can still return the
+/// previous value, so a guard written that way threw away the swap it was meant
+/// to protect and the setting silently did nothing.
+fn claim_swap() -> u64 {
+    SWAP.with(|g| {
+        let next = g.get() + 1;
+        g.set(next);
+        next
+    })
+}
+
+/// Whether `generation` is still the swap the app is waiting for.
+fn still_wanted(generation: u64) -> bool {
+    if SWAP.with(|g| g.get()) == generation {
+        return true;
+    }
+    note("superseded — the setting was changed again while this loaded");
+    false
 }
 
 /// Say what happened to a setting that did not visibly do anything.
@@ -337,21 +432,4 @@ pub fn install_stats_probe() {
     // function object behind that throws when called.
     cb.forget();
 
-    // The suppression benchmark, on the same seam and for the same reason:
-    // what DeepFilterNet costs in wasm cannot be inferred from what it costs
-    // natively, and it decides whether on-device suppression is a feature or a
-    // stutter. Returns a Promise, because the model has to be fetched first.
-    //
-    // It starts nothing and changes nothing — a call runs the model over
-    // synthetic audio and reports timings. Nobody's microphone is involved.
-    let bench = Closure::wrap(Box::new(|seconds: u32| -> js_sys::Promise {
-        wasm_bindgen_futures::future_to_promise(async move {
-            match voice_client::suppress::bench(seconds).await {
-                Ok(json) => Ok(JsValue::from_str(&json)),
-                Err(e) => Err(JsValue::from_str(&e)),
-            }
-        })
-    }) as Box<dyn Fn(u32) -> js_sys::Promise>);
-    let _ = js_sys::Reflect::set(&global, &JsValue::from_str("__hearthDenoiseBench"), bench.as_ref());
-    bench.forget();
 }

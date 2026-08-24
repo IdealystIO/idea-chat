@@ -219,8 +219,17 @@ const peakOver = async (pages, ms) => {
     args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
            '--autoplay-policy=no-user-gesture-required'],
   });
+  // Which wasm chunks each tab fetched, so the split can be asserted rather
+  // than assumed. A chunk that loads on every page view is a chunk that is not
+  // doing its job, and nothing about the app would look different.
+  const chunks = {};
   const open = async (handle, password) => {
     const p = await browser.newPage({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+    chunks[handle] = [];
+    p.on('request', r => {
+      const u = r.url();
+      if (u.includes('lazy_body') && u.endsWith('.wasm')) chunks[handle].push(u.split('/').pop());
+    });
     // A suite that cannot see the page's own console is blind to exactly the
     // failures that present as "the setting did nothing".
     p.on('console', m => {
@@ -244,6 +253,12 @@ const peakOver = async (pages, ms) => {
   // The setting exists and says what it costs. Worth asserting: the whole
   // point of three modes rather than a switch is that the user can see the
   // trade, and a row that renders without its help text is a switch again.
+  // Before anything is switched on: the inference engine must not have been
+  // downloaded. This is the whole point of the boundary — it is ~6.8 MB of
+  // release wasm that most visitors never need.
+  check('the suppression chunk is not fetched on an ordinary visit',
+    chunks['ana'].length === 0, JSON.stringify(chunks));
+
   await a.mouse.click(35, 872);
   await a.waitForTimeout(1200);
   check('settings offer noise suppression', await has(a, 'Noise suppression'));
@@ -336,6 +351,8 @@ const peakOver = async (pages, ms) => {
     const [sa, st] = await callWith('This device');
     console.log(`        client ana: ${JSON.stringify(sa)}`);
     check('on-device — the relay is told where it runs', sa.suppress === 'client', JSON.stringify(sa));
+    check('on-device — and choosing it fetched the chunk, once',
+      chunks['ana'].length === 1, JSON.stringify(chunks['ana']));
     neuralChecks('on-device', sa, st);
   }
 

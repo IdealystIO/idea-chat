@@ -110,13 +110,19 @@ impl Mode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tuning {
     /// Cap on background attenuation, in dB. `None` is unlimited suppression,
-    /// which is DeepFilterNet's default and sounds like a noise gate slamming
-    /// shut between words.
+    /// which is DeepFilterNet's own default.
     ///
-    /// The default here is deliberately NOT the model's default: leaving ~24 dB
-    /// of the room in keeps the noise floor continuous, and a continuous quiet
-    /// floor is what makes a call sound like a room rather than a sequence of
-    /// disconnections.
+    /// This was 24 dB, on the theory that leaving some of the room in keeps the
+    /// noise floor continuous and a continuous quiet floor sounds like a room
+    /// rather than a sequence of disconnections. That is true of *hum* — and it
+    /// is also a hard ceiling on how much of anything else can be removed, so a
+    /// door closing came through at 24 dB down, which is still plainly audible.
+    /// Somebody on a real call does not want a tasteful amount of their
+    /// neighbour's drilling.
+    ///
+    /// Unlimited is the right default for a chat app. A finite value is the
+    /// knob for the opposite complaint — "it sounds like they keep cutting out"
+    /// — and 12-24 dB is the useful range there.
     pub atten_lim_db: Option<f32>,
     /// DeepFilterNet's speech post-filter. Sharpens consonants at the cost of
     /// a little more attenuation.
@@ -129,7 +135,7 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Tuning {
-            atten_lim_db: Some(24.0),
+            atten_lim_db: None,
             post_filter: true,
             leveling: Some(Leveling::default()),
         }

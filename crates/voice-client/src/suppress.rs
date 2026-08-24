@@ -178,12 +178,6 @@ impl Prepared {
     }
 }
 
-/// Build and install a neural chain in one step, for a chain that is not
-/// replacing anything.
-pub async fn neural(mic: &AudioStream, out: AudioWriter, tuning: Tuning) -> Result<Chain, String> {
-    Ok(prepare(mic, tuning).await?.install(out))
-}
-
 /// Time this machine's DeepFilterNet, in the browser, on the real bundle.
 ///
 /// The number this returns is the one that decides whether client-side

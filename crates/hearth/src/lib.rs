@@ -163,7 +163,29 @@ mod client {
                 SearchPalette(app = app)
                 JoinDialog(app = app)
                 ProfileCard(app = app)
+
+                // Draws nothing. It is the code-splitting boundary for
+                // DeepFilterNet, mounted at the root so it survives every
+                // navigation — a boundary owned by the settings page would
+                // unload the model the moment you closed it.
+                suppression(app)
             }
+        }
+    }
+
+    /// The lazy suppression chunk, on the targets that have chunks.
+    ///
+    /// Native compiles a lazy body inline, and native has no voice path at all
+    /// yet, so this is simply absent there.
+    fn suppression(app: App) -> Vec<Element> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            vec![crate::views::suppressor::suppression_boundary(app)]
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = app;
+            Vec::new()
         }
     }
 
