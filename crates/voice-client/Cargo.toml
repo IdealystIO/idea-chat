@@ -16,7 +16,14 @@ runtime-core = { workspace = true, features = ["async-driver"] }
 runtime-vocabulary = { workspace = true }
 runtime-scene = { workspace = true }
 idea-ui = { workspace = true }
-microphone = { workspace = true }
+# No `microphone`: `audio-io` is this app's capture backend now. The permission
+# declaration further down is manifest metadata and stays regardless — the app
+# still uses a microphone, it just no longer opens it through that SDK.
+#
+# `media-stream` DOES stay, and that is the design rather than an oversight:
+# `AudioStream` is the interchange the suppression chain and `denoise` both
+# speak, and replacing a device backend was never a reason to fork the type
+# everything passes audio around in.
 media-stream = { workspace = true }
 voice-dsp = { workspace = true }
 # Client-side neural suppression. On web the model is NOT in the wasm binary —
