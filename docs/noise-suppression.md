@@ -459,7 +459,7 @@ visit, exactly one after the setting is chosen.
 bash tools/voice-fleet.sh                 # sets VOICE_DENOISE=on
 node tools/suppression-flows.js           # 21 assertions, both modes, two browsers
 NODE_ALLOWS=0 node tools/suppression-flows.js   # against a fleet started with VOICE_DENOISE=off
-node tools/volume-flows.js                # 18 assertions, listener-side gain
+node tools/volume-flows.js                # 17 assertions, listener-side gain
 node tools/denoise-bench.js               # what the model costs in this browser
 cargo run --release -p voice-server --bin dfn-bench
 ```

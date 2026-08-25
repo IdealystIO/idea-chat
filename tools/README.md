@@ -103,7 +103,7 @@ in ways nothing else would notice:
 
 ```bash
 bash tools/reset-dev.sh
-node tools/volume-flows.js       # 18 assertions, two browsers
+node tools/volume-flows.js       # 17 assertions, two browsers
 ```
 
 The refresh check found a **relay** bug, not a volume one, and it is the reason

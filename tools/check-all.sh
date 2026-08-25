@@ -55,7 +55,7 @@ run cargo test -p voice-server -q
 step "3/11  data layer — 41 tests against real Postgres"
 TAIL=4 run env HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q
 
-step "4/11  auth flows — 34 assertions over HTTP"
+step "4/11  auth flows — 42 assertions over HTTP"
 cargo build -p hearth --bin server --features server -q || exit 1
 bash tools/reset-dev.sh >/dev/null || exit 1
 TAIL=1 run bash tools/auth-flows.sh
@@ -63,7 +63,7 @@ TAIL=1 run bash tools/auth-flows.sh
 step "5/11  message flows — 17 assertions over HTTP"
 TAIL=1 run bash tools/message-flows.sh
 
-step "6/11  the whole app — 27 assertions, two browsers"
+step "6/11  the whole app — 37 assertions, two browsers"
 if [ ! -d crates/hearth/dist/web/pkg ]; then
   echo "  no wasm bundle — run: (cd crates/hearth && idealyst build --web)"
   FAILED=1
@@ -72,7 +72,7 @@ else
   TAIL=1 run node tools/hearth-e2e.js
 fi
 
-step "7/11  voice — 23 assertions, two browsers and a real relay"
+step "7/11  voice — 39 assertions, two browsers and a real relay"
 # Skipped rather than failed when the fleet is not up: it is a separate set of
 # processes, and a red suite for "you did not start the relay" trains people to
 # ignore the colour. The skip is loud and does NOT count as a pass.
@@ -117,7 +117,7 @@ else
   SKIPPED=1
 fi
 
-step "11/11  listener volume — 18 assertions, master, per-person, and mute"
+step "11/11  listener volume — 17 assertions, master, per-person, and mute"
 # The only stage in the audio chain nobody else can hear. Every silence check
 # is paired with a packet count: a volume control implemented by dropping
 # packets or closing a sink would pass "it got quieter" and fail "it is still
