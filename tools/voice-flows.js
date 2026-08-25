@@ -142,7 +142,8 @@ const stats = p => p.evaluate(() => {
 // time. Poll and keep the maximum — the same lesson the loop test learned.
 const peakOver = async (pages, ms) => {
   const best = pages.map(() => (
-    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, concealed: 0, playoutMs: 0, codec: '?', transport: 'none' }));
+    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, concealed: 0, playoutMs: 0, underruns: 0, offMainThread: false,
+      codec: '?', transport: 'none' }));
   const until = Date.now() + ms;
   while (Date.now() < until) {
     for (let i = 0; i < pages.length; i++) {
@@ -157,6 +158,8 @@ const peakOver = async (pages, ms) => {
         best[i].unsent = Math.max(best[i].unsent, s.unsent);
         best[i].concealed = Math.max(best[i].concealed, s.concealed);
         best[i].playoutMs = Math.max(best[i].playoutMs, s.playoutMs);
+        best[i].underruns = Math.max(best[i].underruns, s.underruns);
+        if (s.offMainThread) best[i].offMainThread = true;
         best[i].codec = s.codec;
         if (s.transport && s.transport !== 'none') best[i].transport = s.transport;
       }
@@ -333,6 +336,15 @@ const peakOver = async (pages, ms) => {
   // mean the buffer is mis-sequencing packets that arrived perfectly well.
   check('and inventing nothing on a link with no loss',
     sa.concealed === 0 && st.concealed === 0, `ana ${sa.concealed}, theo ${st.concealed}`);
+
+  // The claim the audio-io crate exists to make. A device that quietly fell
+  // back to a main-thread ScriptProcessorNode sounds identical on an idle test
+  // machine and drops samples the moment the page is busy — so, like the
+  // transport and the codec, it has to be observable rather than assumed.
+  check('audio runs on its own thread, not the main one',
+    sa.offMainThread && st.offMainThread, `ana ${sa.offMainThread}, theo ${st.offMainThread}`);
+  check('and the output never ran dry',
+    sa.underruns === 0 && st.underruns === 0, `ana ${sa.underruns}, theo ${st.underruns}`);
 
   // --- presence: who the sidebar says is in a room ---
   // The claim is that this works for people who are NOT in the call — you

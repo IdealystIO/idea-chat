@@ -12,9 +12,8 @@
 //!
 //! IN   carrier::Receive::next() -> Incoming::Binary
 //!        Packet::decode(..)
-//!        AudioStream::new() -> (stream, AudioWriter)   <- one pair per peer
-//!        writer.write_pcm_f32(rate, channels, &pcm)
-//!        playback::play(&stream)                        <- the only gap
+//!        jitter::Buffer, played out on a clock       <- one per sender
+//!        audio_io::Output::write_at(&pcm, rate)
 //! ```
 //!
 //! Note what is NOT here: no resampling — the packet carries its own rate and
@@ -28,15 +27,13 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter, Playout};
-use microphone::{AudioStreamConfig, Microphone};
+use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
 use net::WebSocket;
 use serde::Deserialize;
 use voice_proto::codec::Encoded;
 use voice_proto::Packet;
 
 use crate::carrier::{self, Incoming, Join, Publish, Receive};
-use crate::playback::{self, Playing};
 
 /// Milliseconds of audio in one packet on the wire.
 ///
@@ -48,21 +45,6 @@ use crate::playback::{self, Playing};
 /// arrives 85 ms at a time on web and that is where the latency is — see
 /// docs/hearth-framework-findings.md finding 10c.
 const PACKET_MS: u32 = 20;
-
-/// Frames per capture callback.
-///
-/// 1024, which is ~21 ms at 48 kHz against the SDK default of 4096 (~85 ms).
-/// This one number was the largest single entry in the latency budget, and it
-/// was charged twice: once as capture delay, and again as jitter buffer depth,
-/// because 85 ms of capture leaves as four 20 ms packets at once and a receiver
-/// cannot tell a burst it was sent from one the network made. See
-/// docs/hearth-framework-findings.md finding 10c.
-///
-/// It is close to the 960-frame packet deliberately: roughly one packet per
-/// block means the sender paces itself, which is what collapses the buffer back
-/// to its floor. Going lower means more callbacks on the browser's main thread,
-/// and 512 is about where `ScriptProcessorNode` starts to be the wrong tool.
-const CAPTURE_BLOCK_FRAMES: u32 = 1024;
 
 /// The most frames one arrival may play out at once.
 ///
@@ -139,6 +121,17 @@ static CONCEALED: AtomicU32 = AtomicU32::new(0);
 /// quantity: as a meter it says whether the buffer is coping, and every peer on
 /// one call is behind the same network.
 static PLAYOUT_MS: AtomicU32 = AtomicU32::new(0);
+/// Whether capture actually reaches this app on a thread of its own.
+///
+/// Reported rather than assumed. The whole point of moving to an
+/// `AudioWorklet` is that a busy main thread can no longer cost us samples, and
+/// "we did that" is worth exactly nothing unless it is checkable from outside.
+static OFF_MAIN_THREAD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Times an output ran dry. After the move to the audio thread this can only
+/// mean the producer could not keep up — the render callback itself cannot be
+/// late any more.
+static UNDERRUNS: AtomicU32 = AtomicU32::new(0);
 static PACKETS_DROPPED: AtomicU32 = AtomicU32::new(0);
 static PEER_COUNT: AtomicU32 = AtomicU32::new(0);
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(0);
@@ -274,6 +267,11 @@ pub struct Stats {
     /// It grows with measured jitter and is given back slowly, so a number that
     /// stays high is a network that stays bad.
     pub playout_ms: u32,
+    /// Whether audio I/O runs on a thread of its own. False means the device
+    /// fell back to the main thread, where a busy frame costs samples.
+    pub off_main_thread: bool,
+    /// Times an output ran dry since joining.
+    pub underruns: u32,
     /// Packets that arrived but could not be decoded or played.
     pub dropped: u32,
     /// Distinct remote senders heard from.
@@ -316,6 +314,8 @@ pub fn stats() -> Stats {
         received: PACKETS_IN.load(Ordering::Relaxed),
         concealed: CONCEALED.load(Ordering::Relaxed),
         playout_ms: PLAYOUT_MS.load(Ordering::Relaxed),
+        off_main_thread: OFF_MAIN_THREAD.load(Ordering::Relaxed),
+        underruns: UNDERRUNS.load(Ordering::Relaxed),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
         sample_rate: SAMPLE_RATE.load(Ordering::Relaxed),
@@ -332,8 +332,8 @@ pub fn stats() -> Stats {
 fn reset_stats() {
     for c in [
         &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_UNSENT, &PACKETS_IN,
-        &PACKETS_DROPPED, &CONCEALED, &PLAYOUT_MS, &PEER_COUNT, &SAMPLE_RATE, &CODEC,
-        &TRANSPORT,
+        &PACKETS_DROPPED, &CONCEALED, &PLAYOUT_MS, &UNDERRUNS, &PEER_COUNT, &SAMPLE_RATE,
+        &CODEC, &TRANSPORT,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -351,20 +351,17 @@ fn reset_stats() {
 // ---------------------------------------------------------------------------
 
 /// One remote participant's playback chain.
-///
-/// Field order matters for teardown: `playing` detaches the sink first, then
-/// the stream drops (running its stopper), then the writer. Dropping the writer
-/// while the sink is still pulling would starve the graph rather than stop it.
 struct PeerSink {
-    /// Held, not read. This IS the output — dropping it detaches the sink and
-    /// stops the sound, which is the whole of its interface now that gain has
-    /// moved into the PCM path.
-    #[allow(dead_code)]
-    playing: Playing,
-    stream: AudioStream,
-    writer: AudioWriter,
+    /// This sender's own output device. Dropping it detaches the node and
+    /// stops the sound.
+    ///
+    /// One per sender rather than a mix, because each carries its own gain and
+    /// its own clock. They share an `AudioContext` — `audio_io` keeps one for
+    /// the process, which is what stops a seven-person room hitting the
+    /// browser's limit on concurrent contexts.
+    output: audio_io::Output,
     /// This listener's gain on this sender. See [`voice_dsp::Fader`] — the gain
-    /// is applied to the PCM rather than to the output element, so it works
+    /// is applied to the PCM rather than to an output element, so it works
     /// above unity and on platforms that have no element.
     fader: voice_dsp::Fader,
     /// This sender's jitter buffer, holding their packets still encoded and
@@ -386,39 +383,54 @@ struct PeerSink {
     /// Concealed + starved frames already reported to [`CONCEALED`], so the
     /// global counter can be advanced by the difference rather than recomputed.
     reported_conceal: u64,
+    /// Underruns already reported to [`UNDERRUNS`], for the same reason.
+    reported_underruns: u32,
 }
 
 impl PeerSink {
-    /// Build a synthetic stream for `sender` and route it to the speakers.
+    /// Open an output for `sender` and route it to the speakers.
     ///
-    /// `AudioStream::new` gives the producer/consumer pair; the writer takes
-    /// network PCM, and `playback::play` binds the consumer side to an output.
-    /// On web `native_source()` lazily materializes a real MediaStreamTrack for
-    /// this synthetic stream, which is what makes the whole approach work.
+    /// Async, unlike the version this replaces, because loading the worklet
+    /// module is. That is a real consequence and it shaped the caller: `pump`
+    /// now opens the sink BEFORE it borrows the peer map, because holding a
+    /// `RefCell` borrow across an await is how a reactive app panics on its own
+    /// re-entry.
     ///
     /// `gain` is applied from the first sample, not ramped into: peers appear
     /// when they first speak, and someone who was turned down before they
     /// arrived must not be loud for the first 20 ms of the word that announced
     /// them.
-    fn open(sender: u32, rate: u32, gain: f32) -> Result<PeerSink, String> {
-        // The output half of the latency budget. The SDK's default carries
-        // ~85 ms of render block and cushion, which is right for a recorder and
-        // is most of the difference between a conversation and a radio
-        // interview. The cushion in particular is buying smoothing that the
-        // jitter buffer above has already paid for once.
-        let (stream, writer) = AudioStream::with_playout(Playout::low_latency());
-        let playing = playback::play(&stream)
-            .map_err(|e| format!("peer {sender}: {e}"))?;
+    async fn open(sender: u32, rate: u32, gain: f32) -> Result<PeerSink, String> {
+        let output = audio_io::Output::open(audio_io::OutputConfig {
+            sample_rate: None,
+            channels: 1,
+            latency: audio_io::Latency::Interactive,
+            // TWO packets, and the second one is the whole point. The producer
+            // here is the jitter buffer, driven by arrivals: it hands over a
+            // packet of audio at an instant and then nothing until the next one
+            // lands ~20 ms later. A cushion equal to that burst drains to
+            // exactly zero on every cycle, so the trough touches empty and the
+            // first one counts as an underrun — measured, at one per output.
+            // A cushion of two keeps the trough a full burst above the floor.
+            //
+            // Paying for smoothing twice, and knowingly: the jitter buffer
+            // above already holds 20 ms. The architectural fix is for the
+            // buffer to be pulled by the audio clock rather than by arrivals,
+            // which means living in the worklet beside the output — see
+            // `audio_io::Pipeline`. Until then this is the honest number.
+            cushion_frames: Some(2 * PACKET_MS * 48_000 / 1000),
+        })
+        .await
+        .map_err(|e| format!("peer {sender}: {e}"))?;
         Ok(PeerSink {
-            playing,
-            stream,
-            writer,
+            output,
             fader: voice_dsp::Fader::new(rate, gain),
             buffer: None,
             format: (0, 0, 0),
             frame: Vec::new(),
             clock: None,
             reported_conceal: 0,
+            reported_underruns: 0,
         })
     }
 
@@ -485,6 +497,12 @@ impl PeerSink {
         );
         self.reported_conceal = invented;
         PLAYOUT_MS.store(buffer.target_ms() as u32, Ordering::Relaxed);
+
+        // The worklet's own count, reported the same way: by difference, since
+        // it is cumulative and per output while the meter is neither.
+        let underruns = self.output.underruns();
+        UNDERRUNS.fetch_add(underruns.saturating_sub(self.reported_underruns), Ordering::Relaxed);
+        self.reported_underruns = underruns;
 
         if held.is_err() {
             PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -800,17 +818,57 @@ pub async fn open_capture(
     capture: Capture,
     mode: voice_dsp::Mode,
 ) -> Result<AudioStream, String> {
-    let config = AudioStreamConfig::default()
-        .mono()
-        .with_block_frames(CAPTURE_BLOCK_FRAMES)
-        .with_auto_gain_control(true)
-        .with_echo_cancellation(capture == Capture::Processed)
-        .with_noise_suppression(capture == Capture::Processed && mode.browser_noise_suppression());
+    let config = audio_io::CaptureConfig {
+        // Left to the crate, which asks for 48 kHz. Deliberately not the
+        // device's own rate: 44.1 kHz hardware is real, Opus takes 8, 12, 16,
+        // 24 or 48 kHz and nothing else, and one resample inside the audio
+        // graph is far cheaper than discovering at encode time that the codec
+        // will not start and sending raw PCM instead.
+        sample_rate: None,
+        channels: 1,
+        // The intent, not a block size. On this backend it is 256 frames
+        // (~5 ms); on a `ScriptProcessorNode` it would have been 1024, and a
+        // caller cannot know which it got. See `audio_io::Latency`.
+        latency: audio_io::Latency::Interactive,
+        echo_cancellation: capture == Capture::Processed,
+        noise_suppression: capture == Capture::Processed && mode.browser_noise_suppression(),
+        auto_gain_control: true,
+    };
 
-    Microphone::new()
-        .open_stream(config)
-        .await
-        .map_err(|e| format!("microphone: {e}"))
+    // The compat tap. `AudioStream` stays the currency everything downstream
+    // speaks — the suppression chain, `denoise`, the packetiser — so replacing
+    // the capture BACKEND changes none of them. What changed is that the
+    // samples reached here having never been at risk from a busy main thread.
+    let (stream, writer) = AudioStream::new();
+    let device = audio_io::Capture::open(
+        config,
+        // Empty for now. This is where a stage belongs once the graph can run
+        // in the worklet — see `audio_io::Pipeline` for why that day needs no
+        // change here.
+        audio_io::Pipeline::new(),
+        move |pcm, rate, channels, _frames_elapsed| {
+            writer.write_pcm_f32(rate, channels, pcm);
+        },
+    )
+    .await
+    .map_err(|e| format!("microphone: {e}"))?;
+
+    let opened = device.opened();
+    OFF_MAIN_THREAD.store(opened.off_main_thread, Ordering::Relaxed);
+    web_log(&format!(
+        "[voice] capture: {} Hz, {} frames ({:.1} ms), off main thread: {}",
+        opened.sample_rate,
+        opened.block_frames,
+        opened.block_ms(),
+        opened.off_main_thread,
+    ));
+
+    // The device lives exactly as long as the stream does. `attach_stopper`
+    // runs when the last clone drops, which is the same contract the capture
+    // stream already had — so nothing above here has to learn that the device
+    // is now a separate object.
+    stream.attach_stopper(move || drop(device));
+    Ok(stream)
 }
 
 /// Proof that the caller may be in this room, when the relay asks for it.
@@ -1100,25 +1158,35 @@ async fn pump(
         // changed from the UI between any two packets.
         let gain = volumes.borrow().gain_for(packet.sender);
 
-        let mut map = peers.borrow_mut();
-        let sink = match map.entry(packet.sender) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                match PeerSink::open(packet.sender, packet.sample_rate, gain) {
-                    Ok(sink) => {
-                        let sink = slot.insert(sink);
-                        PEER_COUNT.fetch_add(1, Ordering::Relaxed);
-                        sink
+        // Opened BEFORE the map is borrowed, because opening is async now —
+        // the worklet module has to load — and holding a `RefCell` borrow
+        // across an await is how a reactive app panics on its own re-entry.
+        if !peers.borrow().contains_key(&packet.sender) {
+            match PeerSink::open(packet.sender, packet.sample_rate, gain).await {
+                Ok(sink) => {
+                    // The await above is a suspension point: the session can
+                    // have been torn down, or this sender heard from twice,
+                    // while it was running.
+                    if *closed.borrow() {
+                        return Pump::Finished;
                     }
-                    Err(_) => {
-                        // No sink on this platform (native today). Count it and
-                        // keep draining so the connection does not stall.
-                        PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
-                        continue;
+                    let mut map = peers.borrow_mut();
+                    if map.insert(packet.sender, sink).is_none() {
+                        PEER_COUNT.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+                Err(e) => {
+                    // No output on this platform (native today). Count it and
+                    // keep draining so the connection does not stall.
+                    web_log(&format!("[voice] {e}"));
+                    PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
             }
-        };
+        }
+
+        let mut map = peers.borrow_mut();
+        let sink = map.get_mut(&packet.sender).expect("opened just above");
 
         // A sender that changes rate mid-call needs new coefficients, not
         // re-used ones — every time constant in the fader is derived from it.
@@ -1159,14 +1227,14 @@ async fn pump(
         // a loud room to somebody who had turned it down.
         meter(&REMOTE_PEAK, &pcm, packet.sample_rate, packet.channels);
 
-        // `write_pcm_f32` derives a sample-accurate PTS from a running frame
-        // count rather than arrival time, which is what a playback stream
-        // wants: the output clock should advance with the audio, not with the
-        // network. The packet's own `pts_micros` is deliberately unused — it is
-        // the sender's timeline, and reconciling the two timelines is the
-        // jitter buffer's job, which it does by sequence number.
-        sink.writer.write_pcm_f32(packet.sample_rate, packet.channels, &pcm);
-        let _ = &sink.stream;
+        // Straight to the device. `write_at` resamples if this sender's rate is
+        // not the output's, which is what keeps a 44.1 kHz caller from playing
+        // back fast in a room that is otherwise at 48.
+        //
+        // The packet's own `pts_micros` is deliberately unused here — it is the
+        // sender's timeline, and reconciling the two is the jitter buffer's
+        // job, which it does by sequence number.
+        sink.output.write_at(&pcm, packet.sample_rate);
     }
 }
 

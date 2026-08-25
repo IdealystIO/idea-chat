@@ -8,6 +8,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/audio-io",
     "crates/voice-proto",
     "crates/voice-dsp",
     "crates/jitter",
@@ -28,6 +29,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+audio-io    = { path = "crates/audio-io" }
 voice-proto = { path = "crates/voice-proto" }
 voice-dsp   = { path = "crates/voice-dsp" }
 jitter      = { path = "crates/jitter" }

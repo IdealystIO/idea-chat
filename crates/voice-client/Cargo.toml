@@ -32,6 +32,10 @@ voice-proto = { workspace = true, features = ["codec"] }
 # arrival order was playout order; datagrams reorder and lose, and this is what
 # turns that into a concealed frame instead of a click. See `session::PeerSink`.
 jitter = { workspace = true }
+# Capture and output on the audio thread. Replaces `microphone`'s and
+# `media-stream`'s web backends for this app's device I/O — not their stream
+# type, which stays the interchange everything else speaks. See that crate.
+audio-io = { workspace = true }
 # The QUIC transport, on the one target that can carry a call. Web-only for the
 # same reason `voice-client`'s playback is: there is no audio output on native
 # yet, so a native build has nothing to connect a transport to.

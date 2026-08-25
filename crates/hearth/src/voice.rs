@@ -527,7 +527,7 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
         s.bytes_sent,
         // Packets the transport would not carry. On a datagram carrier a
@@ -550,6 +550,12 @@ fn stats_json() -> String {
         // stop sounding fine.
         s.concealed,
         s.playout_ms,
+        // Whether audio I/O actually runs on a thread of its own. Observable
+        // from outside for the same reason the transport is: a device that
+        // silently fell back to the main thread works fine right up until the
+        // machine is busy, which is never during a test that does not check.
+        s.off_main_thread,
+        s.underruns,
         s.peers,
         s.sample_rate,
         (s.mic_peak * 100.0) as u32,

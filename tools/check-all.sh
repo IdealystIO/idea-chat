@@ -29,7 +29,7 @@ step "1/11  build — client (wasm bundle) and server"
 verdict "${PIPESTATUS[0]}"
 run cargo check -p hearth --features server -q
 
-step "2/11  unit tests — client model, ids, invite codes, and the DSP"
+step "2/11  unit tests — client model, ids, invite codes, the DSP, and device I/O"
 run cargo test -p hearth --lib -q
 # The signal conditioning is testable without a browser and mostly isn't
 # tested by one: what a leveller does to a gate, or what a fader does to a
@@ -43,6 +43,11 @@ run cargo test -p voice-proto --features codec -q
 # The transport-side crates: the jitter buffer and its concealment, the codec,
 # and a real QUIC connection on loopback.
 run cargo test -p jitter -p audio-codec -p datagram -q
+# Device I/O. Every backend in here is `#[cfg]`-gated to a platform, so what is
+# testable on a host is the part that decides cross-platform behaviour: how a
+# latency intent becomes a block size, what a pipeline does to a block, and the
+# resampler a mixed-rate room depends on.
+run cargo test -p audio-io -q
 # The relay: room bookkeeping, fan-out over both transports, and a real call
 # over QUIC on loopback.
 #
@@ -72,7 +77,7 @@ else
   TAIL=1 run node tools/hearth-e2e.js
 fi
 
-step "7/11  voice — 44 assertions, two browsers and a real relay"
+step "7/11  voice — 46 assertions, two browsers and a real relay"
 # Skipped rather than failed when the fleet is not up: it is a separate set of
 # processes, and a red suite for "you did not start the relay" trains people to
 # ignore the colour. The skip is loud and does NOT count as a pass.

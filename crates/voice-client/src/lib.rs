@@ -21,7 +21,6 @@
 // callback publishes through. Not web-only: the WebSocket arm is every
 // target's, and the shape is what keeps the audio path from knowing which.
 mod carrier;
-mod playback;
 // Public because Hearth drives the same transport from its own UI: the loop
 // this crate proves is the loop the chat app uses, rather than a second
 // implementation that can drift from it.
@@ -136,10 +135,14 @@ pub fn app() -> Element {
             }
             if s.sent != ls || s.received != lrx {
                 counters.set(format!(
-                    "{} · sent {} · recv {} · dropped {} · buffer {} ms{} · peers {} · {} Hz{}{}",
+                    "{}{} · sent {} · recv {} · dropped {} · buffer {} ms{} · peers {} · {} Hz{}{}",
                     // Which carrier, because "it works" over the fallback reads
                     // exactly like "it works" over the one this project is for.
                     s.transport,
+                    // Said only when it is NOT true — audio on its own thread
+                    // is the expectation now, and a permanent badge saying so
+                    // is a badge nobody reads.
+                    if s.off_main_thread { "" } else { " · MAIN THREAD" },
                     s.sent,
                     s.received,
                     s.dropped,
