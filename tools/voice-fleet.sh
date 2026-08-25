@@ -35,6 +35,11 @@ export VOICE_SHARED_SECRET="$SECRET"
 # test the granted path AND the refused one (start without this to get the
 # refusal).
 export VOICE_DENOISE=${VOICE_DENOISE:-on}
+# WebTransport, on a UDP port beside the node's TCP one. Opt-in per node, so
+# the local fleet turns it on explicitly — and `voice-flows.js` then asserts a
+# browser can actually reach it, which is the one claim a native test cannot
+# make.
+export VOICE_WEBTRANSPORT=${VOICE_WEBTRANSPORT:-8798}
 
 PORT=$DIRECTOR_PORT nohup ./target/debug/voice-director > /tmp/voice-director-local.log 2>&1 &
 sleep 2

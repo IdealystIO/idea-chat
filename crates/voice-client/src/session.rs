@@ -63,9 +63,11 @@ static PACKETS_OUT: AtomicU32 = AtomicU32::new(0);
 /// Payload bytes sent since join, so a bitrate can be measured rather than
 /// assumed. Wraps after ~4 GB, which no call reaches.
 static BYTES_OUT: AtomicU32 = AtomicU32::new(0);
-/// Which encoding this client settled on — see [`Wire`]. Stored as a
+/// Which encoding this client settled on. Stored as a
 /// [`voice_proto::Encoding::code`] so it fits an atomic.
 static CODEC: AtomicU32 = AtomicU32::new(0);
+/// Which transport this call is on: 0 unknown, 1 WebSocket, 2 WebTransport.
+static TRANSPORT: AtomicU32 = AtomicU32::new(0);
 static PACKETS_IN: AtomicU32 = AtomicU32::new(0);
 static PACKETS_DROPPED: AtomicU32 = AtomicU32::new(0);
 static PEER_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -168,8 +170,11 @@ pub struct Stats {
     /// bitrate — the number that says whether the codec is actually on.
     pub bytes_sent: u32,
     /// What this client is putting on the wire. Opus unless the capture format
-    /// ruled it out; see [`Wire::open`].
+    /// ruled it out; see [`voice_proto::codec::Encoded`].
     pub codec: voice_proto::Encoding,
+    /// Which transport carries this call. `"websocket"` until a node offers
+    /// WebTransport *and* this machine can actually reach it.
+    pub transport: &'static str,
     /// Packets received since join.
     pub received: u32,
     /// Packets that arrived but could not be decoded or played.
@@ -205,6 +210,11 @@ pub fn stats() -> Stats {
         bytes_sent: BYTES_OUT.load(Ordering::Relaxed),
         codec: voice_proto::Encoding::from_code(CODEC.load(Ordering::Relaxed) as u8)
             .unwrap_or(voice_proto::Encoding::PcmS16Le),
+        transport: match TRANSPORT.load(Ordering::Relaxed) {
+            2 => "webtransport",
+            1 => "websocket",
+            _ => "none",
+        },
         received: PACKETS_IN.load(Ordering::Relaxed),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
@@ -222,7 +232,7 @@ pub fn stats() -> Stats {
 fn reset_stats() {
     for c in [
         &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_IN, &PACKETS_DROPPED,
-        &PEER_COUNT, &SAMPLE_RATE, &CODEC,
+        &PEER_COUNT, &SAMPLE_RATE, &CODEC, &TRANSPORT,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -610,6 +620,27 @@ pub async fn join(
     } else {
         resolve(director_url, room).await?
     };
+
+    // 2b. Which transport. Asked before any audio path exists, and PROVEN by
+    //     dialling: a published endpoint is not a reachable one, and UDP is
+    //     blocked on plenty of networks. Discovering that at connect time would
+    //     mean a call that never begins; discovering it here is a quiet
+    //     fallback.
+    //
+    //     The call still runs on the WebSocket below. What this establishes is
+    //     that the browser can open a QUIC session to this relay at all, which
+    //     is the piece that could not be checked from a native test.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let choice = crate::transport::choose(&node_url, room, ticket).await;
+        TRANSPORT.store(if choice.name() == "webtransport" { 2 } else { 1 }, Ordering::Relaxed);
+        match choice.reason() {
+            Some(why) => web_log(&format!("[voice] transport: websocket — {why}")),
+            None => web_log("[voice] transport: webtransport is reachable"),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    TRANSPORT.store(1, Ordering::Relaxed);
 
     // 3. Transport. Binary frames, because the framework's typed Socket is JSON
     //    text on send. This is the seam that becomes QUIC datagrams later.

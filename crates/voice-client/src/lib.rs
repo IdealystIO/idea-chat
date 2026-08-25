@@ -22,6 +22,10 @@ mod playback;
 // this crate proves is the loop the chat app uses, rather than a second
 // implementation that can drift from it.
 pub mod session;
+// Which transport a call should use. Web-only because `datagram` needs the
+// browser's WebTransport, and native has no audio output to feed anyway.
+#[cfg(target_arch = "wasm32")]
+pub mod transport;
 // Public for the same reason: Hearth chooses where suppression runs, and the
 // model fetch behind `Mode::Client` is a cost its UI has to be able to explain.
 pub mod suppress;

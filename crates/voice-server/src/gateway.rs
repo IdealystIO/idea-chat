@@ -19,6 +19,7 @@
 //!   │ gateway :8080                               │
 //!   │   /_voice/rooms/{room}/route ──▶ director   │  ws_url rewritten
 //!   │   /_voice/node/{id}/ws ────────▶ that node  │  redirect: frames rewritten
+//!   │   /_voice/node/{id}/webtransport ▶ that node │  passed through UNCHANGED
 //!   │   /*  ─────────────────────────▶ web app    │
 //!   └─────────────────────────────────────────────┘
 //! ```
@@ -180,6 +181,42 @@ async fn director_get(uri: Uri, State(gw): State<Gateway>) -> Response {
     let tail = uri.path().trim_start_matches("/_voice");
     let Ok(resp) = gw.http.get(format!("{}{}", gw.director, tail)).send().await else {
         return (StatusCode::BAD_GATEWAY, "director unreachable").into_response();
+    };
+    let status = resp.status();
+    let bytes = resp.bytes().await.unwrap_or_default();
+    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], bytes).into_response()
+}
+
+/// What WebTransport endpoint a node offers, passed through.
+///
+/// Passed through and NOT rewritten, and that is the whole point worth
+/// understanding about this route: the URL it returns points straight at the
+/// node's own UDP port. Every other route here exists so that nodes need not be
+/// publicly addressable — the gateway is the one address a client knows. QUIC
+/// does not permit that. There is no HTTP reverse proxy for a WebTransport
+/// session the way there is for a WebSocket upgrade: the session is a UDP
+/// association terminating at whoever holds the certificate.
+///
+/// So a deployment that wants WebTransport has to give each node a reachable
+/// UDP endpoint and a certificate naming it. A deployment that will not do that
+/// keeps its nodes private and its calls on the WebSocket, which still works —
+/// which is why this route answering 404 has to stay an ordinary outcome rather
+/// than an error.
+async fn node_webtransport(
+    Path(node_id): Path<String>,
+    State(gw): State<Gateway>,
+) -> Response {
+    let Some(target) = gw.node_url(&node_id).await else {
+        return (StatusCode::NOT_FOUND, format!("unknown node {node_id}")).into_response();
+    };
+    // The node is registered under its `ws://` URL; its HTTP endpoint is the
+    // same server, same port.
+    let http = target
+        .trim_end_matches('/')
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let Ok(resp) = gw.http.get(format!("{http}/webtransport")).send().await else {
+        return (StatusCode::BAD_GATEWAY, "node unreachable").into_response();
     };
     let status = resp.status();
     let bytes = resp.bytes().await.unwrap_or_default();
@@ -368,6 +405,7 @@ pub fn voice_routes(director: String) -> Router {
     Router::new()
         .route("/_voice/rooms/:room/route", get(route))
         .route("/_voice/node/:node_id/ws", get(node_ws))
+        .route("/_voice/node/:node_id/webtransport", get(node_webtransport))
         .route("/_voice/fleet", get(director_get))
         .route("/_voice/rooms/:room", get(director_get))
         .route("/_voice/health", get(|| async { "ok" }))
@@ -386,6 +424,7 @@ pub fn router(director: String, app: String) -> Router {
     Router::new()
         .route("/_voice/rooms/:room/route", get(route))
         .route("/_voice/node/:node_id/ws", get(node_ws))
+        .route("/_voice/node/:node_id/webtransport", get(node_webtransport))
         .route("/_voice/fleet", get(director_get))
         .route("/_voice/rooms/:room", get(director_get))
         .route("/_voice/health", get(|| async { "ok" }))

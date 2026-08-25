@@ -142,7 +142,7 @@ const stats = p => p.evaluate(() => {
 // time. Poll and keep the maximum — the same lesson the loop test learned.
 const peakOver = async (pages, ms) => {
   const best = pages.map(() => (
-    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, codec: '?' }));
+    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, codec: '?', transport: 'none' }));
   const until = Date.now() + ms;
   while (Date.now() < until) {
     for (let i = 0; i < pages.length; i++) {
@@ -155,6 +155,7 @@ const peakOver = async (pages, ms) => {
         best[i].sent = Math.max(best[i].sent, s.sent);
         best[i].bytes = Math.max(best[i].bytes, s.bytesSent);
         best[i].codec = s.codec;
+        if (s.transport && s.transport !== 'none') best[i].transport = s.transport;
       }
     }
     await pages[0].waitForTimeout(250);
@@ -213,6 +214,12 @@ const peakOver = async (pages, ms) => {
   });
   const open = async (handle, password) => {
     const p = await browser.newPage({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+    // The transport choice is decided in the client and reported on the
+    // console; without this a fallback is a one-word verdict with no cause.
+    p.on('console', m => {
+      const t = m.text();
+      if (t.includes('[voice] transport')) console.log(`        ${handle}: ${t}`);
+    });
     // Suppression OFF for this suite, pinned before the app boots.
     //
     // Not a workaround — the fixture and the feature are incompatible by
@@ -288,6 +295,13 @@ const peakOver = async (pages, ms) => {
   // 32 bytes of that is the header. Raw would be 1952.
   check('and a packet is tens of bytes, not two thousand',
     perPacket > 32 && perPacket < 400, `${perPacket} bytes/packet`);
+
+  // The one claim no native test can make: a BROWSER opened a QUIC session to
+  // this relay, against a self-signed certificate it had to pin by hash. The
+  // call itself still runs on the WebSocket — this proves the path is there.
+  console.log(`        transport: ${sa.transport}`);
+  check('the browser can reach the relay over WebTransport',
+    sa.transport === 'webtransport', sa.transport);
 
   // --- presence: who the sidebar says is in a room ---
   // The claim is that this works for people who are NOT in the call — you

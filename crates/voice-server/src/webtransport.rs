@@ -109,6 +109,16 @@ async fn admit(request: datagram::Request, state: NodeState) {
         }
     };
 
+    // A probe has proven what it came to prove by getting this far: the
+    // network carried a QUIC session and this node accepted the ticket on it.
+    // Answering on the control stream rather than just closing means the client
+    // distinguishes "reached the relay" from "the connection dropped".
+    if params.probe {
+        let _ = link.control("probe:ok").await;
+        link.close(0, "probe");
+        return;
+    }
+
     let (down, up) = carrier::split(link, params.id);
     crate::serve(down, up, state, params.room, params.id, params.suppress).await;
 }
@@ -119,6 +129,15 @@ struct Params {
     id: u32,
     token: Option<String>,
     suppress: voice_dsp::Mode,
+    /// A reachability check rather than a call.
+    ///
+    /// It exists because a browser cannot tell a blocked UDP port from a
+    /// refused ticket: both surface as "Opening handshake failed" with nothing
+    /// to distinguish them. A client that wants to know whether this path works
+    /// *before* committing a call to it therefore has to complete a real
+    /// session — and completing one without this flag would join the room,
+    /// claiming an id the client is about to use again for the call itself.
+    probe: bool,
 }
 
 impl Params {
@@ -133,6 +152,7 @@ impl Params {
         let mut id = None;
         let mut token = None;
         let mut suppress = None;
+        let mut probe = false;
 
         if let Some(query) = url.split_once('?').map(|(_, q)| q) {
             for pair in query.split('&') {
@@ -143,6 +163,7 @@ impl Params {
                     "id" => id = value.parse().ok(),
                     "token" => token = Some(value),
                     "suppress" => suppress = Some(voice_dsp::Mode::parse(&value)),
+                    "probe" => probe = value == "1",
                     _ => {}
                 }
             }
@@ -153,6 +174,7 @@ impl Params {
             id: id.unwrap_or(0),
             token,
             suppress: suppress.unwrap_or_default(),
+            probe,
         }
     }
 }
@@ -207,6 +229,15 @@ mod tests {
         assert_eq!(p.id, 42);
         assert_eq!(p.token.as_deref(), Some("abc"));
         assert_eq!(p.suppress, voice_dsp::Mode::Client);
+    }
+
+    #[test]
+    fn a_probe_is_marked_as_one() {
+        let call = Params::parse("https://h/ws?room=porch&id=1");
+        assert!(!call.probe, "an ordinary join is not a probe");
+        let probe = Params::parse("https://h/ws?room=porch&id=1&probe=1");
+        assert!(probe.probe);
+        assert_eq!(probe.room, "porch", "and it still names the room it is ticketed for");
     }
 
     #[test]

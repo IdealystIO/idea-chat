@@ -28,6 +28,9 @@ net = { workspace = true }
 # QUIC datagram tops out near 1200, so this is what makes the transport possible
 # at all — the ~30x bandwidth saving is the part you would have wanted anyway.
 voice-proto = { workspace = true, features = ["codec"] }
+# The QUIC transport, on the one target that can carry a call. Web-only for the
+# same reason `voice-client`'s playback is: there is no audio output on native
+# yet, so a native build has nothing to connect a transport to.
 serde = { version = "1", features = ["derive"] }
 
 # Web-only playback. This is the escape hatch that stands in for the missing
@@ -36,6 +39,7 @@ serde = { version = "1", features = ["derive"] }
 # to an <audio> element. On native there is no equivalent and the module
 # returns a typed error naming the gap.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+datagram = { workspace = true }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
