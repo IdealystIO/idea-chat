@@ -5362,6 +5362,7 @@ dependencies = [
  "futures",
  "idea-ui",
  "idealyst",
+ "jitter",
  "js-sys",
  "media-stream",
  "microphone",
@@ -5398,6 +5399,7 @@ name = "voice-proto"
 version = "0.1.0"
 dependencies = [
  "audio-codec",
+ "jitter",
 ]
 
 [[package]]

@@ -44,9 +44,11 @@
 
 #![forbid(unsafe_code)]
 
+mod clock;
 mod conceal;
 mod pcm;
 
+pub use clock::Clock;
 pub use conceal::Concealer;
 pub use pcm::Pcm;
 
@@ -220,6 +222,17 @@ impl<D: Decode> Buffer<D> {
             last_arrival: None,
             stats: Stats::default(),
         }
+    }
+
+    /// The decoder this buffer plays out through.
+    ///
+    /// Exposed because a decoder has things to say that the buffer cannot say
+    /// for it — "no decoder for this encoding", "that rate is not one I take" —
+    /// and the buffer deliberately does not know what those are. Borrowing it
+    /// back is how a caller reads them without this crate learning about
+    /// codecs.
+    pub fn decoder(&self) -> &D {
+        &self.decoder
     }
 
     /// Samples per frame — what [`Buffer::pull`] must be given.
@@ -452,6 +465,53 @@ mod tests {
 
     fn buffer() -> Buffer<Pcm> {
         Buffer::new(Tuning::default(), Pcm::new(RATE, 1, FRAME), RATE, 1)
+    }
+
+    /// Run `packets` through a buffer whose arrivals follow `arrival`, pulling
+    /// at real-time rate, and report the delay it settles on.
+    ///
+    /// The pull side is paced by the same clock the arrivals are, which is what
+    /// makes this a measurement of the ARRIVAL PATTERN rather than of the
+    /// consumer.
+    fn settles_at(packets: u32, arrival: impl Fn(u32) -> f64) -> f32 {
+        let mut buffer = buffer();
+        let mut out = vec![0.0f32; FRAME];
+        let mut clock = Clock::new(buffer.frame_ms(), 10, arrival(0));
+        for seq in 0..packets {
+            let at = arrival(seq);
+            let _ = buffer.push(seq, &payload(seq), at);
+            for _ in 0..clock.due(at) {
+                buffer.pull(&mut out);
+            }
+        }
+        buffer.target_ms()
+    }
+
+    #[test]
+    fn a_sender_that_bursts_costs_more_delay_than_the_network_does() {
+        // The finding this test exists to pin down, and the reason it is here
+        // rather than asserted in prose: on THIS project's web client, capture
+        // arrives 85 ms at a time and is then cut into four 20 ms packets that
+        // all go out at once. Nothing about the network did that. But the
+        // receiver cannot tell a burst it was sent from a burst the network
+        // made, so it sizes its buffer for it — and the capture block ends up
+        // paid for twice, once as capture latency and once as playout delay.
+        //
+        // Same packet count, same total duration, same code. Only the shape of
+        // the arrivals differs.
+        let steady = settles_at(200, |seq| seq as f64 * 10.0);
+        let bursty = settles_at(200, |seq| (seq / 4) as f64 * 40.0);
+
+        assert!(
+            steady <= Tuning::default().min_ms + 1.0,
+            "an evenly paced sender needs no headroom at all, got {steady} ms",
+        );
+        assert!(
+            bursty > steady * 2.0,
+            "bursts of four should cost real delay: steady {steady} ms, bursty {bursty} ms",
+        );
+        // Left in as a record of the magnitude, not as a bound to defend.
+        println!("steady {steady:.1} ms, bursty {bursty:.1} ms");
     }
 
     /// Push enough to get past the initial fill, at a steady arrival rate.

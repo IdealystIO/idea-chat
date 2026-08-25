@@ -49,6 +49,43 @@ use crate::playback::{self, Playing};
 /// docs/hearth-framework-findings.md finding 10c.
 const PACKET_MS: u32 = 20;
 
+/// The most frames one arrival may play out at once.
+///
+/// Ten, which is 200 ms. The playout clock is real time (see [`PeerSink::feed`])
+/// and real time keeps running while a tab is backgrounded or a laptop is
+/// asleep — so without a cap, the first packet after a resume would try to play
+/// every frame the clock says is owed. That audio is stale by definition; the
+/// clock is resynchronised to now instead, and the buffer's own ceiling has
+/// already discarded what it could not hold.
+const MAX_CATCHUP: usize = 10;
+
+/// A local monotonic clock, in milliseconds.
+///
+/// Used only to MEASURE — jitter on the arrival side, elapsed time on the
+/// playout side. Nothing schedules against it, because there is nothing on this
+/// platform to schedule with.
+fn now_ms() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        thread_local! {
+            static CLOCK: Option<web_sys::Performance> =
+                web_sys::window().and_then(|w| w.performance());
+        }
+        // `Date::now` rather than zero when there is no `performance`: a clock
+        // stuck at zero would report no time passing, the playout side would
+        // never pull a frame, and the call would be silent with every other
+        // counter climbing normally.
+        CLOCK.with(|clock| clock.as_ref().map(|p| p.now()).unwrap_or_else(js_sys::Date::now))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        thread_local! {
+            static START: std::time::Instant = std::time::Instant::now();
+        }
+        START.with(|start| start.elapsed().as_secs_f64() * 1000.0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Audio -> UI bridge.
 //
@@ -77,6 +114,16 @@ static CODEC: AtomicU32 = AtomicU32::new(0);
 /// Which transport this call is on: 0 unknown, 1 WebSocket, 2 WebTransport.
 static TRANSPORT: AtomicU32 = AtomicU32::new(0);
 static PACKETS_IN: AtomicU32 = AtomicU32::new(0);
+/// Frames of audio the codec invented because no packet was there to play —
+/// concealed holes and starved pulls together. The number that says the link is
+/// lossy, as distinct from `dropped`, which is packets that arrived and could
+/// not be used.
+static CONCEALED: AtomicU32 = AtomicU32::new(0);
+/// The delay the jitter buffer is currently carrying, in milliseconds, for the
+/// sender heard from most recently. One number for what is really a per-peer
+/// quantity: as a meter it says whether the buffer is coping, and every peer on
+/// one call is behind the same network.
+static PLAYOUT_MS: AtomicU32 = AtomicU32::new(0);
 static PACKETS_DROPPED: AtomicU32 = AtomicU32::new(0);
 static PEER_COUNT: AtomicU32 = AtomicU32::new(0);
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(0);
@@ -204,6 +251,14 @@ pub struct Stats {
     pub unsent: u32,
     /// Packets received since join.
     pub received: u32,
+    /// Frames the receiver had to invent — a hole the codec concealed, or a
+    /// pull with nothing behind it. Zero on a clean link; this is what a lossy
+    /// one looks like from inside.
+    pub concealed: u32,
+    /// How much delay the jitter buffer is carrying right now, in milliseconds.
+    /// It grows with measured jitter and is given back slowly, so a number that
+    /// stays high is a network that stays bad.
+    pub playout_ms: u32,
     /// Packets that arrived but could not be decoded or played.
     pub dropped: u32,
     /// Distinct remote senders heard from.
@@ -244,6 +299,8 @@ pub fn stats() -> Stats {
         },
         unsent: PACKETS_UNSENT.load(Ordering::Relaxed),
         received: PACKETS_IN.load(Ordering::Relaxed),
+        concealed: CONCEALED.load(Ordering::Relaxed),
+        playout_ms: PLAYOUT_MS.load(Ordering::Relaxed),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
         sample_rate: SAMPLE_RATE.load(Ordering::Relaxed),
@@ -260,7 +317,8 @@ pub fn stats() -> Stats {
 fn reset_stats() {
     for c in [
         &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_UNSENT, &PACKETS_IN,
-        &PACKETS_DROPPED, &PEER_COUNT, &SAMPLE_RATE, &CODEC, &TRANSPORT,
+        &PACKETS_DROPPED, &CONCEALED, &PLAYOUT_MS, &PEER_COUNT, &SAMPLE_RATE, &CODEC,
+        &TRANSPORT,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -294,9 +352,25 @@ struct PeerSink {
     /// is applied to the PCM rather than to the output element, so it works
     /// above unity and on platforms that have no element.
     fader: voice_dsp::Fader,
-    /// This sender's decoder, built the first time they send an encoded packet.
-    /// Per sender, because Opus is stateful — see [`voice_proto::codec::Decoded`].
-    decoded: voice_proto::codec::Decoded,
+    /// This sender's jitter buffer, holding their packets still encoded and
+    /// decoding at playout. Built from their first packet, because that packet
+    /// is what says the rate, the channel count and how much audio a frame is.
+    ///
+    /// Per sender for the same reason the decoder inside it is: sequence
+    /// numbers, arrival timing and codec state all belong to one talker, and
+    /// two talkers sharing any of the three would be nonsense.
+    buffer: Option<jitter::Buffer<voice_proto::codec::Playout>>,
+    /// The format the buffer was built for. A sender that changes any of it
+    /// invalidates everything the buffer knows.
+    format: (u32, u16, usize),
+    /// Reused pull target, so playout allocates nothing per frame.
+    frame: Vec<f32>,
+    /// How much to pull, and when. Built with the buffer, because its frame
+    /// length is the buffer's. See [`jitter::Clock`] and [`PeerSink::feed`].
+    clock: Option<jitter::Clock>,
+    /// Concealed + starved frames already reported to [`CONCEALED`], so the
+    /// global counter can be advanced by the difference rather than recomputed.
+    reported_conceal: u64,
 }
 
 impl PeerSink {
@@ -320,23 +394,87 @@ impl PeerSink {
             stream,
             writer,
             fader: voice_dsp::Fader::new(rate, gain),
-            decoded: voice_proto::codec::Decoded::default(),
+            buffer: None,
+            format: (0, 0, 0),
+            frame: Vec::new(),
+            clock: None,
+            reported_conceal: 0,
         })
     }
 
-    /// The PCM this packet carries, decoding it if it is encoded.
+    /// Take one packet and hand back whatever audio is now due.
     ///
-    /// `None` is a packet that cannot become audio at all. The caller counts it
-    /// as dropped rather than playing silence, because silence indistinguishable
-    /// from a quiet room hides the fault.
-    fn pcm(&mut self, packet: &Packet) -> Option<Vec<f32>> {
-        let pcm = self.decoded.pcm(packet);
-        if pcm.is_none() {
-            if let Some(note) = self.decoded.note() {
-                web_log(&format!("[voice] {note}"));
-            }
+    /// # Why the arrival drives the playout
+    ///
+    /// A jitter buffer is *pulled* on a playout clock, and this platform has
+    /// nothing to run one on: `runtime_core` has no sleep, and both
+    /// `requestAnimationFrame` and `setInterval` are throttled to about once a
+    /// second in a background tab — which is precisely when a call has to keep
+    /// working. So the arrival is the trigger and the clock is the pacer: each
+    /// packet pulls however many frames real time has moved on by, and the
+    /// sink's own ring buffer downstream absorbs the burstiness. Smoothing a
+    /// bursty producer is what that ring is for; it was standing in for a jitter
+    /// buffer before this, and it is now doing the job it is actually good at.
+    ///
+    /// The consequence worth knowing: when nothing arrives, nothing is
+    /// produced. A talker who stops mid-word gets concealment on the packets
+    /// that follow the gap, and silence — not a concealed drone — for a stall
+    /// with no end in sight. For a talker who simply stopped, silence is the
+    /// right answer.
+    ///
+    /// Returns an empty vec when no frame is due yet, which is the ordinary
+    /// case for the first packet of a call.
+    fn feed(&mut self, packet: &Packet, now_ms: f64) -> Vec<f32> {
+        let format = (packet.sample_rate, packet.channels, packet.sample_count as usize);
+        if self.buffer.is_none() || self.format != format {
+            let (rate, channels, frame) = format;
+            let decoder = voice_proto::codec::Playout::open(rate, channels, frame);
+            self.buffer =
+                Some(jitter::Buffer::new(jitter::Tuning::default(), decoder, rate, channels));
+            self.format = format;
+            self.frame = vec![0.0; frame.max(1)];
+            // The clock restarts with the buffer. Carrying the old reading over
+            // would make the first packet of the new format look enormously
+            // overdue and play a burst of concealment.
+            let frame_ms = self.buffer.as_ref().expect("just built").frame_ms();
+            self.clock = Some(jitter::Clock::new(frame_ms, MAX_CATCHUP, now_ms));
+            self.reported_conceal = 0;
+        }
+        let buffer = self.buffer.as_mut().expect("built above");
+        let clock = self.clock.as_mut().expect("built with it");
+
+        // A rejection is routine on this transport, not a fault: a late packet
+        // is the ordinary cost of a link with jitter. The buffer counts each
+        // kind, and `pump` folds the total into `dropped`.
+        let held = buffer.push(packet.seq, &voice_proto::codec::Playout::tagged(packet), now_ms);
+
+        let due = clock.due(now_ms);
+        let mut pcm = Vec::with_capacity(due * self.frame.len());
+        for _ in 0..due {
+            buffer.pull(&mut self.frame);
+            pcm.extend_from_slice(&self.frame);
+        }
+
+        // Reported by difference, because the buffer's counters are cumulative
+        // and per peer while the meter is neither.
+        let stats = buffer.stats();
+        let invented = stats.concealed + stats.starved;
+        CONCEALED.fetch_add(
+            invented.saturating_sub(self.reported_conceal) as u32,
+            Ordering::Relaxed,
+        );
+        self.reported_conceal = invented;
+        PLAYOUT_MS.store(buffer.target_ms() as u32, Ordering::Relaxed);
+
+        if held.is_err() {
+            PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
         }
         pcm
+    }
+
+    /// Whatever the decoder wants said, once.
+    fn note(&self) -> Option<&str> {
+        self.buffer.as_ref().and_then(|b| b.decoder().note())
     }
 }
 
@@ -963,12 +1101,23 @@ async fn pump(
             sink.fader = voice_dsp::Fader::new(packet.sample_rate, gain);
         }
 
-        // Decoded here, after the sink exists, because the decoder lives on the
-        // sink — one per sender, carrying that voice's model.
-        let Some(mut pcm) = sink.pcm(&packet) else {
-            PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        PACKETS_IN.fetch_add(1, Ordering::Relaxed);
+
+        // Held, ordered, and played out on a clock — not decoded on arrival.
+        // On the WebSocket there was nothing to reorder and nothing to lose, so
+        // arrival order WAS playout order; on datagrams it is not, and this is
+        // the piece that makes the difference audible as a concealed frame
+        // rather than a click. See `PeerSink::feed`.
+        let pcm = sink.feed(&packet, now_ms());
+        if let Some(note) = sink.note() {
+            web_log(&format!("[voice] {note}"));
+        }
+        // Nothing due yet: the buffer is still filling, which is the ordinary
+        // case for the first packet or two of a call.
+        if pcm.is_empty() {
             continue;
-        };
+        }
+        let mut pcm = pcm;
 
         sink.fader.set_gain(gain);
         sink.fader.process(&mut pcm);
@@ -981,12 +1130,11 @@ async fn pump(
         // `write_pcm_f32` derives a sample-accurate PTS from a running frame
         // count rather than arrival time, which is what a playback stream
         // wants: the output clock should advance with the audio, not with the
-        // network. The packet's own `pts_micros` is deliberately unused here —
-        // it is the sender's timeline, and pacing against it is a jitter-buffer
-        // job, not a writer job.
+        // network. The packet's own `pts_micros` is deliberately unused — it is
+        // the sender's timeline, and reconciling the two timelines is the
+        // jitter buffer's job, which it does by sequence number.
         sink.writer.write_pcm_f32(packet.sample_rate, packet.channels, &pcm);
         let _ = &sink.stream;
-
         PACKETS_IN.fetch_add(1, Ordering::Relaxed);
     }
 }

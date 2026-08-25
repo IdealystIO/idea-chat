@@ -527,7 +527,7 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
         s.bytes_sent,
         // Packets the transport would not carry. On a datagram carrier a
@@ -543,6 +543,13 @@ fn stats_json() -> String {
         s.transport,
         s.received,
         s.dropped,
+        // What the jitter buffer had to invent, and how much delay it is
+        // carrying to avoid inventing more. On a reliable transport both were
+        // structurally zero; on datagrams they are the health of the link, and
+        // a call that sounds fine while concealing steadily is a call about to
+        // stop sounding fine.
+        s.concealed,
+        s.playout_ms,
         s.peers,
         s.sample_rate,
         (s.mic_peak * 100.0) as u32,

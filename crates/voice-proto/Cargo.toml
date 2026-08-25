@@ -11,7 +11,11 @@ description = "Wire format for idea-chat voice frames. Zero dependencies, no fra
 default = []
 # The `codec` module — encoding a packet's payload, and decoding it. Draws in
 # Opus, which is exactly why it is optional.
-codec = ["dep:audio-codec"]
+# The jitter buffer comes with it, for `Playout`: what a packet decodes to is
+# this module's business, and so is what a MISSING packet decodes to. Not a new
+# dependency — `audio-codec` already pulls it in for the same reason.
+codec = ["dep:audio-codec", "dep:jitter"]
 
 [dependencies]
 audio-codec = { workspace = true, optional = true }
+jitter = { workspace = true, optional = true }

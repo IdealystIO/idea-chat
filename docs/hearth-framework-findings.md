@@ -318,6 +318,32 @@ both files say so — `ScriptProcessorNode` is used because the worklet's module
 load would make `native_source()` async. That is a real cost and a separate
 argument; a configurable block size is available today either way.)
 
+### The capture block is paid for twice
+
+Adding a jitter buffer to the receive path made a second cost visible, and it
+is the larger surprise. Capture arrives 85 ms at a time and is cut into four
+20 ms packets, which then go out **together**. The receiver cannot tell a burst
+it was sent from a burst the network made — nothing in a packet says which — so
+it sizes its playout buffer to absorb it. The 85 ms block therefore buys itself
+a second charge as playout delay.
+
+Measured, in `jitter`'s own tests, same packet count and same duration with only
+the arrival shape changed:
+
+| arrivals | delay the buffer settles on |
+| --- | --- |
+| evenly paced | 20.0 ms — the floor, no headroom wanted at all |
+| bursts of four | 46.5 ms |
+
+In the browser, against a real relay on loopback, the buffer peaked near 100 ms.
+So the capture block does not cost 85 ms of the latency budget; on a call it
+costs 85 ms plus whatever a receiver decides to hold because of it.
+
+There is no fix on the client side. Pacing the packets out would need a timer,
+and there is nothing in `runtime_core` to sleep on. A `with_block_frames(1024)`
+would fix both halves at once, which moves this from a nice-to-have to the
+single highest-leverage number in the audio stack.
+
 ## 11. `AppShell` and `Drawer` wrap content in a block, not a flex container
 
 `idea_ui_nav::AppShell` documents its content wrapper as "Main content: fills

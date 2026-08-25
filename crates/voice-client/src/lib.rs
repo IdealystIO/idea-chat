@@ -136,13 +136,22 @@ pub fn app() -> Element {
             }
             if s.sent != ls || s.received != lrx {
                 counters.set(format!(
-                    "{} · sent {} · recv {} · dropped {} · peers {} · {} Hz{}{}",
+                    "{} · sent {} · recv {} · dropped {} · buffer {} ms{} · peers {} · {} Hz{}{}",
                     // Which carrier, because "it works" over the fallback reads
                     // exactly like "it works" over the one this project is for.
                     s.transport,
                     s.sent,
                     s.received,
                     s.dropped,
+                    // The delay the jitter buffer is carrying, and what it had
+                    // to invent. Both are structurally zero on a reliable
+                    // transport, which is why neither was here before.
+                    s.playout_ms,
+                    if s.concealed > 0 {
+                        format!(" ({} concealed)", s.concealed)
+                    } else {
+                        String::new()
+                    },
                     s.peers,
                     s.sample_rate,
                     // Shown only when it happens. A permanent "unsent 0" trains

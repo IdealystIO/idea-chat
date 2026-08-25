@@ -142,7 +142,7 @@ const stats = p => p.evaluate(() => {
 // time. Poll and keep the maximum — the same lesson the loop test learned.
 const peakOver = async (pages, ms) => {
   const best = pages.map(() => (
-    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, codec: '?', transport: 'none' }));
+    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, concealed: 0, playoutMs: 0, codec: '?', transport: 'none' }));
   const until = Date.now() + ms;
   while (Date.now() < until) {
     for (let i = 0; i < pages.length; i++) {
@@ -155,6 +155,8 @@ const peakOver = async (pages, ms) => {
         best[i].sent = Math.max(best[i].sent, s.sent);
         best[i].bytes = Math.max(best[i].bytes, s.bytesSent);
         best[i].unsent = Math.max(best[i].unsent, s.unsent);
+        best[i].concealed = Math.max(best[i].concealed, s.concealed);
+        best[i].playoutMs = Math.max(best[i].playoutMs, s.playoutMs);
         best[i].codec = s.codec;
         if (s.transport && s.transport !== 'none') best[i].transport = s.transport;
       }
@@ -310,6 +312,18 @@ const peakOver = async (pages, ms) => {
   // that would catch it.
   check('and nothing was dropped on the way out',
     sa.unsent === 0 && st.unsent === 0, `ana ${sa.unsent}, theo ${st.unsent}`);
+
+  // The receive path is a jitter buffer now, not a decode-on-arrival. That is
+  // invisible from the audio on a loopback — which is the point of asserting on
+  // the depth instead: a buffer carrying delay is a buffer that is in the path.
+  // Zero would mean packets are going round it.
+  console.log(`        playout: ${sa.playoutMs} ms held at peak, ${sa.concealed} frames concealed`);
+  check('the jitter buffer is carrying delay, so it is in the path',
+    sa.playoutMs >= 20 && st.playoutMs >= 20, `ana ${sa.playoutMs} ms, theo ${st.playoutMs} ms`);
+  // On loopback there is nothing to conceal. A number here on THIS link would
+  // mean the buffer is mis-sequencing packets that arrived perfectly well.
+  check('and inventing nothing on a link with no loss',
+    sa.concealed === 0 && st.concealed === 0, `ana ${sa.concealed}, theo ${st.concealed}`);
 
   // --- presence: who the sidebar says is in a room ---
   // The claim is that this works for people who are NOT in the call — you
