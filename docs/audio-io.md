@@ -133,6 +133,39 @@ quiet room are the same thing from outside. The `underruns` counter here is what
 makes that class of bug visible at all, and the first thing it did was find one I
 had introduced myself.
 
+## A microphone must not be wired to the speakers
+
+The first version of the capture node had one output connected to
+`ctx.destination()`, on the reasoning that a node with **no** outputs might not
+be pulled by the implementation. Its silence then depended on the processor
+never writing to its output — an implementation detail, in a graph that also
+carries every peer's audio to that same destination, with a live microphone at
+the other end of it.
+
+The spec provides a sink node exactly so this is unnecessary: an
+`AudioWorkletNode` with `numberOfOutputs: 0` is processed for as long as it has
+an active input, which a microphone is. Capture is one now and connects to
+nothing. Verified rather than assumed — the browser suite still measures a mic
+peak of 99 and 718 packets sent.
+
+## What a model in the path costs, measured
+
+Running DeepFilterNet on the main thread drops packets. Same fixture, same
+duration, only the suppression mode changed:
+
+| mode | unsent | concealed | underruns |
+| --- | --- | --- | --- |
+| off | 0 | 0 | 0 |
+| client (DeepFilterNet) | 5 | 5 | 0 |
+| server | 0 | 0 | 1 |
+
+Every unsent packet is a 20 ms hole in what the far side hears. Roughly 1% here,
+which is occasional clicks rather than a broken call — but it is a floor set by
+where the model runs, not by anything tunable. Raising the capture block from
+256 to 1024 frames changed it to 4 and 2, which is noise: **the block size is
+not the cause, the main thread is.** That is the same argument as everything
+above, arriving with a number attached.
+
 ## Not done
 
 - **The graph still runs on the main thread on web.** The API is ready; the

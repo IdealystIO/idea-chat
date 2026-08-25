@@ -197,20 +197,24 @@ impl Capture {
         let source =
             ctx.create_media_stream_source(&stream).map_err(|e| js_error("createMediaStreamSource", e))?;
 
-        // One output, connected to the destination, rather than the zero-output
-        // "sink node" the spec allows. A node with no outputs is only pulled
-        // while the implementation says it is, and this has to be pulled for as
-        // long as the call lasts. The processor never writes to its output, so
-        // what reaches the speakers is silence.
-        let node = node(&ctx, "audio-io-capture", 1, 1, channels, &[(
+        // ZERO outputs, and NOT connected to the destination.
+        //
+        // The first version gave it one output and wired it to the speakers, on
+        // the reasoning that a node with no outputs might not be pulled — and
+        // relied on the processor never writing to its output for that path to
+        // be silent. That is a microphone wired to the speakers whose silence
+        // depends on an implementation detail, in a graph that also carries
+        // every peer's audio to the same destination. The spec provides a sink
+        // node precisely so this is unnecessary: an `AudioWorkletNode` with no
+        // outputs is processed for as long as it has an active input, which a
+        // live microphone is.
+        let node = node(&ctx, "audio-io-capture", 1, 0, channels, &[(
             "blockFrames",
             block_frames as f64,
         )])?;
         source
             .connect_with_audio_node(&node)
             .map_err(|e| js_error("connect(source -> capture)", e))?;
-        node.connect_with_audio_node(&ctx.destination())
-            .map_err(|e| js_error("connect(capture -> destination)", e))?;
 
         let state = Rc::new(RefCell::new(Captured {
             pipeline,
