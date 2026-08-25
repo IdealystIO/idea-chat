@@ -10,6 +10,8 @@ resolver = "2"
 members = [
     "crates/voice-proto",
     "crates/voice-dsp",
+    "crates/jitter",
+    "crates/audio-codec",
     "crates/voice-auth",
     "crates/idea-state",
     "crates/voice-coord",
@@ -27,6 +29,8 @@ license = "MIT"
 [workspace.dependencies]
 voice-proto = { path = "crates/voice-proto" }
 voice-dsp   = { path = "crates/voice-dsp" }
+jitter      = { path = "crates/jitter" }
+audio-codec = { path = "crates/audio-codec" }
 voice-auth  = { path = "crates/voice-auth" }
 idea-state  = { path = "crates/idea-state" }
 voice-coord = { path = "crates/voice-coord" }

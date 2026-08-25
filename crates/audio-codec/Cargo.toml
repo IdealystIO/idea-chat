@@ -1,0 +1,15 @@
+[package]
+name = "audio-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Opus encode/decode for real-time speech, wired to the jitter buffer's concealment seam."
+
+[dependencies]
+# Pure Rust, no FFI, no C toolchain — which is what makes it viable on
+# wasm32-unknown-unknown, where a libopus binding would need a C cross-compile
+# for a target with no libc. Verified to build for that target.
+rusty-opus = "0.9"
+# For `impl Decode`: the buffer hands a lost packet to the codec because the
+# codec is what still has the signal model. See `jitter`.
+jitter = { workspace = true }

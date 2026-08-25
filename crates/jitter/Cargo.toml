@@ -1,0 +1,12 @@
+[package]
+name = "jitter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Adaptive jitter buffer and packet-loss concealment for real-time audio."
+
+# Dependency-free on purpose, like `voice-proto` and `voice-dsp`. This is the
+# piece an unreliable transport makes mandatory, it has nothing to do with any
+# particular transport or codec, and it is the most likely of anything here to
+# be promoted into the SDK — so it names nothing it does not need.
+[dependencies]
