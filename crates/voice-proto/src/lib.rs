@@ -40,6 +40,11 @@
 
 #![forbid(unsafe_code)]
 
+// Cutting capture blocks down to a size a datagram can carry. Lives here
+// because it is a wire concern, not an audio one — see the module docs.
+pub mod packetise;
+pub use packetise::Packetiser;
+
 /// First byte of every packet — cheap guard against a stray text frame or a
 /// mismatched endpoint.
 pub const MAGIC: u8 = 0x56;

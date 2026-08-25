@@ -35,6 +35,17 @@ use voice_proto::Packet;
 
 use crate::playback::{self, Playing};
 
+/// Milliseconds of audio in one packet on the wire.
+///
+/// 20 ms, which is not a tuning choice so much as the industry's unit: it is
+/// what Opus is built around, what jitter buffers assume, and small enough that
+/// the encoded frame fits a QUIC datagram with room to spare.
+///
+/// Note this is the *packet* size, not the capture block size. Capture still
+/// arrives 85 ms at a time on web and that is where the latency is — see
+/// docs/hearth-framework-findings.md finding 10c.
+const PACKET_MS: u32 = 20;
+
 // ---------------------------------------------------------------------------
 // Audio -> UI bridge.
 //
@@ -555,34 +566,59 @@ pub async fn join(
         .map_err(|e| format!("connect {url}: {e}"))?;
     let sender: SharedSender = Arc::new(Mutex::new(socket.sender()));
 
-    // 4. OUT: every captured chunk becomes one packet.
+    // 4. OUT: every captured block is re-cut into PACKET_MS frames, and each
+    //    of those becomes one packet.
+    //
+    //    The capture block is whatever the platform chose — 4096 frames on web,
+    //    85 ms — and one packet per block is a size no datagram can carry. The
+    //    packetiser is therefore not a QUIC detail: it is what makes the stream
+    //    describable in units a transport, a codec and a jitter buffer all
+    //    agree on. It costs nothing on the WebSocket path and finer loss
+    //    granularity is a straight gain there too.
     let mic_sub = {
         let sender = sender.clone();
         let seq = std::cell::Cell::new(0u32);
+        // Built on the first block, because the block is what says what rate
+        // and channel count the microphone actually gave us.
+        let cutter: RefCell<Option<voice_proto::Packetiser>> = RefCell::new(None);
         wire.subscribe(move |frame: &AudioFrame| {
             MIC_PEAK.store(voice_proto::peak(frame.samples).to_bits(), Ordering::Relaxed);
             SAMPLE_RATE.store(frame.sample_rate, Ordering::Relaxed);
 
-            let n = seq.get();
-            seq.set(n.wrapping_add(1));
-
-            let packet = Packet::from_f32(
-                id,
-                n,
-                frame.sample_rate,
-                frame.channels,
-                frame.pts_micros,
-                frame.samples,
-            );
-            // A send failure means the socket closed; the receive task will
-            // notice and report it. Counting here keeps the hot path silent.
-            let sent = sender
-                .lock()
-                .map(|s| s.send(WsMessage::Binary(packet.encode())).is_ok())
-                .unwrap_or(false);
-            if sent {
-                PACKETS_OUT.fetch_add(1, Ordering::Relaxed);
+            let mut slot = cutter.borrow_mut();
+            let cutter = slot.get_or_insert_with(|| {
+                voice_proto::Packetiser::new(PACKET_MS, frame.sample_rate, frame.channels)
+            });
+            // A microphone that changes format mid-call would desynchronise the
+            // cut; start a fresh one rather than emit frames of the wrong size.
+            if cutter.rate() != frame.sample_rate || cutter.channels() != frame.channels {
+                *cutter =
+                    voice_proto::Packetiser::new(PACKET_MS, frame.sample_rate, frame.channels);
             }
+
+            cutter.push(frame.samples, frame.pts_micros);
+            cutter.drain(|samples, pts_micros| {
+                let n = seq.get();
+                seq.set(n.wrapping_add(1));
+
+                let packet = Packet::from_f32(
+                    id,
+                    n,
+                    frame.sample_rate,
+                    frame.channels,
+                    pts_micros,
+                    samples,
+                );
+                // A send failure means the socket closed; the receive task will
+                // notice and report it. Counting here keeps the hot path silent.
+                let sent = sender
+                    .lock()
+                    .map(|s| s.send(WsMessage::Binary(packet.encode())).is_ok())
+                    .unwrap_or(false);
+                if sent {
+                    PACKETS_OUT.fetch_add(1, Ordering::Relaxed);
+                }
+            });
         })
     };
 
