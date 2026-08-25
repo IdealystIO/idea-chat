@@ -31,6 +31,7 @@ use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
 use microphone::{AudioStreamConfig, Microphone};
 use net::{WebSocket, WsMessage, WsSender};
 use serde::Deserialize;
+use voice_proto::codec::Encoded;
 use voice_proto::Packet;
 
 use crate::playback::{self, Playing};
@@ -59,6 +60,12 @@ const PACKET_MS: u32 = 20;
 static MIC_PEAK: AtomicU32 = AtomicU32::new(0);
 static REMOTE_PEAK: AtomicU32 = AtomicU32::new(0);
 static PACKETS_OUT: AtomicU32 = AtomicU32::new(0);
+/// Payload bytes sent since join, so a bitrate can be measured rather than
+/// assumed. Wraps after ~4 GB, which no call reaches.
+static BYTES_OUT: AtomicU32 = AtomicU32::new(0);
+/// Which encoding this client settled on — see [`Wire`]. Stored as a
+/// [`voice_proto::Encoding::code`] so it fits an atomic.
+static CODEC: AtomicU32 = AtomicU32::new(0);
 static PACKETS_IN: AtomicU32 = AtomicU32::new(0);
 static PACKETS_DROPPED: AtomicU32 = AtomicU32::new(0);
 static PEER_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -125,6 +132,29 @@ fn web_log(message: &str) {
     eprintln!("{message}");
 }
 
+/// Update a peak meter, holding the level and letting it fall.
+///
+/// Not `store(peak)`, and the difference became visible the moment packets
+/// went from 85 ms to 20 ms: a meter showing only the newest chunk sits at zero
+/// between syllables and reads as "nobody can hear me". See
+/// [`voice_dsp::hold_peak`].
+///
+/// `dt_secs` is the audio the chunk covers, not wall time. The two agree while
+/// a call is keeping up, and when it is not, metering against the audio is the
+/// one that stays honest — a burst of late packets should not fast-forward the
+/// meter's fall.
+fn meter(cell: &AtomicU32, samples: &[f32], rate: u32, channels: u16) -> f32 {
+    let frames = samples.len() / channels.max(1) as usize;
+    let dt = frames as f32 / rate.max(1) as f32;
+    let held = voice_dsp::hold_peak(
+        f32::from_bits(cell.load(Ordering::Relaxed)),
+        voice_proto::peak(samples),
+        dt,
+    );
+    cell.store(held.to_bits(), Ordering::Relaxed);
+    held
+}
+
 /// A snapshot of live counters, read once per frame by the UI.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Stats {
@@ -134,6 +164,12 @@ pub struct Stats {
     pub remote_peak: f32,
     /// Packets sent since join.
     pub sent: u32,
+    /// Payload bytes sent since join. With `sent`, this is the outgoing
+    /// bitrate — the number that says whether the codec is actually on.
+    pub bytes_sent: u32,
+    /// What this client is putting on the wire. Opus unless the capture format
+    /// ruled it out; see [`Wire::open`].
+    pub codec: voice_proto::Encoding,
     /// Packets received since join.
     pub received: u32,
     /// Packets that arrived but could not be decoded or played.
@@ -166,6 +202,9 @@ pub fn stats() -> Stats {
         mic_peak: f32::from_bits(MIC_PEAK.load(Ordering::Relaxed)),
         remote_peak: f32::from_bits(REMOTE_PEAK.load(Ordering::Relaxed)),
         sent: PACKETS_OUT.load(Ordering::Relaxed),
+        bytes_sent: BYTES_OUT.load(Ordering::Relaxed),
+        codec: voice_proto::Encoding::from_code(CODEC.load(Ordering::Relaxed) as u8)
+            .unwrap_or(voice_proto::Encoding::PcmS16Le),
         received: PACKETS_IN.load(Ordering::Relaxed),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
@@ -182,8 +221,8 @@ pub fn stats() -> Stats {
 
 fn reset_stats() {
     for c in [
-        &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &PACKETS_IN, &PACKETS_DROPPED, &PEER_COUNT,
-        &SAMPLE_RATE,
+        &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_IN, &PACKETS_DROPPED,
+        &PEER_COUNT, &SAMPLE_RATE, &CODEC,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -217,6 +256,9 @@ struct PeerSink {
     /// is applied to the PCM rather than to the output element, so it works
     /// above unity and on platforms that have no element.
     fader: voice_dsp::Fader,
+    /// This sender's decoder, built the first time they send an encoded packet.
+    /// Per sender, because Opus is stateful — see [`voice_proto::codec::Decoded`].
+    decoded: voice_proto::codec::Decoded,
 }
 
 impl PeerSink {
@@ -235,7 +277,28 @@ impl PeerSink {
         let (stream, writer) = AudioStream::new();
         let playing = playback::play(&stream)
             .map_err(|e| format!("peer {sender}: {e}"))?;
-        Ok(PeerSink { playing, stream, writer, fader: voice_dsp::Fader::new(rate, gain) })
+        Ok(PeerSink {
+            playing,
+            stream,
+            writer,
+            fader: voice_dsp::Fader::new(rate, gain),
+            decoded: voice_proto::codec::Decoded::default(),
+        })
+    }
+
+    /// The PCM this packet carries, decoding it if it is encoded.
+    ///
+    /// `None` is a packet that cannot become audio at all. The caller counts it
+    /// as dropped rather than playing silence, because silence indistinguishable
+    /// from a quiet room hides the fault.
+    fn pcm(&mut self, packet: &Packet) -> Option<Vec<f32>> {
+        let pcm = self.decoded.pcm(packet);
+        if pcm.is_none() {
+            if let Some(note) = self.decoded.note() {
+                web_log(&format!("[voice] {note}"));
+            }
+        }
+        pcm
     }
 }
 
@@ -580,43 +643,57 @@ pub async fn join(
         let seq = std::cell::Cell::new(0u32);
         // Built on the first block, because the block is what says what rate
         // and channel count the microphone actually gave us.
-        let cutter: RefCell<Option<voice_proto::Packetiser>> = RefCell::new(None);
+        let cutter: RefCell<Option<(voice_proto::Packetiser, Encoded)>> = RefCell::new(None);
         wire.subscribe(move |frame: &AudioFrame| {
-            MIC_PEAK.store(voice_proto::peak(frame.samples).to_bits(), Ordering::Relaxed);
+            meter(&MIC_PEAK, frame.samples, frame.sample_rate, frame.channels);
             SAMPLE_RATE.store(frame.sample_rate, Ordering::Relaxed);
 
+            /// Cut and encoder for one capture format, built together because
+            /// the encoder has to agree with the packetiser about frame size.
+            fn open(rate: u32, channels: u16) -> (voice_proto::Packetiser, Encoded) {
+                let cutter = voice_proto::Packetiser::new(PACKET_MS, rate, channels);
+                let wire = Encoded::open(rate, channels, cutter.frame());
+                CODEC.store(wire.encoding().code() as u32, Ordering::Relaxed);
+                // Said once, at the point the choice is made. A fallback that
+                // went unlogged would present later as "voice uses a lot of
+                // bandwidth on this machine" with nothing to connect it to.
+                if let Some(note) = wire.note() {
+                    web_log(&format!("[voice] {note}"));
+                }
+                (cutter, wire)
+            }
+
             let mut slot = cutter.borrow_mut();
-            let cutter = slot.get_or_insert_with(|| {
-                voice_proto::Packetiser::new(PACKET_MS, frame.sample_rate, frame.channels)
-            });
+            let (cutter, codec) =
+                slot.get_or_insert_with(|| open(frame.sample_rate, frame.channels));
             // A microphone that changes format mid-call would desynchronise the
-            // cut; start a fresh one rather than emit frames of the wrong size.
+            // cut and invalidate the encoder; rebuild both rather than emit
+            // frames of the wrong size.
             if cutter.rate() != frame.sample_rate || cutter.channels() != frame.channels {
-                *cutter =
-                    voice_proto::Packetiser::new(PACKET_MS, frame.sample_rate, frame.channels);
+                let (fresh_cutter, fresh_codec) = open(frame.sample_rate, frame.channels);
+                *cutter = fresh_cutter;
+                *codec = fresh_codec;
             }
 
             cutter.push(frame.samples, frame.pts_micros);
+            let rate = frame.sample_rate;
+            let channels = frame.channels;
             cutter.drain(|samples, pts_micros| {
                 let n = seq.get();
                 seq.set(n.wrapping_add(1));
 
-                let packet = Packet::from_f32(
-                    id,
-                    n,
-                    frame.sample_rate,
-                    frame.channels,
-                    pts_micros,
-                    samples,
-                );
+                let packet = codec.packet(id, n, rate, channels, pts_micros, samples);
+                let bytes = packet.encode();
+                let len = bytes.len() as u32;
                 // A send failure means the socket closed; the receive task will
                 // notice and report it. Counting here keeps the hot path silent.
                 let sent = sender
                     .lock()
-                    .map(|s| s.send(WsMessage::Binary(packet.encode())).is_ok())
+                    .map(|s| s.send(WsMessage::Binary(bytes)).is_ok())
                     .unwrap_or(false);
                 if sent {
                     PACKETS_OUT.fetch_add(1, Ordering::Relaxed);
+                    BYTES_OUT.fetch_add(len, Ordering::Relaxed);
                 }
             });
         })
@@ -775,8 +852,6 @@ async fn pump(
             }
         };
 
-        let mut pcm = packet.to_f32();
-
         // The gain this listener wants on this sender, read fresh: it can be
         // changed from the UI between any two packets.
         let gain = volumes.borrow().gain_for(packet.sender);
@@ -808,13 +883,21 @@ async fn pump(
         if sink.fader.rate() != packet.sample_rate {
             sink.fader = voice_dsp::Fader::new(packet.sample_rate, gain);
         }
+
+        // Decoded here, after the sink exists, because the decoder lives on the
+        // sink — one per sender, carrying that voice's model.
+        let Some(mut pcm) = sink.pcm(&packet) else {
+            PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+
         sink.fader.set_gain(gain);
         sink.fader.process(&mut pcm);
 
         // Metered AFTER the fader, because this meter is "what you are
         // hearing". A peak that ignored the listener's own volume would report
         // a loud room to somebody who had turned it down.
-        REMOTE_PEAK.store(voice_proto::peak(&pcm).to_bits(), Ordering::Relaxed);
+        meter(&REMOTE_PEAK, &pcm, packet.sample_rate, packet.channels);
 
         // `write_pcm_f32` derives a sample-accurate PTS from a running frame
         // count rather than arrival time, which is what a playback stream

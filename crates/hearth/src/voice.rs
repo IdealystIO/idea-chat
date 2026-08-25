@@ -527,8 +527,13 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"codec":"{}","recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
+        s.bytes_sent,
+        // What is on the wire, not what was configured. A silent fallback to
+        // raw PCM sounds identical and costs thirty times the bandwidth, so it
+        // has to be observable from outside.
+        s.codec.as_str(),
         s.received,
         s.dropped,
         s.peers,

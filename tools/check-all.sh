@@ -35,7 +35,14 @@ run cargo test -p hearth --lib -q
 # tested by one: what a leveller does to a gate, or what a fader does to a
 # gain change, is arithmetic. It went unrun here for longer than it should
 # have.
-run cargo test -p voice-dsp -p voice-proto -q
+# `--features codec` matters: without it the `codec` module is not compiled at
+# all, so the encoder/decoder bridge both halves of a call depend on would go
+# untested while the step still reported green.
+run cargo test -p voice-dsp -q
+run cargo test -p voice-proto --features codec -q
+# The transport-side crates: the jitter buffer and its concealment, the codec,
+# and a real QUIC connection on loopback.
+run cargo test -p jitter -p audio-codec -p datagram -q
 # The relay's room bookkeeping, which decides who can hear whom. It went
 # untested until a room silently split in two under a mid-call refresh.
 run cargo test -p voice-server --lib -q

@@ -7,11 +7,16 @@
 # copying an entire framework checkout just so cargo can parse manifests it will
 # never build.
 #
-# Keep the three member versions in sync with ../Cargo.toml.
+# Keep the member list in sync with ../Cargo.toml.
 [workspace]
 resolver = "2"
 members = [
     "crates/voice-proto",
+    # The codec, and the buffer it decodes for. A relay forwards packets without
+    # opening them, so this is here for exactly one path: server-side noise
+    # suppression, which has to decode what it is about to run a model over.
+    "crates/jitter",
+    "crates/audio-codec",
     "crates/voice-coord",
     "crates/voice-server",
 ]
@@ -23,6 +28,8 @@ license = "MIT"
 
 [workspace.dependencies]
 voice-proto = { path = "crates/voice-proto" }
+jitter      = { path = "crates/jitter" }
+audio-codec = { path = "crates/audio-codec" }
 voice-coord = { path = "crates/voice-coord" }
 
 [profile.release]

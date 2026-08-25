@@ -12,6 +12,8 @@ WORKDIR /src
 # Swap in the server-only workspace so cargo never looks for `../idealyst-native`.
 COPY deploy/Cargo.server.toml ./Cargo.toml
 COPY crates/voice-proto  ./crates/voice-proto
+COPY crates/jitter       ./crates/jitter
+COPY crates/audio-codec  ./crates/audio-codec
 COPY crates/voice-coord  ./crates/voice-coord
 COPY crates/voice-server ./crates/voice-server
 

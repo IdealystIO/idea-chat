@@ -5,4 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Wire format for idea-chat voice frames. Zero dependencies, no framework types — the layer most likely to move into an SDK, so it stays portable."
 
+# Nothing by default: a relay forwards packets without linking a codec, and
+# this crate is the one most likely to move into an SDK.
+[features]
+default = []
+# The `codec` module — encoding a packet's payload, and decoding it. Draws in
+# Opus, which is exactly why it is optional.
+codec = ["dep:audio-codec"]
+
 [dependencies]
+audio-codec = { workspace = true, optional = true }

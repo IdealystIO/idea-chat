@@ -894,6 +894,7 @@ dependencies = [
  "audio-codec",
  "bytes",
  "futures",
+ "http",
  "jitter",
  "rcgen",
  "rustls-pki-types",
@@ -5393,6 +5394,9 @@ version = "0.1.0"
 [[package]]
 name = "voice-proto"
 version = "0.1.0"
+dependencies = [
+ "audio-codec",
+]
 
 [[package]]
 name = "voice-server"

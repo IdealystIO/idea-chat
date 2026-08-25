@@ -49,6 +49,14 @@ use crate::coord::{Admission, NodeCoord, REDIRECT};
 /// voice. `RecvError::Lagged` is logged and skipped, never fatal.
 const ROOM_BACKLOG: usize = 256;
 
+/// Milliseconds of audio in one packet leaving this node.
+///
+/// Only the suppression path re-packetises — a plain relay forwards whatever
+/// the sender cut. It matches the client's own `PACKET_MS` because a room
+/// where the two disagreed would have one talker arriving in a different
+/// rhythm from everyone else.
+const PACKET_MS: u32 = 20;
+
 /// Text frame sent to a participant whose id is already in the room.
 ///
 /// A duplicate id is this relay's worst failure mode: the no-self-echo rule
@@ -314,13 +322,23 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
         // 48 kHz mono is not a guess: it is DeepFilterNet's only output
         // format, so the packets leaving here always carry it regardless of
         // what the sender's microphone was running at.
+        //
+        // The model hands back whatever block size its framing produced, which
+        // is not a packet size, so what leaves here is re-cut and re-encoded
+        // exactly as a client would do it. Emitting the model's raw blocks
+        // instead would put packets on the wire that no datagram could carry,
+        // and would undo the codec for everyone in the room.
+        let mut cutter = voice_proto::Packetiser::new(PACKET_MS, 48_000, 1);
+        let mut encoder = voice_proto::codec::Encoded::open(48_000, 1, cutter.frame());
         let sink = Box::new(move |block: &[f32], pts: u64| {
-            let packet =
-                voice_proto::Packet::from_f32(id, seq, 48_000, 1, pts, block);
-            seq = seq.wrapping_add(1);
-            // Fails only when the room has no other listeners, which is the
-            // ordinary state of a room of one.
-            let _ = out.send((id, Arc::new(packet.encode())));
+            cutter.push(block, pts);
+            cutter.drain(|samples, pts| {
+                let packet = encoder.packet(id, seq, 48_000, 1, pts, samples);
+                seq = seq.wrapping_add(1);
+                // Fails only when the room has no other listeners, which is the
+                // ordinary state of a room of one.
+                let _ = out.send((id, Arc::new(packet.encode())));
+            });
         });
         match state.suppress.open(voice_dsp::Tuning::default(), sink).await {
             Ok(feed) => {
@@ -374,6 +392,11 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
     });
 
     // This participant -> room.
+    //
+    // One decoder for this socket, because a socket carries one talker and an
+    // Opus decoder carries that talker's signal model. It is built lazily: a
+    // relay that is not suppressing never opens a packet and never needs one.
+    let mut decoder = voice_proto::codec::Decoded::default();
     let mut inbound = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
             match msg {
@@ -386,7 +409,18 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
                             // the room hears is what comes back out of the
                             // model, so forwarding this one too would put every
                             // talker in the room twice.
-                            Some(feed) => feed.push(pkt.sample_rate, pkt.channels, &pkt.to_f32()),
+                            //
+                            // This is the only place a relay opens a packet, so
+                            // it is the only place that needs a decoder.
+                            Some(feed) => match decoder.pcm(&pkt) {
+                                Some(pcm) => feed.push(pkt.sample_rate, pkt.channels, &pcm),
+                                None => eprintln!(
+                                    "[drop] id={id} cannot decode {} at {} Hz x{}",
+                                    pkt.encoding.as_str(),
+                                    pkt.sample_rate,
+                                    pkt.channels,
+                                ),
+                            },
                             // Relayed untouched — a guard, not a transform.
                             // `send` fails only with no receivers, which is
                             // normal for a room of one.

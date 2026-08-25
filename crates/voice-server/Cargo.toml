@@ -6,7 +6,10 @@ license.workspace = true
 description = "idea-chat voice fleet: the `voice-node` relay and the `voice-director` control plane."
 
 [dependencies]
-voice-proto = { workspace = true }
+# With the codec, needed only on the suppression path: that is the one place a
+# relay looks inside a packet, so it is the one place that has to decode Opus
+# and re-encode what the model gives back. Plain relaying stays opaque.
+voice-proto = { workspace = true, features = ["codec"] }
 voice-dsp = { workspace = true }
 voice-auth = { workspace = true }
 # Server-side neural suppression. The model is EMBEDDED on native, so a node

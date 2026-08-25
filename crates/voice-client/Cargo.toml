@@ -24,7 +24,10 @@ voice-dsp = { workspace = true }
 # `suppress.rs` for what that costs and why it is still worth it.
 denoise = { workspace = true }
 net = { workspace = true }
-voice-proto = { workspace = true }
+# With the codec. 20 ms of mono i16 at 48 kHz is 1952 bytes on the wire and a
+# QUIC datagram tops out near 1200, so this is what makes the transport possible
+# at all — the ~30x bandwidth saving is the part you would have wanted anyway.
+voice-proto = { workspace = true, features = ["codec"] }
 serde = { version = "1", features = ["derive"] }
 
 # Web-only playback. This is the escape hatch that stands in for the missing

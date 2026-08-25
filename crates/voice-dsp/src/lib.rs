@@ -45,11 +45,13 @@
 
 mod fader;
 mod level;
+mod meter;
 mod residual;
 mod transient;
 mod verdict;
 
 pub use fader::{taper, Fader, MAX_GAIN};
+pub use meter::{hold_peak, FALL_SECS};
 pub use level::{Leveler, Leveling};
 pub use residual::{Expander, Residual};
 pub use transient::{Declicker, Transients};

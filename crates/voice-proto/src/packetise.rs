@@ -265,12 +265,21 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_fits_in_a_datagram_once_encoded() {
-        // The whole point: 20 ms of mono i16 at 48 kHz is 1920 bytes of
-        // payload, which is still over a datagram — so the codec is not
-        // optional on this path. Recorded here so the number is not a surprise.
+    fn raw_pcm_does_not_fit_a_datagram_and_opus_does() {
+        // Why the codec is not optional on the QUIC path, in one assertion.
+        // 20 ms of mono i16 at 48 kHz is 1920 bytes of payload; a QUIC datagram
+        // tops out around 1200. Cutting finer does not save it either — the
+        // header is per packet, so 10 ms halves the payload and doubles the
+        // overhead.
         let p = Packetiser::new(20, 48_000, 1);
-        assert_eq!(p.frame() * 2 + crate::HEADER_LEN, 1948);
-        assert!(1948 > 1200, "raw PCM does not fit; Opus is what makes it fit");
+        let raw = p.frame() * 2 + crate::HEADER_LEN;
+        assert_eq!(raw, 1952);
+        assert!(raw > 1200, "raw PCM does not fit");
+
+        // The same 20 ms as Opus at 24 kbps is 60 bytes, so the packet is
+        // dominated by its own header and fits many times over.
+        let opus = 60 + crate::HEADER_LEN;
+        assert_eq!(opus, 92);
+        assert!(opus < 1200);
     }
 }

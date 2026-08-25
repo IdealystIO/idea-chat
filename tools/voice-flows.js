@@ -141,7 +141,8 @@ const stats = p => p.evaluate(() => {
 // The fake mic beeps periodically, so a single reading is zero most of the
 // time. Poll and keep the maximum — the same lesson the loop test learned.
 const peakOver = async (pages, ms) => {
-  const best = pages.map(() => ({ mic: 0, remote: 0, recv: 0, peers: 0 }));
+  const best = pages.map(() => (
+    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, codec: '?' }));
   const until = Date.now() + ms;
   while (Date.now() < until) {
     for (let i = 0; i < pages.length; i++) {
@@ -151,6 +152,9 @@ const peakOver = async (pages, ms) => {
         best[i].remote = Math.max(best[i].remote, s.remotePeak);
         best[i].recv = Math.max(best[i].recv, s.recv);
         best[i].peers = Math.max(best[i].peers, s.peers);
+        best[i].sent = Math.max(best[i].sent, s.sent);
+        best[i].bytes = Math.max(best[i].bytes, s.bytesSent);
+        best[i].codec = s.codec;
       }
     }
     await pages[0].waitForTimeout(250);
@@ -273,6 +277,17 @@ const peakOver = async (pages, ms) => {
   // The claim that matters: a real signal came out the far end, not just bytes.
   check('ana HEARD theo', sa.remote > 0, JSON.stringify(sa));
   check('theo HEARD ana', st.remote > 0, JSON.stringify(st));
+
+  // The codec, checked from outside. A silent fallback to raw PCM sounds
+  // identical and costs about thirty times the bandwidth, so "it works" is
+  // not evidence that it works the way we think.
+  check('ana is sending Opus, not raw PCM', sa.codec === 'opus', sa.codec);
+  const perPacket = sa.bytes / Math.max(sa.sent, 1);
+  console.log(`        ana wire: ${sa.codec}, ${perPacket.toFixed(0)} bytes/packet`
+    + ` (${(perPacket * 8 * 50 / 1000).toFixed(0)} kbps at 20 ms)`);
+  // 32 bytes of that is the header. Raw would be 1952.
+  check('and a packet is tens of bytes, not two thousand',
+    perPacket > 32 && perPacket < 400, `${perPacket} bytes/packet`);
 
   // --- presence: who the sidebar says is in a room ---
   // The claim is that this works for people who are NOT in the call — you

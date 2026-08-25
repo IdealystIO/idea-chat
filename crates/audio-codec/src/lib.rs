@@ -234,14 +234,19 @@ impl Decoder {
         let inner = OpusDecoder::new(rate as i32, channels).map_err(CodecError)?;
         Ok(Decoder { inner, frame: frame.frames(rate) * channels, channels })
     }
-}
 
-impl jitter::Decode for Decoder {
-    fn frame(&self) -> usize {
+    /// Samples per decoded frame, interleaved.
+    pub fn frame(&self) -> usize {
         self.frame
     }
 
-    fn decode(&mut self, packet: Option<&[u8]>, out: &mut [f32]) {
+    /// Decode one packet into `out`, or conceal one that never arrived.
+    ///
+    /// Inherent as well as the [`jitter::Decode`] impl below, so a caller that
+    /// decodes packets without buffering them — a reliable, ordered transport
+    /// has nothing to reorder — does not have to depend on `jitter` for the
+    /// trait.
+    pub fn decode(&mut self, packet: Option<&[u8]>, out: &mut [f32]) {
         let per_channel = self.frame / self.channels;
         // An empty slice is how Opus itself spells "this one is missing": the
         // decoder runs its concealment from the state it already has, which is
@@ -259,6 +264,16 @@ impl jitter::Decode for Decoder {
                 out.fill(0.0);
             }
         }
+    }
+}
+
+impl jitter::Decode for Decoder {
+    fn frame(&self) -> usize {
+        Decoder::frame(self)
+    }
+
+    fn decode(&mut self, packet: Option<&[u8]>, out: &mut [f32]) {
+        Decoder::decode(self, packet, out)
     }
 }
 
