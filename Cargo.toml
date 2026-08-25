@@ -12,6 +12,7 @@ members = [
     "crates/voice-dsp",
     "crates/jitter",
     "crates/audio-codec",
+    "crates/datagram",
     "crates/voice-auth",
     "crates/idea-state",
     "crates/voice-coord",
@@ -31,6 +32,7 @@ voice-proto = { path = "crates/voice-proto" }
 voice-dsp   = { path = "crates/voice-dsp" }
 jitter      = { path = "crates/jitter" }
 audio-codec = { path = "crates/audio-codec" }
+datagram    = { path = "crates/datagram" }
 voice-auth  = { path = "crates/voice-auth" }
 idea-state  = { path = "crates/idea-state" }
 voice-coord = { path = "crates/voice-coord" }
