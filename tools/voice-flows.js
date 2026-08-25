@@ -282,6 +282,15 @@ const peakOver = async (pages, ms) => {
   check('theo captured audio', st.mic > 0, JSON.stringify(st));
   check('ana received packets from theo', sa.recv > 0, JSON.stringify(sa));
   check('theo received packets from ana', st.recv > 0, JSON.stringify(st));
+  // On a loopback link with nothing lost, each side should receive about what
+  // the other sent. "> 0" is satisfied by a counter that is wrong by a factor
+  // of two, which is exactly what happened when the receive path was rewritten
+  // and the old increment was left in place beside the new one. The window is
+  // generous because the two readings are sampled at different instants.
+  const near = (a, b) => Math.abs(a - b) < Math.max(b * 0.25, 20);
+  check('and about as many as were sent, not double',
+    near(sa.recv, st.sent) && near(st.recv, sa.sent),
+    `ana recv ${sa.recv} vs theo sent ${st.sent}; theo recv ${st.recv} vs ana sent ${sa.sent}`);
   check('ana sees exactly one peer', sa.peers === 1, JSON.stringify(sa));
   check('theo sees exactly one peer', st.peers === 1, JSON.stringify(st));
   // The claim that matters: a real signal came out the far end, not just bytes.

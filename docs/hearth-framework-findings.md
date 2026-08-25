@@ -286,9 +286,13 @@ guidance that state read at build time needs a `switch`/`rx!` sink has an
 inverse — state read at build time *forces* a rebuild, and putting it in a sink
 is how you stop paying for one.
 
-## 10c. Audio block sizes are not configurable, and they dominate call latency
+## 10c. Audio block sizes were not configurable, and they dominated call latency
 
-Both audio SDKs pick a `ScriptProcessorNode` block size as a private constant:
+**Fixed in `microphone` and `media-stream`.** Kept because the measurement is
+the argument, and because the second half of it is not obvious until you build
+the thing that exposes it.
+
+Both audio SDKs picked a `ScriptProcessorNode` block size as a private constant:
 
 | | frames | at 48 kHz |
 | --- | --- | --- |
@@ -296,38 +300,23 @@ Both audio SDKs pick a `ScriptProcessorNode` block size as a private constant:
 | `media_stream::audio_web_bridge::BUFFER_SIZE` | 2048 | 42.7 ms |
 | `media_stream::audio_web_bridge::PRIME_FRAMES` | 2048 | 42.7 ms |
 
-Both comments justify the value as "a balance between callback overhead and
+Both comments justified the value as "a balance between callback overhead and
 latency", which is the right trade to think about and the wrong place to
 resolve it: the balance depends on what the stream is *for*. A recorder does
-not care about 85 ms. A live call spends more than half its latency budget
-there before a single sample has been processed or sent — the whole neural
+not care about 85 ms. A live call spent more than half its latency budget there
+before a single sample had been processed or sent — the whole neural
 suppression chain, model included, adds 45 ms against the capture block's 85.
 
-`AudioStreamConfig` is the natural home for it. It already carries sample rate,
-channels, and the three WebRTC processing flags; a `with_block_frames(1024)`
-alongside them would let a call trade CPU for ~64 ms and leave every other
-caller on the current default. The `media-stream` side wants the same for its
-render block and its prime cushion.
-
-Worth noting that the 4096 is not obviously deliberate for voice: the capture
-block is 4096 while the playback block is 2048, and nothing in either file
-explains the difference.
-
-(`AudioWorklet` is the standards answer to the overhead half of the trade, and
-both files say so — `ScriptProcessorNode` is used because the worklet's module
-load would make `native_source()` async. That is a real cost and a separate
-argument; a configurable block size is available today either way.)
-
-### The capture block is paid for twice
+### The capture block was paid for twice
 
 Adding a jitter buffer to the receive path made a second cost visible, and it
-is the larger surprise. Capture arrives 85 ms at a time and is cut into four
-20 ms packets, which then go out **together**. The receiver cannot tell a burst
-it was sent from a burst the network made — nothing in a packet says which — so
-it sizes its playout buffer to absorb it. The 85 ms block therefore buys itself
-a second charge as playout delay.
+is the larger surprise. Capture arrived 85 ms at a time and was cut into four
+20 ms packets, which then went out **together**. The receiver cannot tell a
+burst it was sent from a burst the network made — nothing in a packet says
+which — so it sized its playout buffer to absorb it. The 85 ms block bought
+itself a second charge as playout delay.
 
-Measured, in `jitter`'s own tests, same packet count and same duration with only
+Measured in `jitter`'s own tests, same packet count and same duration with only
 the arrival shape changed:
 
 | arrivals | delay the buffer settles on |
@@ -336,13 +325,48 @@ the arrival shape changed:
 | bursts of four | 46.5 ms |
 
 In the browser, against a real relay on loopback, the buffer peaked near 100 ms.
-So the capture block does not cost 85 ms of the latency budget; on a call it
-costs 85 ms plus whatever a receiver decides to hold because of it.
 
-There is no fix on the client side. Pacing the packets out would need a timer,
-and there is nothing in `runtime_core` to sleep on. A `with_block_frames(1024)`
-would fix both halves at once, which moves this from a nice-to-have to the
-single highest-leverage number in the audio stack.
+### What was added, and what it bought
+
+- `AudioStreamConfig::with_block_frames(u32)` — frames per capture callback.
+- `media_stream::Playout`, with `AudioStream::with_playout` — the render block
+  and the prime cushion on the output side, which are separate numbers and want
+  separate answers.
+
+Both round a request to the nearest power of two in 256..=16384 rather than
+refusing it, matching how `with_sample_rate` already treats a value the browser
+may clamp: an out-of-range request means somebody wanted lower latency, and
+failing to open the microphone is never the trade they were asking for. Both
+defaults are unchanged, so every existing caller behaves exactly as before.
+
+The rounding lives in `config.rs` and `audio.rs` rather than beside the code
+that uses it, because the web backends are compiled only for `wasm32` — a test
+next to the call site never runs on a developer's machine or in CI.
+
+Measured in the browser, capture 4096→1024 and playout 2048→512:
+
+| | before | after |
+| --- | --- | --- |
+| capture block | 85.3 ms | 21.3 ms |
+| jitter buffer | ~97 ms | 20.0 ms |
+| playback cushion + block | 85.4 ms | 21.3 ms |
+| **buffering, mouth to ear** | **~268 ms** | **~63 ms** |
+
+The jitter buffer row came back for free: pacing the sender is what let the
+receiver stop compensating. One constant, two refunds.
+
+### What is still there
+
+512-frame render blocks mean a main-thread callback every ~10 ms, which is
+about where `ScriptProcessorNode` stops being the right tool. `AudioWorklet` is
+the standards answer and both files already say so — it is not used because the
+worklet's module load would make `native_source()` async. That is a real cost
+and a separate argument; it is also the only thing left between here and the
+~40 ms that a native stack manages.
+
+Worth noting that the old 4096 was not obviously deliberate for voice: the
+capture block was 4096 while the playback block was 2048, and nothing in either
+file explained the difference.
 
 ## 11. `AppShell` and `Drawer` wrap content in a block, not a flex container
 

@@ -281,26 +281,39 @@ first, and both were measurably useless that way.
 otherwise.** It was written next to a "150 ms mouth-to-ear budget, which leaves
 room for the network", which is wrong in a way worth correcting rather than
 quietly deleting: the DSP is the *small* half. The buffers on either side of it
-are larger than everything in the table put together, and they are constants in
-the SDK rather than choices this app makes:
+were larger than everything in the table put together, and they were constants
+in the SDK rather than choices this app could make.
 
-| | frames | at 48 kHz |
-| --- | --- | --- |
-| capture block (`microphone`, `SCRIPT_PROCESSOR_BUFFER`) | 4096 | **85.3 ms** |
-| playback ring cushion (`media-stream`, `PRIME_FRAMES`) | 2048 | 42.7 ms |
-| playback render block (`media-stream`, `BUFFER_SIZE`) | 2048 | 42.7 ms |
-| | | **~171 ms** |
+They are choices now — `AudioStreamConfig::with_block_frames` and
+`media_stream::Playout` — and this app makes them:
 
-So a call with suppression **off** already spends ~171 ms in buffering before
-any network, and one with it on spends ~216 ms. Neither number includes the
-device capture stack, the browser's own AEC/AGC, or the `<audio>` element and
-OS output path, none of which are observable from here.
+| | frames | at 48 kHz | before |
+| --- | --- | --- | --- |
+| capture block (`microphone`) | 1024 | **21.3 ms** | 4096 / 85.3 ms |
+| jitter buffer, measured | — | **20.0 ms** | — |
+| playback cushion (`media-stream`) | 512 | 10.7 ms | 2048 / 42.7 ms |
+| playback render block (`media-stream`) | 512 | 10.7 ms | 2048 / 42.7 ms |
+| | | **~63 ms** | ~171 ms |
 
-Two consequences worth stating plainly. The suppression chain is a **26%**
-addition to a fixed cost, not the thing to optimise first. And the capture
-block alone is half the budget — `AudioStreamConfig` exposes sample rate,
-channels, and the three WebRTC flags, but *not* the block size, so an app
-cannot trade it. See `hearth-framework-findings.md`.
+So a call with suppression **off** spends ~63 ms in buffering before any
+network, and one with it on spends ~108 ms. Neither number includes the device
+capture stack, the browser's own AEC/AGC, or the `<audio>` element and OS output
+path, none of which are observable from here.
+
+The jitter buffer row is the interesting one. It is not a fixed cost — it is
+adaptive, and it settles wherever the arrival pattern puts it. At a 4096-frame
+capture block it sat near 100 ms, because 85 ms of capture leaves as four 20 ms
+packets at once and a receiver cannot tell a burst it was sent from one the
+network made. At 1024 frames the sender paces itself and the buffer collapses to
+its floor. That is the capture block being charged twice, and refunded twice.
+
+Two consequences worth stating plainly. The suppression chain is now a **71%**
+addition to the fixed cost rather than 26% — it did not get more expensive, the
+thing it sits inside got much cheaper, and that makes it the next thing to look
+at rather than the last. And the remaining floor is `ScriptProcessorNode`: going
+below 512 frames means callbacks on the browser's main thread every ~10 ms, and
+`AudioWorklet` is the honest answer past that point. See
+`hearth-framework-findings.md`.
 
 ## Levelling
 

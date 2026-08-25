@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
+use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter, Playout};
 use microphone::{AudioStreamConfig, Microphone};
 use net::WebSocket;
 use serde::Deserialize;
@@ -48,6 +48,21 @@ use crate::playback::{self, Playing};
 /// arrives 85 ms at a time on web and that is where the latency is — see
 /// docs/hearth-framework-findings.md finding 10c.
 const PACKET_MS: u32 = 20;
+
+/// Frames per capture callback.
+///
+/// 1024, which is ~21 ms at 48 kHz against the SDK default of 4096 (~85 ms).
+/// This one number was the largest single entry in the latency budget, and it
+/// was charged twice: once as capture delay, and again as jitter buffer depth,
+/// because 85 ms of capture leaves as four 20 ms packets at once and a receiver
+/// cannot tell a burst it was sent from one the network made. See
+/// docs/hearth-framework-findings.md finding 10c.
+///
+/// It is close to the 960-frame packet deliberately: roughly one packet per
+/// block means the sender paces itself, which is what collapses the buffer back
+/// to its floor. Going lower means more callbacks on the browser's main thread,
+/// and 512 is about where `ScriptProcessorNode` starts to be the wrong tool.
+const CAPTURE_BLOCK_FRAMES: u32 = 1024;
 
 /// The most frames one arrival may play out at once.
 ///
@@ -386,7 +401,12 @@ impl PeerSink {
     /// arrived must not be loud for the first 20 ms of the word that announced
     /// them.
     fn open(sender: u32, rate: u32, gain: f32) -> Result<PeerSink, String> {
-        let (stream, writer) = AudioStream::new();
+        // The output half of the latency budget. The SDK's default carries
+        // ~85 ms of render block and cushion, which is right for a recorder and
+        // is most of the difference between a conversation and a radio
+        // interview. The cushion in particular is buying smoothing that the
+        // jitter buffer above has already paid for once.
+        let (stream, writer) = AudioStream::with_playout(Playout::low_latency());
         let playing = playback::play(&stream)
             .map_err(|e| format!("peer {sender}: {e}"))?;
         Ok(PeerSink {
@@ -782,6 +802,7 @@ pub async fn open_capture(
 ) -> Result<AudioStream, String> {
     let config = AudioStreamConfig::default()
         .mono()
+        .with_block_frames(CAPTURE_BLOCK_FRAMES)
         .with_auto_gain_control(true)
         .with_echo_cancellation(capture == Capture::Processed)
         .with_noise_suppression(capture == Capture::Processed && mode.browser_noise_suppression());
@@ -813,6 +834,12 @@ pub async fn join(
 
     // 1b. The wire: one stream, for the life of the call, that the packetiser
     //     reads. What feeds it is swappable — see `Session::install`.
+    //
+    //     Default buffering, and it costs nothing: this stream is only ever
+    //     subscribed to, never handed to a sink, so it never builds a WebAudio
+    //     graph and `Playout` never applies to it. Only a stream that reaches
+    //     `native_source()` pays for its output block — here, that is
+    //     `PeerSink`.
     let (wire, wire_writer) = AudioStream::new();
 
     //     A call always starts on the direct chain, even when suppression is
@@ -1101,6 +1128,11 @@ async fn pump(
             sink.fader = voice_dsp::Fader::new(packet.sample_rate, gain);
         }
 
+        // Counted on ARRIVAL, not on playout. A packet that arrives while the
+        // buffer is still filling has been received; counting at the far end of
+        // the buffer instead would make a healthy call look lossy for its first
+        // few packets, and would count nothing at all for a packet held and
+        // played as part of a later batch.
         PACKETS_IN.fetch_add(1, Ordering::Relaxed);
 
         // Held, ordered, and played out on a clock — not decoded on arrival.
@@ -1135,7 +1167,6 @@ async fn pump(
         // jitter buffer's job, which it does by sequence number.
         sink.writer.write_pcm_f32(packet.sample_rate, packet.channels, &pcm);
         let _ = &sink.stream;
-        PACKETS_IN.fetch_add(1, Ordering::Relaxed);
     }
 }
 
