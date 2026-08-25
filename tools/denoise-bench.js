@@ -22,7 +22,7 @@ const SECONDS = Number(process.env.SECONDS || 10);
 
 
 const HANDLE = process.env.HANDLE || 'ana';
-const PASSWORD = process.env.PASSWORD || 'a good passphrase';
+const PASSWORD = process.env.PASSWORD || 'password123';
 
 const fill = async (p, label, value) => {
   await p.evaluate(({ label }) => {

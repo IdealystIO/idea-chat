@@ -98,7 +98,7 @@ const runSocket = (page, room, beats) => page.evaluate(async ({ room, beats }) =
   if (!claim) { console.log('no claim token — run tools/reset-dev.sh first'); process.exit(1); }
 
   const claimed = await call('claim_instance',
-    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'a good passphrase' }]);
+    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'password123' }]);
   const anaJar = claimed.cookie;
   const space = (await call('create_space', ['cabin', 'The Cabin'], anaJar)).body.Ok;
   const porch = space.channels.find(c => c.name === 'The Porch');

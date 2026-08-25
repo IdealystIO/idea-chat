@@ -207,12 +207,12 @@ const peakOver = async (pages, ms) => {
   if (!claim) { console.log('no claim token — run tools/reset-dev.sh first'); process.exit(1); }
 
   const claimed = await call('claim_instance',
-    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'a good passphrase' }]);
+    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'password123' }]);
   const anaJar = claimed.cookie;
   const space = (await call('create_space', ['cabin', 'The Cabin'], anaJar)).body.Ok;
   const invite = (await call('create_invite', [space.id, 5], anaJar)).body.Ok;
   await call('register',
-    [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'another passphrase' }]);
+    [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'password123' }]);
 
   const browser = await chromium.launch({
     executablePath: CHROME,
@@ -246,8 +246,8 @@ const peakOver = async (pages, ms) => {
     return p;
   };
 
-  const a = await open('ana', 'a good passphrase');
-  const t = await open('theo', 'another passphrase');
+  const a = await open('ana', 'password123');
+  const t = await open('theo', 'password123');
   check('both are signed in', (await has(a, 'The Cabin')) && (await has(t, 'The Cabin')));
 
   // The setting exists and says what it costs. Worth asserting: the whole

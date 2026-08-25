@@ -169,12 +169,12 @@ const menuAction = async (p, person, item) => {
   if (!claim) { console.log('no claim token — run tools/reset-dev.sh first'); process.exit(1); }
 
   const claimed = await call('claim_instance',
-    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'a good passphrase' }]);
+    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'password123' }]);
   const anaJar = claimed.cookie;
   const space = (await call('create_space', ['cabin', 'The Cabin'], anaJar)).body.Ok;
   const invite = (await call('create_invite', [space.id, 5], anaJar)).body.Ok;
   await call('register',
-    [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'another passphrase' }]);
+    [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'password123' }]);
 
   const members = (await call('space_members', [space.id], anaJar)).body.Ok || [];
   const ana = members.find(m => m.handle === 'ana');
@@ -212,8 +212,8 @@ const menuAction = async (p, person, item) => {
 
   /// Ana talks, theo listens, and we report what theo heard.
   const room = async (theoPrefs, seconds = 6) => {
-    const a = await open('ana', 'a good passphrase');
-    const t = await open('theo', 'another passphrase', theoPrefs);
+    const a = await open('ana', 'password123');
+    const t = await open('theo', 'password123', theoPrefs);
     await clickRoom(a, 'The Porch');
     await clickRoom(t, 'The Porch');
     await a.waitForTimeout(5000);

@@ -43,7 +43,7 @@ no  "and never reveals the claim token" "$R" "$TOKEN"
 has "a fresh instance is invite-only" "$R" '"registration_mode":"invite_only"'
 
 echo "--- claiming ---"
-R=$(call claim_instance "[{\"token\":\"wrong\",\"handle\":\"ana\",\"display_name\":\"Ana\",\"password\":\"a good passphrase\"}]")
+R=$(call claim_instance "[{\"token\":\"wrong\",\"handle\":\"ana\",\"display_name\":\"Ana\",\"password\":\"password123\"}]")
 has "a wrong claim token is refused" "$R" 'not valid'
 
 # A rejected claim must write nothing and spend nothing. This flow used to
@@ -54,21 +54,21 @@ has "a wrong claim token is refused" "$R" 'not valid'
 # works with the same token.
 R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"ana\",\"display_name\":\"Ana\",\"password\":\"short\"}]")
 has "a too-short password is refused" "$R" 'at least 10 characters'
-R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"Ana Ruiz!\",\"display_name\":\"Ana\",\"password\":\"a good passphrase\"}]")
+R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"Ana Ruiz!\",\"display_name\":\"Ana\",\"password\":\"password123\"}]")
 has "a malformed handle is refused" "$R" 'lowercase letters'
 no  "and is not reported as our fault" "$R" 'our end'
 R=$(call instance_status 'null')
 has "a rejected claim leaves the instance claimable" "$R" '"needs_claim":true'
-R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"ana\",\"display_name\":\"Ana Ruiz\",\"password\":\"a good passphrase\"}]" "-c $JAR")
+R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"ana\",\"display_name\":\"Ana Ruiz\",\"password\":\"password123\"}]" "-c $JAR")
 has "the right token claims the instance" "$R" '"handle":"ana"'
 has "the first account is instance admin" "$R" '"is_instance_admin":true'
 no  "web callers get no bearer token" "$R" '"token":"'
 grep -q 'session' $JAR && { echo "  ok   a session cookie was set"; PASS=$((PASS+1)); } || { echo " FAIL  no session cookie"; FAIL=$((FAIL+1)); }
 grep -qi 'HttpOnly' $JAR && { echo "  ok   the cookie is httpOnly"; PASS=$((PASS+1)); } || { echo " FAIL  cookie is not httpOnly"; FAIL=$((FAIL+1)); }
 
-R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"thief\",\"display_name\":\"Thief\",\"password\":\"another passphrase\"}]")
+R=$(call claim_instance "[{\"token\":\"$TOKEN\",\"handle\":\"thief\",\"display_name\":\"Thief\",\"password\":\"password123\"}]")
 has "the claim token cannot be reused" "$R" 'already been claimed'
-R=$(call login '[{"identifier":"ana","password":"a good passphrase"}]')
+R=$(call login '[{"identifier":"ana","password":"password123"}]')
 has "the claimed account can actually sign in" "$R" '"handle":"ana"'
 R=$(call instance_status 'null')
 has "a claimed instance stops advertising a claim" "$R" '"needs_claim":false'
@@ -95,24 +95,24 @@ has "the invite names its space" "$R" '"space_name":"The Cabin"'
 has "and who sent it" "$R" '"invited_by":"Ana Ruiz"'
 
 echo "--- registration ---"
-R=$(call register "[{\"invite_code\":\"$CODE\",\"handle\":\"theo\",\"display_name\":\"Theo Lang\",\"password\":\"theos passphrase\"}]" "-c $JAR2")
+R=$(call register "[{\"invite_code\":\"$CODE\",\"handle\":\"theo\",\"display_name\":\"Theo Lang\",\"password\":\"password123\"}]" "-c $JAR2")
 has "an invite creates an account" "$R" '"handle":"theo"'
 no  "a registered member is not instance admin" "$R" '"is_instance_admin":true'
 R=$(curl -sS -X POST "$API/my_spaces" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -b $JAR2 -d 'null')
 has "and lands in the space they were invited to" "$R" '"slug":"cabin"'
 has "as a member" "$R" '"role":"member"'
 
-R=$(call register "[{\"invite_code\":\"$CODE\",\"handle\":\"gate\",\"display_name\":\"Gate\",\"password\":\"gates passphrase\"}]")
+R=$(call register "[{\"invite_code\":\"$CODE\",\"handle\":\"gate\",\"display_name\":\"Gate\",\"password\":\"password123\"}]")
 has "a single-use invite cannot be used twice" "$R" 'already been used'
-R=$(call register '[{"invite_code":"no-such-code-00","handle":"nope","display_name":"Nope","password":"nopes passphrase"}]')
+R=$(call register '[{"invite_code":"no-such-code-00","handle":"nope","display_name":"Nope","password":"password123"}]')
 has "an unknown invite is refused" "$R" 'not valid'
-R=$(curl -sS -X POST "$API/login" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -d '[{"identifier":"gate","password":"gates passphrase"}]')
+R=$(curl -sS -X POST "$API/login" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -d '[{"identifier":"gate","password":"password123"}]')
 has "a rolled-back registration leaves no account behind" "$R" 'invalid handle or password'
 
 echo "--- login ---"
-R=$(call login '[{"identifier":"ana","password":"a good passphrase"}]')
+R=$(call login '[{"identifier":"ana","password":"password123"}]')
 has "a correct password signs in" "$R" '"handle":"ana"'
-R=$(call login '[{"identifier":"ANA","password":"a good passphrase"}]')
+R=$(call login '[{"identifier":"ANA","password":"password123"}]')
 has "the handle is case-insensitive" "$R" '"handle":"ana"'
 W1=$(call login '[{"identifier":"ana","password":"wrong"}]')
 W2=$(call login '[{"identifier":"nobody-at-all","password":"wrong"}]')

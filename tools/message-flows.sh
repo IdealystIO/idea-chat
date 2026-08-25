@@ -22,8 +22,8 @@ h=b.hex(); print(f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}")
 PY
 }
 
-curl -sS -X POST "$API/login" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -c $A -d '[{"identifier":"ana","password":"a good passphrase"}]' >/dev/null
-curl -sS -X POST "$API/login" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -c $T -d '[{"identifier":"theo","password":"theos passphrase"}]' >/dev/null
+curl -sS -X POST "$API/login" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -c $A -d '[{"identifier":"ana","password":"password123"}]' >/dev/null
+curl -sS -X POST "$API/login" -H 'Content-Type: application/json' -H "Origin: $ORIGIN_URL" -c $T -d '[{"identifier":"theo","password":"password123"}]' >/dev/null
 SPACES=$(as $A my_spaces 'null')
 CH=$(echo "$SPACES" | grep -o '"id":"[^"]*","kind":"text"[^}]*"name":"general"' | grep -o '^"id":"[^"]*"' | cut -d'"' -f4)
 [ -z "$CH" ] && CH=$(echo "$SPACES" | python3 -c 'import sys,json; d=json.load(sys.stdin)["Ok"]; print([c["id"] for c in d[0]["channels"] if c["name"]=="general"][0])')

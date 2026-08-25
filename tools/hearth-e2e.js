@@ -97,7 +97,7 @@ const clickText = async (p, label) => {
   await fill(ana, 'Claim link', claimToken);
   await fill(ana, 'Handle', 'ana');
   await fill(ana, 'Display name', 'Ana Ruiz');
-  await fill(ana, 'Password', 'a good passphrase');
+  await fill(ana, 'Password', 'password123');
   await clickText(ana, 'Claim this instance');
   await ana.waitForTimeout(2500);
 
@@ -191,7 +191,7 @@ const clickText = async (p, label) => {
   await fill(theo, 'Invite link', invite);
   await fill(theo, 'Handle', 'theo');
   await fill(theo, 'Display name', 'Theo Lang');
-  await fill(theo, 'Password', 'theos passphrase');
+  await fill(theo, 'Password', 'password123');
   await clickText(theo, 'Create account');
   await theo.waitForTimeout(2500);
 
@@ -248,7 +248,7 @@ const clickText = async (p, label) => {
 
   // --- signing back in ---
   await fill(ana, 'Handle or email', 'ana');
-  await fill(ana, 'Password', 'a good passphrase');
+  await fill(ana, 'Password', 'password123');
   await clickText(ana, 'Sign in');
   await ana.waitForTimeout(2500);
   await clickText(ana, 'general');

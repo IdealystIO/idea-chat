@@ -21,7 +21,7 @@ const OUT='/tmp/claude-1000/-home-nicho-Development-idea-chat/fdd16d72-f0f1-473a
     if(!at){console.log('NO BUTTON:',label);return false;}
     await p.mouse.click(at.x,at.y); await p.waitForTimeout(900); return true;
   };
-  await fill('Claim link', token); await fill('Handle','ana'); await fill('Display name','Ana Ruiz'); await fill('Password','a good passphrase');
+  await fill('Claim link', token); await fill('Handle','ana'); await fill('Display name','Ana Ruiz'); await fill('Password','password123');
   await click('Claim this instance'); await p.waitForTimeout(2500);
   console.log('composer present after claim:', await p.evaluate(()=>!!document.querySelector('input[placeholder^="Message"]')));
 

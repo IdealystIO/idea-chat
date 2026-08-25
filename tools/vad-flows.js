@@ -131,12 +131,12 @@ const watch = (p, seconds) => p.evaluate(async (seconds) => {
   if (!claim) { console.log('no claim token — run tools/reset-dev.sh first'); process.exit(1); }
 
   const claimed = await call('claim_instance',
-    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'a good passphrase' }]);
+    [{ token: claim, handle: 'ana', display_name: 'Ana Ruiz', email: null, password: 'password123' }]);
   const anaJar = claimed.cookie;
   const space = (await call('create_space', ['cabin', 'The Cabin'], anaJar)).body.Ok;
   const invite = (await call('create_invite', [space.id, 5], anaJar)).body.Ok;
   await call('register',
-    [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'another passphrase' }]);
+    [{ invite_code: invite, handle: 'theo', display_name: 'Theo Lang', email: null, password: 'password123' }]);
 
   const browser = await chromium.launch({
     executablePath: CHROME,
@@ -160,7 +160,7 @@ const watch = (p, seconds) => p.evaluate(async (seconds) => {
 
   // --- the level path, with no model in the chain ---
   {
-    const a = await open('ana', 'a good passphrase', 'off');
+    const a = await open('ana', 'password123', 'off');
     await clickRoom(a, 'The Porch');
     await a.waitForTimeout(5000);
     const r = await watch(a, 8);
@@ -174,7 +174,7 @@ const watch = (p, seconds) => p.evaluate(async (seconds) => {
 
   // --- the model's verdict ---
   {
-    const a = await open('ana', 'a good passphrase', 'client');
+    const a = await open('ana', 'password123', 'client');
     await clickRoom(a, 'The Porch');
     // The chunk and the model have to load on the first join.
     await a.waitForTimeout(12000);
@@ -196,8 +196,8 @@ const watch = (p, seconds) => p.evaluate(async (seconds) => {
 
   // --- and the far side hears about it ---
   {
-    const a = await open('ana', 'a good passphrase', 'off');
-    const t = await open('theo', 'another passphrase', 'off');
+    const a = await open('ana', 'password123', 'off');
+    const t = await open('theo', 'password123', 'off');
     await clickRoom(a, 'The Porch');
     await clickRoom(t, 'The Porch');
     await a.waitForTimeout(6000);
