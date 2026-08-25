@@ -10,6 +10,7 @@
 //! | `PUBLIC_URL` | the `ws://` URL clients dial. **Must be reachable by clients**, not by the node — behind NAT or a load balancer these differ |
 //! | `CAPACITY` | max participants before the node refuses NEW rooms (0 = unbounded) |
 //! | `COORD_BACKEND` | `memory` \| `redis` \| `postgres`. Unset means single-node mode |
+//! | `VOICE_WEBTRANSPORT` | UDP port for the QUIC listener. Unset means WebSocket only |
 //!
 //! Without `COORD_BACKEND` the node runs standalone and owns every room, which
 //! is the original single-relay behavior and correct for development.
@@ -76,7 +77,62 @@ async fn main() {
 
     println!("voice-node {id} listening on ws://{addr}/ws?room=<name>&id=<n>");
 
-    let app = voice_server::router(coord.clone());
+    let (app, state) = voice_server::node(coord.clone());
+
+    // WebTransport, if this node is asked for it. Opt-in rather than always on
+    // because it is a second socket on a UDP port a deployment has to open, and
+    // a node that silently listened on one would be a surprise in a firewall
+    // audit. Clients that cannot reach it fall back to the WebSocket, which is
+    // why this is additive and not a switch.
+    match std::env::var("VOICE_WEBTRANSPORT").ok().and_then(|p| p.parse::<u16>().ok()) {
+        Some(quic_port) => {
+            // The certificate has to name what clients DIAL, which behind NAT
+            // is not what this process binds. `PUBLIC_URL` already carries that
+            // distinction for the WebSocket, so it is the same answer here.
+            let host = public_url
+                .trim_start_matches("ws://")
+                .trim_start_matches("wss://")
+                .split(':')
+                .next()
+                .unwrap_or("127.0.0.1")
+                .to_string();
+            let names: Vec<&str> = if host == "127.0.0.1" || host == "localhost" {
+                vec!["127.0.0.1", "localhost"]
+            } else {
+                vec![host.as_str(), "127.0.0.1", "localhost"]
+            };
+            let bind: std::net::SocketAddr = format!("0.0.0.0:{quic_port}")
+                .parse()
+                .expect("a port number makes an address");
+            match voice_server::webtransport::listen(
+                bind,
+                &names,
+                &host,
+                state.clone(),
+                state.webtransport_slot(),
+            ) {
+                Ok(endpoint) => {
+                    println!("[node] WebTransport on {}", endpoint.url);
+                    println!("       certificate hash {}", endpoint.cert_hash);
+                    println!("       published at http://{addr}/webtransport");
+                    // Browsers cap a pinned self-signed certificate at about
+                    // two weeks, and this one is minted at startup. Said out
+                    // loud because the failure mode is a node that has been up
+                    // for a fortnight and stops admitting new callers.
+                    println!("       self-signed and minted just now — browsers stop trusting");
+                    println!("       a pinned certificate after ~14 days, so this node needs a");
+                    println!("       restart or a rotation before then.");
+                }
+                Err(e) => {
+                    // Not fatal: the WebSocket is up and calls work over it.
+                    eprintln!("[node] WebTransport could not start on :{quic_port}: {e}");
+                    eprintln!("       relaying over WebSocket only.");
+                }
+            }
+        }
+        None => println!("[node] WebSocket only — set VOICE_WEBTRANSPORT=<udp port> to add QUIC"),
+    }
+
     let server = axum::serve(listener, app);
 
     // Graceful shutdown: drain first so the fleet stops sending NEW rooms here,

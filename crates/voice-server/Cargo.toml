@@ -11,6 +11,9 @@ description = "idea-chat voice fleet: the `voice-node` relay and the `voice-dire
 # and re-encode what the model gives back. Plain relaying stays opaque.
 voice-proto = { workspace = true, features = ["codec"] }
 voice-dsp = { workspace = true }
+# The QUIC transport. Beside the WebSocket, not instead of it — see
+# `carrier.rs` and docs/quic-migration.md.
+datagram = { workspace = true }
 voice-auth = { workspace = true }
 # Server-side neural suppression. The model is EMBEDDED on native, so a node
 # needs no asset and no download — unlike the web client, which must fetch it.

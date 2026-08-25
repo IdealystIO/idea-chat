@@ -43,9 +43,14 @@ run cargo test -p voice-proto --features codec -q
 # The transport-side crates: the jitter buffer and its concealment, the codec,
 # and a real QUIC connection on loopback.
 run cargo test -p jitter -p audio-codec -p datagram -q
-# The relay's room bookkeeping, which decides who can hear whom. It went
-# untested until a room silently split in two under a mid-call refresh.
-run cargo test -p voice-server --lib -q
+# The relay: room bookkeeping, fan-out over both transports, and a real call
+# over QUIC on loopback.
+#
+# NOT `--lib`. It was, and the integration tests beside it went red the day the
+# suppression notice was added — every "did a packet arrive" helper read that
+# notice as silence — and stayed red because nothing ran them. A suite that is
+# not in this file does not exist.
+run cargo test -p voice-server -q
 
 step "3/11  data layer — 41 tests against real Postgres"
 TAIL=4 run env HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q

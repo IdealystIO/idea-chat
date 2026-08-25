@@ -20,7 +20,14 @@
 //! is the wrong shape for PCM. This is the seam that becomes QUIC datagrams
 //! later; the relay's fan-out is unaffected by that change.
 
+// What a connection has to be able to do, so the relay does not have to know
+// which transport it is. See the module docs for why the split is "may this be
+// dropped" rather than "is this text".
+pub mod carrier;
 pub mod coord;
+// The QUIC listener. Its own socket on its own port — WebTransport is UDP and
+// cannot be an axum route.
+pub mod webtransport;
 pub mod suppress;
 
 use std::collections::HashMap;
@@ -28,17 +35,18 @@ use std::sync::{Arc, Mutex};
 
 pub mod gateway;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use voice_coord::{Epoch, NodeLoad};
 
+use crate::carrier::{Downlink, Incoming, Uplink};
 use crate::coord::{Admission, NodeCoord, REDIRECT};
 
 /// How many packets may back up for one slow receiver before it loses the
@@ -182,6 +190,9 @@ pub struct NodeState {
     /// The node's one suppression host. Present whether or not suppression is
     /// permitted — see [`suppress::Suppression::start`].
     suppress: suppress::Suppression,
+    /// Where WebTransport is listening, once it is. Empty on a node that runs
+    /// WebSocket only, which is every node until one is asked to do otherwise.
+    webtransport: webtransport::Published,
 }
 
 #[derive(serde::Deserialize)]
@@ -208,7 +219,7 @@ pub fn ticket_secret() -> Option<Vec<u8>> {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -268,20 +279,35 @@ async fn admit(coord: &Option<NodeCoord>, room: &str) -> Admission {
 /// Drive one participant: pump their inbound frames into the room, and the
 /// room's frames (minus their own) back out.
 async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked: voice_dsp::Mode) {
-    let (mut sink, mut stream) = socket.split();
+    let (sink, stream) = socket.split();
+    serve(sink, stream, state, room, id, asked).await
+}
 
+/// The relay proper, over whatever carries it.
+///
+/// Generic rather than `dyn` because there is no runtime choice to make: a
+/// connection arrives on one transport or the other and is served by the
+/// matching instantiation. See [`carrier`] for what the two halves promise.
+pub async fn serve<D: Downlink, U: Uplink>(
+    mut sink: D,
+    mut stream: U,
+    state: NodeState,
+    room: String,
+    id: u32,
+    asked: voice_dsp::Mode,
+) {
     let (epoch, participants) = match admit(&state.coord, &room).await {
         Admission::Admitted { epoch, participants } => (epoch, participants),
         Admission::Redirect { url } => {
             println!("[redirect] room={room} id={id} -> {url}");
-            let _ = sink.send(Message::Text(format!("{REDIRECT}{url}"))).await;
-            let _ = sink.close().await;
+            sink.text(format!("{REDIRECT}{url}")).await;
+            sink.finish().await;
             return;
         }
         Admission::Rejected { reason } => {
             eprintln!("[reject] room={room} id={id}: {reason}");
-            let _ = sink.send(Message::Text(NO_CAPACITY.to_string())).await;
-            let _ = sink.close().await;
+            sink.text(NO_CAPACITY.to_string()).await;
+            sink.finish().await;
             return;
         }
     };
@@ -293,7 +319,7 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
         // Say so before any audio flows, so the client reports a real cause
         // instead of presenting as an unexplained silent channel.
         eprintln!("[dup] room={room} id={id} — already connected; both sides hear silence");
-        let _ = sink.send(Message::Text(DUPLICATE_ID.to_string())).await;
+        sink.text(DUPLICATE_ID.to_string()).await;
     }
 
     // What the client asked for, and what this node will actually do. The two
@@ -364,9 +390,7 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
     } else {
         granted
     };
-    let _ = sink
-        .send(Message::Text(format!("{}{}", suppress::INFO_PREFIX, effective.as_str())))
-        .await;
+    sink.text(format!("{}{}", suppress::INFO_PREFIX, effective.as_str())).await;
 
     // Room -> this participant.
     let room_out = room.clone();
@@ -379,7 +403,7 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
                     if from == id {
                         continue;
                     }
-                    if sink.send(Message::Binary(bytes.to_vec())).await.is_err() {
+                    if !sink.binary(bytes.to_vec()).await {
                         break;
                     }
                 }
@@ -398,9 +422,9 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
     // relay that is not suppressing never opens a packet and never needs one.
     let mut decoder = voice_proto::codec::Decoded::default();
     let mut inbound = tokio::spawn(async move {
-        while let Some(Ok(msg)) = stream.next().await {
-            match msg {
-                Message::Binary(bytes) => {
+        loop {
+            match stream.next().await {
+                Incoming::Binary(bytes) => {
                     // Validate the header before fanning out, so one malformed
                     // client cannot spray garbage at everyone else.
                     match voice_proto::Packet::decode(&bytes) {
@@ -431,10 +455,10 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
                         Err(e) => eprintln!("[drop] id={id} malformed packet: {e}"),
                     }
                 }
-                Message::Close(_) => break,
-                // Text frames are reserved for signalling, which does not live
-                // on this socket yet. Ignore rather than disconnect.
-                _ => {}
+                Incoming::Closed => break,
+                // Notices are reserved for signalling, which does not travel
+                // this direction yet. Ignore rather than disconnect.
+                Incoming::Text(_) => {}
             }
         }
     });
@@ -462,6 +486,17 @@ async fn relay(socket: WebSocket, state: NodeState, room: String, id: u32, asked
 
 /// Build the node's router. `coord` is `None` for single-node mode.
 pub fn router(coord: Option<NodeCoord>) -> Router {
+    node(coord).0
+}
+
+/// Build the node's router **and** hand back the state it runs on.
+///
+/// Both, because the WebTransport listener is not a route: it needs the same
+/// `NodeState` — the same rooms, the same coordination store — reached from
+/// outside the axum router entirely. A second `NodeState` would be a second
+/// set of rooms, and the two transports would relay past each other in
+/// silence.
+pub fn node(coord: Option<NodeCoord>) -> (Router, NodeState) {
     let rooms = Rooms::default();
 
     if let Some(c) = &coord {
@@ -472,13 +507,41 @@ pub fn router(coord: Option<NodeCoord>) -> Router {
         });
     }
 
-    Router::new()
+    let state = NodeState {
+        rooms,
+        coord,
+        suppress: suppress::Suppression::start(),
+        webtransport: Default::default(),
+    };
+    let router = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
+        // Where to dial for WebTransport, and the certificate hash to pin.
+        // Published over HTTP because a client can discover neither: the port
+        // is not this one, and the certificate is not one any CA vouches for.
+        // 404 on a node running WebSocket only, which a client reads as "this
+        // node does not offer it" and falls back.
+        .route("/webtransport", get(webtransport_handler))
         // The web client is served from a different origin by `idealyst dev`,
         // so the relay has to be reachable cross-origin.
         .layer(CorsLayer::permissive())
-        .with_state(NodeState { rooms, coord, suppress: suppress::Suppression::start() })
+        .with_state(state.clone());
+    (router, state)
+}
+
+/// The WebTransport endpoint this node offers, if it offers one.
+async fn webtransport_handler(State(state): State<NodeState>) -> Response {
+    match state.webtransport.get() {
+        Some(e) => axum::Json(e.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, "this node relays over WebSocket only").into_response(),
+    }
+}
+
+impl NodeState {
+    /// Where the WebTransport listener should publish itself.
+    pub fn webtransport_slot(&self) -> webtransport::Published {
+        self.webtransport.clone()
+    }
 }
 
 #[cfg(test)]

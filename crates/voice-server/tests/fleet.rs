@@ -47,21 +47,34 @@ async fn connect(addr: SocketAddr, room: &str, id: u32) -> Client {
 }
 
 fn packet(sender: u32, seq: u32) -> Vec<u8> {
-    Packet {
+    // Raw PCM, deliberately: a relay forwards bytes without opening them, and
+    // these tests are about the forwarding. The one place encoding matters is
+    // the suppression path, which has its own coverage.
+    Packet::from_f32(
         sender,
         seq,
-        sample_rate: 48_000,
-        channels: 1,
-        pts_micros: seq as u64 * 10_000,
-        samples: vec![10, -10, 20, -20],
-    }
+        48_000,
+        1,
+        seq as u64 * 10_000,
+        &[0.000305185, -0.000305185, 0.00061037, -0.00061037],
+    )
     .encode()
 }
 
+/// Read one binary frame, skipping notices.
+///
+/// The suppression notice is the first thing on every socket, so a helper that
+/// treated a text frame as silence answered `None` to every test here. See the
+/// same function in `relay.rs`.
 async fn recv_binary(client: &mut Client, ms: u64) -> Option<Vec<u8>> {
-    match tokio::time::timeout(Duration::from_millis(ms), client.next()).await {
-        Ok(Some(Ok(Message::Binary(b)))) => Some(b),
-        _ => None,
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        let left = deadline.checked_duration_since(tokio::time::Instant::now())?;
+        match tokio::time::timeout(left, client.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => return Some(b),
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => return None,
+        }
     }
 }
 

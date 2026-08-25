@@ -33,14 +33,17 @@ async fn join(addr: SocketAddr, room: &str, id: u32) -> Client {
 }
 
 fn packet(sender: u32, seq: u32) -> Vec<u8> {
-    Packet {
+    // Raw PCM, deliberately: a relay forwards bytes without opening them, and
+    // these tests are about the forwarding. The one place encoding matters is
+    // the suppression path, which has its own coverage.
+    Packet::from_f32(
         sender,
         seq,
-        sample_rate: 48_000,
-        channels: 1,
-        pts_micros: seq as u64 * 10_000,
-        samples: vec![100, -100, 200, -200],
-    }
+        48_000,
+        1,
+        seq as u64 * 10_000,
+        &[0.00305185, -0.00305185, 0.0061037, -0.0061037],
+    )
     .encode()
 }
 
@@ -49,10 +52,22 @@ fn packet(sender: u32, seq: u32) -> Vec<u8> {
 /// A timeout is the assertion mechanism for the negative cases (no self-echo,
 /// no cross-room leakage): there is no event that says "nothing will come," so
 /// waiting a bounded time and finding silence is the test.
+///
+/// Text frames are skipped rather than treated as silence. Every participant is
+/// told what suppression the room is getting the moment they join, so that
+/// notice is the FIRST thing on the socket — and a helper that answered `None`
+/// to it reported "nothing arrived" for every one of these tests. They were red
+/// from the day that notice was added and nothing was running them: `check-all`
+/// ran `--lib` only.
 async fn recv_binary(client: &mut Client, ms: u64) -> Option<Vec<u8>> {
-    match tokio::time::timeout(Duration::from_millis(ms), client.next()).await {
-        Ok(Some(Ok(Message::Binary(b)))) => Some(b),
-        _ => None,
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        let left = deadline.checked_duration_since(tokio::time::Instant::now())?;
+        match tokio::time::timeout(left, client.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => return Some(b),
+            Ok(Some(Ok(Message::Text(_)))) => continue,
+            _ => return None,
+        }
     }
 }
 
@@ -199,6 +214,25 @@ async fn duplicate_id_in_a_room_is_reported_not_silently_swallowed() {
     );
 }
 
+/// Collect every notice a client is sent within `ms`.
+///
+/// The negative duplicate-id tests are "no WARNING arrives", not "nothing
+/// arrives" — every participant is told what suppression the room is getting
+/// the moment they join, so a test that waited for silence was asserting
+/// against a notice that is supposed to be there.
+async fn notices(client: &mut Client, ms: u64) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    let mut out = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+        match tokio::time::timeout(left, client.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => out.push(t),
+            Ok(Some(Ok(_))) => continue,
+            _ => break,
+        }
+    }
+    out
+}
+
 #[tokio::test]
 async fn a_distinct_id_in_the_same_room_is_not_flagged() {
     let addr = spawn_server().await;
@@ -206,10 +240,10 @@ async fn a_distinct_id_in_the_same_room_is_not_flagged() {
     let mut second = join(addr, "room-ok", 2).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let notice = tokio::time::timeout(Duration::from_millis(500), second.next()).await;
+    let said = notices(&mut second, 500).await;
     assert!(
-        notice.is_err(),
-        "a distinct id must not be warned: {notice:?}"
+        !said.iter().any(|n| n.contains("duplicate-id")),
+        "a distinct id must not be warned: {said:?}"
     );
 }
 
@@ -224,9 +258,9 @@ async fn reconnecting_with_the_same_id_after_leaving_is_not_a_duplicate() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut again = join(addr, "room-recycle", 9).await;
-    let notice = tokio::time::timeout(Duration::from_millis(500), again.next()).await;
+    let said = notices(&mut again, 500).await;
     assert!(
-        notice.is_err(),
-        "reconnect with a freed id must not be flagged: {notice:?}"
+        !said.iter().any(|n| n.contains("duplicate-id")),
+        "reconnect with a freed id must not be flagged: {said:?}"
     );
 }
