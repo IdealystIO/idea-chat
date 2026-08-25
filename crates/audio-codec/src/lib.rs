@@ -23,15 +23,41 @@
 //!
 //! # Which implementation, and why it matters here
 //!
-//! `rusty-opus` is a pure-Rust port. The usual choice is a binding to libopus,
-//! which is C — and C is exactly what cannot be built for
-//! `wasm32-unknown-unknown` without a cross-compiler and a libc that does not
-//! exist there. A pure-Rust codec compiles for the browser the same way
-//! everything else in this workspace does.
+//! Pure Rust, necessarily. The usual choice is a binding to libopus, which is
+//! C — and C is exactly what cannot be built for `wasm32-unknown-unknown`
+//! without a cross-compiler and a libc that does not exist there. A pure-Rust
+//! codec compiles for the browser the same way everything else here does.
 //!
-//! The cost is that it is a reimplementation rather than the reference, so
-//! this crate's tests check that it actually round-trips audio rather than
-//! assuming it — see the module tests.
+//! There are two candidates, and they are close:
+//!
+//! | | `opus-rs` 0.1.32 | `rusty-opus` 0.9.1 |
+//! | --- | --- | --- |
+//! | relationship | upstream, actively committed | fork of it |
+//! | round trip (VoIP, 48 kHz) | 0.902 correlation | 0.904 |
+//! | bitrate at 24 kbps asked | 23.1 kbps | ~24 |
+//! | decoder-side loss concealment | **none** — `decode(&[])` errors | empty packet runs PLC |
+//! | `decode_fec` | **none** | yes |
+//! | DTX | **none** | yes, 3 bytes a frame |
+//! | in-band FEC round trip | **broken** | **broken, identically** |
+//!
+//! Upstream is the more active project and that is a real argument, but it
+//! does not win here today: it exposes no way to *use* a lost packet, and the
+//! jitter buffer's whole design is that loss goes to whoever holds the signal
+//! model. Adopting it would mean falling back to [`jitter::Pcm`]'s repetition
+//! concealer and giving up DTX, in exchange for nothing measurable.
+//!
+//! The FEC bug is the finding that settles it: **it reproduces identically in
+//! both**, so it is upstream's and switching does not fix it. It is also why
+//! only `rusty-opus` could ever benefit from a fix — it is the only one with
+//! the receiving half (`decode_fec`).
+//!
+//! Either way the choice is contained: `Encoder` and `Decoder` here are ours,
+//! and the codec is an implementation detail behind them. Swapping is one
+//! file.
+//!
+//! Both are reimplementations rather than the reference, so this crate's tests
+//! check that audio actually survives the round trip rather than assuming it —
+//! which is how the FEC bug turned up at all.
 
 #![forbid(unsafe_code)]
 
@@ -87,7 +113,13 @@ pub struct Settings {
     /// `fec = true` with a loss estimate of zero is harmless only because the
     /// encoder then declines to spend bits on it.
     ///
-    /// The crate's own FEC example exercises `decode_fec` against reference
+    /// It is not the fork's bug: `opus-rs` 0.1.32, which `rusty-opus` forked
+    /// from and which is the more actively maintained of the two, fails the
+    /// same way at the same settings (0.063 correlation). Whichever is used,
+    /// FEC is unavailable until that is fixed upstream — worth reporting,
+    /// since it reproduces in about twenty lines.
+    ///
+    /// `rusty-opus`'s FEC example exercises `decode_fec` against reference
     /// packets, so the *decoder* side is tested and the encoder's LBRR path
     /// evidently is not. Which side is at fault cannot be settled here without
     /// libopus to cross-check against, and libopus is the C dependency this
@@ -345,10 +377,12 @@ mod tests {
 
     /// Pins a third-party bug so that fixing it is noticed.
     ///
-    /// `rusty-opus` 0.9.1's encoder emits packets its own decoder mishandles
-    /// once in-band FEC is genuinely active. When this test starts failing,
-    /// FEC works — turn it on in [`Settings::default`], because recovering a
-    /// lost packet outright beats concealing it.
+    /// The encoder emits packets its own decoder mishandles once in-band FEC
+    /// is genuinely active. Confirmed in `rusty-opus` 0.9.1 AND in the
+    /// `opus-rs` 0.1.32 it forked from, so this is upstream's and not the
+    /// fork's. When this test starts failing, FEC works — turn it on in
+    /// [`Settings::default`], because recovering a lost packet outright beats
+    /// concealing it.
     #[test]
     fn fec_is_still_broken_upstream() {
         let settings = Settings { fec: true, expected_loss_pct: 5, dtx: false, ..Settings::default() };

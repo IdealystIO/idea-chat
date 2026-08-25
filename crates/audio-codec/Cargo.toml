@@ -9,6 +9,13 @@ description = "Opus encode/decode for real-time speech, wired to the jitter buff
 # Pure Rust, no FFI, no C toolchain — which is what makes it viable on
 # wasm32-unknown-unknown, where a libopus binding would need a C cross-compile
 # for a target with no libc. Verified to build for that target.
+#
+# Chosen over `opus-rs`, which it forked from and which is the more actively
+# maintained of the two, for one reason: `opus-rs` exposes no decoder-side
+# concealment at all (`decode(&[])` errors) and no `decode_fec`, and the jitter
+# buffer's design is that loss goes to whoever holds the signal model. The
+# in-band FEC bug that made us disable FEC reproduces identically in both, so
+# it is upstream's and switching does not fix it — see `src/lib.rs`.
 rusty-opus = "0.9"
 # For `impl Decode`: the buffer hands a lost packet to the codec because the
 # codec is what still has the signal model. See `jitter`.
