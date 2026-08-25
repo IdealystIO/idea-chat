@@ -17,6 +17,10 @@
 //! same room, and talk. Use headphones — echo cancellation is the browser's
 //! here and it is not on the native path at all.
 
+// Which connection a call runs on, and the sync/async seam the capture
+// callback publishes through. Not web-only: the WebSocket arm is every
+// target's, and the shape is what keeps the audio path from knowing which.
+mod carrier;
 mod playback;
 // Public because Hearth drives the same transport from its own UI: the loop
 // this crate proves is the loop the chat app uses, rather than a second
@@ -132,12 +136,18 @@ pub fn app() -> Element {
             }
             if s.sent != ls || s.received != lrx {
                 counters.set(format!(
-                    "sent {} · recv {} · dropped {} · peers {} · {} Hz{}",
+                    "{} · sent {} · recv {} · dropped {} · peers {} · {} Hz{}{}",
+                    // Which carrier, because "it works" over the fallback reads
+                    // exactly like "it works" over the one this project is for.
+                    s.transport,
                     s.sent,
                     s.received,
                     s.dropped,
                     s.peers,
                     s.sample_rate,
+                    // Shown only when it happens. A permanent "unsent 0" trains
+                    // the eye to skip the field that matters.
+                    if s.unsent > 0 { format!(" · unsent {}", s.unsent) } else { String::new() },
                     if s.redirects > 0 {
                         format!(" · moved {}×", s.redirects)
                     } else {

@@ -6,20 +6,21 @@
 //! ```text
 //! OUT  microphone.open_stream() -> AudioStream
 //!        .subscribe(|frame| ...)          <- interleaved f32 + rate + pts
-//!        Packet::from_f32(..).encode()
-//!        WsSender::send(WsMessage::Binary(..))
+//!        Packetiser -> 20 ms frames
+//!        codec::Encoded::packet(..).encode()
+//!        carrier::Publish::binary(..)     <- datagram, or WebSocket frame
 //!
-//! IN   WebSocket::recv() -> WsMessage::Binary
+//! IN   carrier::Receive::next() -> Incoming::Binary
 //!        Packet::decode(..)
 //!        AudioStream::new() -> (stream, AudioWriter)   <- one pair per peer
 //!        writer.write_pcm_f32(rate, channels, &pcm)
 //!        playback::play(&stream)                        <- the only gap
 //! ```
 //!
-//! Note what is NOT here: no resampling (the packet carries its own rate and
-//! the platform sink resamples), no codec (raw i16 for now), and no jitter
-//! buffer (the web bridge's ring buffer is standing in — see the caveats in
-//! docs/framework-gap-analysis.md §9).
+//! Note what is NOT here: no resampling — the packet carries its own rate and
+//! the platform sink resamples. Which transport carries the packets is
+//! [`carrier`](crate::carrier)'s business, not this file's; what this file owns
+//! is that both look the same from the audio path.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -29,11 +30,12 @@ use std::sync::{Arc, Mutex};
 
 use media_stream::{AudioFrame, AudioStream, AudioSubscription, AudioWriter};
 use microphone::{AudioStreamConfig, Microphone};
-use net::{WebSocket, WsMessage, WsSender};
+use net::WebSocket;
 use serde::Deserialize;
 use voice_proto::codec::Encoded;
 use voice_proto::Packet;
 
+use crate::carrier::{self, Incoming, Join, Publish, Receive};
 use crate::playback::{self, Playing};
 
 /// Milliseconds of audio in one packet on the wire.
@@ -63,6 +65,12 @@ static PACKETS_OUT: AtomicU32 = AtomicU32::new(0);
 /// Payload bytes sent since join, so a bitrate can be measured rather than
 /// assumed. Wraps after ~4 GB, which no call reaches.
 static BYTES_OUT: AtomicU32 = AtomicU32::new(0);
+/// Packets the transport would not take: a closed socket, a queue that had not
+/// drained, or a payload too large for a datagram. Counted because on an
+/// unreliable carrier "we sent it" and "it left" are genuinely different
+/// claims, and the gap between them is the one number that says the send path
+/// is in trouble.
+static PACKETS_UNSENT: AtomicU32 = AtomicU32::new(0);
 /// Which encoding this client settled on. Stored as a
 /// [`voice_proto::Encoding::code`] so it fits an atomic.
 static CODEC: AtomicU32 = AtomicU32::new(0);
@@ -123,11 +131,26 @@ fn mode_of(code: u32) -> voice_dsp::Mode {
     }
 }
 
+/// Record one packet that reached the network.
+///
+/// Called from [`carrier`], which is where the two transports differ about
+/// when that has actually happened: a WebSocket frame is counted when the
+/// socket accepts it, a datagram when the send resolves.
+pub(crate) fn record_sent(bytes: u32) {
+    PACKETS_OUT.fetch_add(1, Ordering::Relaxed);
+    BYTES_OUT.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Record one packet that did not.
+pub(crate) fn record_unsent() {
+    PACKETS_UNSENT.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Say something on the platform's console.
 ///
 /// Not a logging framework — one line, used where a failure degrades instead
 /// of propagating and would otherwise leave no trace at all.
-fn web_log(message: &str) {
+pub(crate) fn web_log(message: &str) {
     #[cfg(target_arch = "wasm32")]
     web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(message));
     #[cfg(not(target_arch = "wasm32"))]
@@ -175,6 +198,10 @@ pub struct Stats {
     /// Which transport carries this call. `"websocket"` until a node offers
     /// WebTransport *and* this machine can actually reach it.
     pub transport: &'static str,
+    /// Packets the transport refused to carry. Zero on a healthy call; a
+    /// number that climbs is a send path that has stopped keeping up, which on
+    /// a datagram carrier is otherwise indistinguishable from a quiet room.
+    pub unsent: u32,
     /// Packets received since join.
     pub received: u32,
     /// Packets that arrived but could not be decoded or played.
@@ -215,6 +242,7 @@ pub fn stats() -> Stats {
             1 => "websocket",
             _ => "none",
         },
+        unsent: PACKETS_UNSENT.load(Ordering::Relaxed),
         received: PACKETS_IN.load(Ordering::Relaxed),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
@@ -231,8 +259,8 @@ pub fn stats() -> Stats {
 
 fn reset_stats() {
     for c in [
-        &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_IN, &PACKETS_DROPPED,
-        &PEER_COUNT, &SAMPLE_RATE, &CODEC, &TRANSPORT,
+        &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_UNSENT, &PACKETS_IN,
+        &PACKETS_DROPPED, &PEER_COUNT, &SAMPLE_RATE, &CODEC, &TRANSPORT,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -383,6 +411,48 @@ async fn resolve(director: &str, room: &str) -> Result<String, String> {
     Ok(route.ws_url)
 }
 
+/// Open a connection to `node_url`, on the best carrier this machine can reach.
+///
+/// One function for the join and for a redirect, which is what keeps the two
+/// from diverging: a redirect that silently dropped back to the WebSocket would
+/// present as a call that got worse after a node handover, with nothing in the
+/// UI to say so.
+///
+/// The WebSocket is not a failure path. UDP is blocked on plenty of networks
+/// and a call that connects beats a call that is theoretically better.
+async fn connect(
+    node_url: &str,
+    join: &Join<'_>,
+) -> Result<(Publish, Receive), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        match crate::transport::choose(node_url, join).await {
+            crate::transport::Choice::WebTransport(link) => {
+                web_log("[voice] transport: webtransport");
+                // One session, two halves. `Link` is a handle to a shared
+                // session rather than a socket, so cloning it is how the send
+                // task and the receive loop each own their own direction.
+                return Ok((carrier::datagrams(link.clone()), Receive::Datagram(link)));
+            }
+            crate::transport::Choice::WebSocket(why) => {
+                web_log(&format!("[voice] transport: websocket — {why}"));
+            }
+        }
+    }
+
+    let url = format!("{}/ws?{}", node_url.trim_end_matches('/'), join.query());
+    let socket = WebSocket::connect(&url).await.map_err(|e| format!("connect {url}: {e}"))?;
+    Ok((Publish::Socket(socket.sender()), Receive::Socket(socket)))
+}
+
+/// What [`Stats::transport`] will read back. See `TRANSPORT`.
+fn transport_code(publish: &Publish) -> u32 {
+    match publish.name() {
+        "webtransport" => 2,
+        _ => 1,
+    }
+}
+
 /// Publish half, shared with the capture callback and swapped on a redirect.
 ///
 /// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>` because on NATIVE the capture
@@ -390,11 +460,16 @@ async fn resolve(director: &str, room: &str) -> Result<String, String> {
 /// `Send` closure. On web the bound is relaxed (one thread) and this is merely
 /// redundant — but writing it for the stricter target keeps one code path
 /// instead of a cfg-split over something this small.
-type SharedSender = Arc<Mutex<WsSender>>;
+///
+/// [`Publish`] stays `Send` on every target, including the QUIC arm, because
+/// the arm holds a queue rather than a session — the session lives on the task
+/// that drains it. See [`carrier`].
+type SharedSender = Arc<Mutex<Publish>>;
 
 pub struct Session {
     /// Swapped when a redirect moves us to another node, so the capture
-    /// callback keeps publishing without knowing the connection changed.
+    /// callback keeps publishing without knowing the connection changed — or,
+    /// now, without knowing which transport it changed to.
     sender: SharedSender,
     /// The raw microphone. Every capture chain reads from it.
     ///
@@ -512,8 +587,8 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         *self.closed.borrow_mut() = true;
-        if let Ok(s) = self.sender.lock() {
-            s.close();
+        if let Ok(mut publish) = self.sender.lock() {
+            publish.close();
         }
         self.peers.borrow_mut().clear();
         PEER_COUNT.store(0, Ordering::Relaxed);
@@ -621,44 +696,15 @@ pub async fn join(
         resolve(director_url, room).await?
     };
 
-    // 2b. Which transport. Asked before any audio path exists, and PROVEN by
-    //     dialling: a published endpoint is not a reachable one, and UDP is
-    //     blocked on plenty of networks. Discovering that at connect time would
-    //     mean a call that never begins; discovering it here is a quiet
-    //     fallback.
-    //
-    //     The call still runs on the WebSocket below. What this establishes is
-    //     that the browser can open a QUIC session to this relay at all, which
-    //     is the piece that could not be checked from a native test.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let choice = crate::transport::choose(&node_url, room, ticket).await;
-        TRANSPORT.store(if choice.name() == "webtransport" { 2 } else { 1 }, Ordering::Relaxed);
-        match choice.reason() {
-            Some(why) => web_log(&format!("[voice] transport: websocket — {why}")),
-            None => web_log("[voice] transport: webtransport is reachable"),
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    TRANSPORT.store(1, Ordering::Relaxed);
-
-    // 3. Transport. Binary frames, because the framework's typed Socket is JSON
-    //    text on send. This is the seam that becomes QUIC datagrams later.
-    let mut url = format!(
-        "{}/ws?room={}&id={}&suppress={}",
-        node_url.trim_end_matches('/'),
-        room,
-        id,
-        mode.as_str(),
-    );
-    if let Some(t) = ticket {
-        url.push_str("&token=");
-        url.push_str(t);
-    }
-    let socket = WebSocket::connect(&url)
-        .await
-        .map_err(|e| format!("connect {url}: {e}"))?;
-    let sender: SharedSender = Arc::new(Mutex::new(socket.sender()));
+    // 3. Transport. Datagrams where they work, the WebSocket where they do
+    //    not — and the choice is made by DIALLING, not by asking, because a
+    //    published endpoint is not a reachable one. Deciding here, before any
+    //    audio path exists, makes a blocked UDP port a quiet fallback rather
+    //    than a call that connects and then has nowhere to put its audio.
+    let join = Join { room, id, suppress: mode, ticket };
+    let (publish, receive) = connect(&node_url, &join).await?;
+    TRANSPORT.store(transport_code(&publish), Ordering::Relaxed);
+    let sender: SharedSender = Arc::new(Mutex::new(publish));
 
     // 4. OUT: every captured block is re-cut into PACKET_MS frames, and each
     //    of those becomes one packet.
@@ -714,17 +760,13 @@ pub async fn join(
                 seq.set(n.wrapping_add(1));
 
                 let packet = codec.packet(id, n, rate, channels, pts_micros, samples);
-                let bytes = packet.encode();
-                let len = bytes.len() as u32;
-                // A send failure means the socket closed; the receive task will
-                // notice and report it. Counting here keeps the hot path silent.
-                let sent = sender
-                    .lock()
-                    .map(|s| s.send(WsMessage::Binary(bytes)).is_ok())
-                    .unwrap_or(false);
-                if sent {
-                    PACKETS_OUT.fetch_add(1, Ordering::Relaxed);
-                    BYTES_OUT.fetch_add(len, Ordering::Relaxed);
+                // Whether that reaches anyone is the carrier's business, and so
+                // is counting it: the two transports disagree about when a
+                // packet has actually left. See `carrier::Publish::binary`.
+                if let Ok(mut publish) = sender.lock() {
+                    publish.binary(packet.encode());
+                } else {
+                    record_unsent();
                 }
             });
         })
@@ -736,7 +778,7 @@ pub async fn join(
     let volumes = Rc::new(RefCell::new(Volumes::default()));
     let closed = Rc::new(RefCell::new(false));
     spawn_receive_loop(
-        socket,
+        receive,
         room.to_string(),
         id,
         mode,
@@ -760,7 +802,7 @@ pub async fn join(
     })
 }
 
-/// Own the socket and pump it until it closes, following redirects.
+/// Own the connection and pump it until it closes, following redirects.
 ///
 /// The future is `!Send` (it holds `Rc` and `!Send` AudioStreams) and lives as
 /// long as the page, which is exactly what `spawn_async` supports on web. It
@@ -768,7 +810,7 @@ pub async fn join(
 /// fallback is `pollster::block_on`, which would block the calling thread on a
 /// loop that never ends. Step 1 targets web only for this reason.
 fn spawn_receive_loop(
-    socket: WebSocket,
+    receive: Receive,
     room: String,
     id: u32,
     // Re-presented on a redirect for the same reason the ticket is: the node
@@ -786,35 +828,37 @@ fn spawn_receive_loop(
     closed: Rc<RefCell<bool>>,
 ) {
     runtime_core::driver::spawn_async(async move {
-        let mut socket = socket;
+        let mut receive = receive;
         // Bounded: a redirect loop between two nodes that each disown the room
         // would otherwise spin forever. Three hops is far more than the one the
         // cold-room race can produce.
         let mut hops = 0;
         loop {
-            match pump(&mut socket, &peers, &volumes, &closed).await {
+            match pump(&mut receive, &peers, &volumes, &closed).await {
                 Pump::Finished => break,
                 Pump::Redirect(url) if hops < 3 => {
                     hops += 1;
-                    let mut next = format!(
-                        "{}/ws?room={}&id={}&suppress={}",
-                        url.trim_end_matches('/'),
-                        room,
+                    let join = Join {
+                        room: &room,
                         id,
-                        mode.as_str(),
-                    );
-                    if let Some(t) = ticket.as_deref() {
-                        next.push_str("&token=");
-                        next.push_str(t);
-                    }
-                    match WebSocket::connect(&next).await {
-                        Ok(s) => {
+                        suppress: mode,
+                        ticket: ticket.as_deref(),
+                    };
+                    // The full choice again, against the node we are being sent
+                    // to: its WebTransport port and certificate are its own, so
+                    // there is nothing about the old connection worth reusing.
+                    match connect(&url, &join).await {
+                        Ok((publish, next)) => {
                             // Swap the publish half so the capture callback
                             // keeps working without knowing anything moved.
+                            // Assigning drops the old half, which is what
+                            // closes the connection we are leaving — including
+                            // the QUIC send task, whose queue this was.
                             if let Ok(mut slot) = sender.lock() {
-                                *slot = s.sender();
+                                TRANSPORT.store(transport_code(&publish), Ordering::Relaxed);
+                                *slot = publish;
                             }
-                            socket = s;
+                            receive = next;
                             REDIRECTS.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(_) => {
@@ -834,7 +878,7 @@ fn spawn_receive_loop(
 
 /// Why the pump stopped.
 enum Pump {
-    /// Socket closed, or the session was torn down.
+    /// Connection closed, or the session was torn down.
     Finished,
     /// This node does not own the room; reconnect at this URL.
     Redirect(String),
@@ -842,37 +886,41 @@ enum Pump {
 
 /// Drain one connection until it closes or hands us a redirect.
 async fn pump(
-    socket: &mut WebSocket,
+    receive: &mut Receive,
     peers: &Rc<RefCell<HashMap<u32, PeerSink>>>,
     volumes: &Rc<RefCell<Volumes>>,
     closed: &Rc<RefCell<bool>>,
 ) -> Pump {
-    while let Some(message) = socket.recv().await {
+    loop {
+        let incoming = receive.next().await;
         if *closed.borrow() {
             return Pump::Finished;
         }
-        let bytes = match message {
-            Ok(WsMessage::Binary(b)) => b,
-            Ok(WsMessage::Text(t)) => {
-                // Text carries node-level notices, never audio.
-                if let Some(url) = t.strip_prefix("redirect:") {
+        let bytes = match incoming {
+            Incoming::Binary(bytes) => bytes,
+            Incoming::Closed => return Pump::Finished,
+            Incoming::Text(text) => {
+                // Notices, never audio. Reliable on both carriers — on QUIC
+                // these arrive on a control stream rather than as datagrams,
+                // because a lost redirect is not a glitch, it is a client that
+                // spends the rest of the call talking to the wrong node.
+                if let Some(url) = text.strip_prefix("redirect:") {
                     return Pump::Redirect(url.to_string());
                 }
-                if t.contains("duplicate-id") {
+                if text.contains("duplicate-id") {
                     DUPLICATE_ID.store(true, Ordering::Relaxed);
                 }
-                if t.contains("no-capacity") {
+                if text.contains("no-capacity") {
                     NO_CAPACITY.store(true, Ordering::Relaxed);
                 }
                 // The node's answer to what we asked for. Overwrites the
                 // optimistic value set at join, so a refused server-side
                 // request shows as `off` rather than as what we hoped for.
-                if let Some(mode) = t.strip_prefix("info:suppress=") {
+                if let Some(mode) = text.strip_prefix("info:suppress=") {
                     SUPPRESSION.store(mode_code(voice_dsp::Mode::parse(mode)), Ordering::Relaxed);
                 }
                 continue;
             }
-            Err(_) => return Pump::Finished,
         };
 
         let packet = match Packet::decode(&bytes) {
@@ -899,7 +947,7 @@ async fn pump(
                     }
                     Err(_) => {
                         // No sink on this platform (native today). Count it and
-                        // keep draining so the socket does not stall.
+                        // keep draining so the connection does not stall.
                         PACKETS_DROPPED.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
@@ -941,7 +989,6 @@ async fn pump(
 
         PACKETS_IN.fetch_add(1, Ordering::Relaxed);
     }
-    Pump::Finished
 }
 
 /// A per-client id that will not collide in practice.

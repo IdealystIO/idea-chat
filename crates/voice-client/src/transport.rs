@@ -8,17 +8,28 @@
 //!
 //! So the node publishes both at `GET /webtransport`, and this asks.
 //!
-//! # Why it dials before deciding
+//! # Why it dials rather than believing the answer
 //!
 //! A published endpoint is not a reachable one. UDP is blocked on plenty of
 //! corporate networks, and a browser that cannot open a QUIC session fails at
 //! connect — after the call has already been "started" as far as the person is
-//! concerned. Trying it here, before any audio path exists, turns that into a
+//! concerned. Dialling here, before any audio path exists, turns that into a
 //! quiet fallback instead of a call that never begins.
 //!
-//! The cost is one extra round trip on join for nodes that offer it. That is
-//! the right trade: the alternative is discovering a blocked network at the
-//! worst possible moment.
+//! The dial is the real one: this returns the live session, and the call runs
+//! on it. An earlier version probed with a throwaway session and then made the
+//! call on the WebSocket, which cost an extra round trip to prove something the
+//! join itself proves.
+//!
+//! # What it costs on a network where UDP is blocked
+//!
+//! A QUIC handshake that nothing answers does not fail fast — the browser
+//! retries until its own timeout, on the order of ten seconds, and there is no
+//! way to shorten it from here without a timer the runtime does not yet
+//! provide. So joining a call from behind a UDP-blocking firewall stalls before
+//! falling back. Recorded in docs/quic-migration.md rather than hidden, because
+//! the fix is a race against a sleep and that is a framework gap, not a voice
+//! one.
 
 use serde::Deserialize;
 
@@ -32,10 +43,14 @@ pub struct Endpoint {
 }
 
 /// What this client will actually use, and why.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// No `Debug`, no `PartialEq`: the WebTransport arm holds a live session, which
+/// is not a value to compare. What a test wants to assert on is
+/// [`name`](Choice::name) and [`reason`](Choice::reason), and both are here.
 pub enum Choice {
-    /// QUIC datagrams. The endpoint dialled successfully just now.
-    WebTransport(Endpoint),
+    /// QUIC datagrams, on a session that is open right now and ready to carry
+    /// the call.
+    WebTransport(datagram::Link),
     /// The WebSocket, with the reason WebTransport was not used. The reason is
     /// carried rather than logged so the caller decides where it goes — and so
     /// a test can assert on it, which is the difference between "the fallback
@@ -61,12 +76,16 @@ impl Choice {
     }
 }
 
-/// Ask a node what it offers, and prove the answer before believing it.
+/// Ask a node what it offers, and open it before believing the answer.
 ///
 /// `node_url` is the `ws://` or `wss://` URL the WebSocket path would use; the
 /// HTTP origin is derived from it, because that is the one address a client is
 /// certain to have.
-pub async fn choose(node_url: &str, room: &str, ticket: Option<&str>) -> Choice {
+///
+/// A [`Choice::WebTransport`] carries a session that has already been accepted
+/// by the node — ticket checked, room joined. There is nothing left to prove
+/// about it.
+pub async fn choose(node_url: &str, join: &crate::carrier::Join<'_>) -> Choice {
     let base = http_origin(node_url);
     let endpoint = match publish(&base).await {
         Ok(Some(e)) => e,
@@ -82,25 +101,15 @@ pub async fn choose(node_url: &str, room: &str, ticket: Option<&str>) -> Choice 
         ));
     };
 
-    // The dial that turns a published endpoint into a usable one — carrying the
-    // room and the ticket, because a node that checks tickets refuses a session
-    // without one and the browser reports that refusal as "Opening handshake
-    // failed", the same words it uses for a blocked port. An unauthenticated
-    // probe would report every ticketed node as unreachable.
-    //
-    // `probe=1` so the node proves the path without joining the room: joining
-    // would claim the id this client is about to use for the call itself, and
-    // the relay would rightly call that a duplicate.
-    let mut url = format!("{}?room={room}&probe=1", endpoint.url);
-    if let Some(t) = ticket {
-        url.push_str("&token=");
-        url.push_str(t);
-    }
+    // The same query the WebSocket would carry, from the same builder — the
+    // node parses both with one parser. Carrying the ticket matters more here
+    // than it looks: a node that checks tickets refuses a session without one,
+    // and the browser reports that refusal as "Opening handshake failed", the
+    // same words it uses for a blocked port. Dialling unauthenticated would
+    // report every ticketed node as unreachable.
+    let url = format!("{}?{}", endpoint.url, join.query());
     match datagram::Link::connect(&url, Some(hash)).await {
-        Ok(link) => {
-            link.close(0, "probe");
-            Choice::WebTransport(endpoint)
-        }
+        Ok(link) => Choice::WebTransport(link),
         Err(e) => Choice::WebSocket(format!("{} did not open: {e}", endpoint.url)),
     }
 }
@@ -169,8 +178,20 @@ mod tests {
         let c = Choice::WebSocket("node offers WebSocket only".to_string());
         assert_eq!(c.name(), "websocket");
         assert!(c.reason().unwrap().contains("WebSocket only"));
+    }
 
-        let e = Endpoint { url: "https://h:1/ws".into(), cert_hash: "00".into() };
-        assert_eq!(Choice::WebTransport(e).name(), "webtransport");
+    #[test]
+    fn both_carriers_ask_to_join_in_the_same_words() {
+        // The node runs one parser over both URLs. This is the assertion that
+        // stops the two drifting apart — a WebTransport dial that spelled the
+        // room differently would join `lobby` and be silent in `porch`, on the
+        // transport nobody is watching.
+        let join = crate::carrier::Join {
+            room: "porch",
+            id: 7,
+            suppress: voice_dsp::Mode::Off,
+            ticket: Some("t"),
+        };
+        assert_eq!(join.query(), "room=porch&id=7&suppress=off&token=t");
     }
 }

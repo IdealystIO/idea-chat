@@ -527,9 +527,13 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"bytesSent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
         s.bytes_sent,
+        // Packets the transport would not carry. On a datagram carrier a
+        // stalled send path is silent in exactly the way a quiet room is, so
+        // the difference has to be a number somebody can read.
+        s.unsent,
         // What is on the wire, not what was configured. A silent fallback to
         // raw PCM sounds identical and costs thirty times the bandwidth, so it
         // has to be observable from outside.

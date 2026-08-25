@@ -142,7 +142,7 @@ const stats = p => p.evaluate(() => {
 // time. Poll and keep the maximum — the same lesson the loop test learned.
 const peakOver = async (pages, ms) => {
   const best = pages.map(() => (
-    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, codec: '?', transport: 'none' }));
+    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, codec: '?', transport: 'none' }));
   const until = Date.now() + ms;
   while (Date.now() < until) {
     for (let i = 0; i < pages.length; i++) {
@@ -154,6 +154,7 @@ const peakOver = async (pages, ms) => {
         best[i].peers = Math.max(best[i].peers, s.peers);
         best[i].sent = Math.max(best[i].sent, s.sent);
         best[i].bytes = Math.max(best[i].bytes, s.bytesSent);
+        best[i].unsent = Math.max(best[i].unsent, s.unsent);
         best[i].codec = s.codec;
         if (s.transport && s.transport !== 'none') best[i].transport = s.transport;
       }
@@ -296,12 +297,19 @@ const peakOver = async (pages, ms) => {
   check('and a packet is tens of bytes, not two thousand',
     perPacket > 32 && perPacket < 400, `${perPacket} bytes/packet`);
 
-  // The one claim no native test can make: a BROWSER opened a QUIC session to
-  // this relay, against a self-signed certificate it had to pin by hash. The
-  // call itself still runs on the WebSocket — this proves the path is there.
-  console.log(`        transport: ${sa.transport}`);
-  check('the browser can reach the relay over WebTransport',
-    sa.transport === 'webtransport', sa.transport);
+  // The one claim no native test can make: a BROWSER carried this call over
+  // QUIC datagrams, against a self-signed certificate it had to pin by hash.
+  // Every assertion above — captured, sent, received, HEARD — was measured on
+  // this transport, which is what makes the one below more than a handshake.
+  console.log(`        transport: ${sa.transport} / ${st.transport}`);
+  check('ana is on WebTransport', sa.transport === 'webtransport', sa.transport);
+  check('theo is too', st.transport === 'webtransport', st.transport);
+  // The send path crossing a sync/async boundary is the new thing here, and a
+  // queue that overflows is silent in exactly the way a quiet room is: the
+  // packets simply stop, with the meters still moving. This is the assertion
+  // that would catch it.
+  check('and nothing was dropped on the way out',
+    sa.unsent === 0 && st.unsent === 0, `ana ${sa.unsent}, theo ${st.unsent}`);
 
   // --- presence: who the sidebar says is in a room ---
   // The claim is that this works for people who are NOT in the call — you
