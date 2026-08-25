@@ -433,6 +433,72 @@ them. And `DfParams::from_bytes` requiring `&'static [u8]` propagates a
 one-time leak into every web caller — worth wrapping in the SDK (it copies the
 bytes internally anyway) rather than making each app write `Box::leak`.
 
+## 15. `idealyst build --web` silently discards `.cargo/config.toml` rustflags
+
+**Fixed in CLI 1.3.16** — recorded because the failure mode is invisible and the
+fix has to stay.
+
+The web builder hands cargo its flags as `CARGO_ENCODED_RUSTFLAGS`, which it
+must: release builds add `--remap-path-prefix` arguments containing filesystem
+paths, and a space in one would split it into two garbage arguments under the
+space-separated `RUSTFLAGS`. But cargo treats its four rustflags sources as
+*alternatives, not layers* — the first one found wins outright:
+
+```
+CARGO_ENCODED_RUSTFLAGS  >  RUSTFLAGS  >  target.<triple>.rustflags  >  build.rustflags
+```
+
+So setting the encoded form does not override `.cargo/config.toml`; it means
+cargo never reads it. The flags are dropped with no diagnostic, and the build
+fails with whatever the missing flag was for — for us a `compile_error!` from a
+dependency naming a flag we could plainly see we had set.
+
+Hearth hit this on `--cfg=web_sys_unstable_apis` (below). The advice in
+`web-transport-wasm`'s own error message — "add it to `.cargo/config.toml`" — is
+the one thing that could not work.
+
+The fix is in `cargo_build_wasm`: when neither environment variable is set, read
+`.cargo/config.toml` where cargo would have, walking up from the project
+directory and ending at `$CARGO_HOME`, target-specific key before `build`. That
+reproduces cargo's precedence rather than inventing one — an explicit
+`RUSTFLAGS` still wins outright and is still not merged with the config.
+
+## 16. `--cfg=web_sys_unstable_apis` switches signatures out from under you
+
+Not an idealyst bug — a `web-sys` design decision idealyst has to survive,
+because every API worth reaching for on the web platform right now is behind
+this one flag: WebTransport, WebCodecs, WebGPU.
+
+The flag reads like a feature gate that *adds* bindings. It isn't. For five
+types it **replaces** the stable signature with a different one:
+
+| type | methods | without the flag | with it |
+| --- | --- | --- | --- |
+| `Element` | `scroll_left`, `scroll_top` (+setters) | `i32` | `f64` |
+| `HtmlElement` | `scroll_top` (+setter) | `i32` | `f64` |
+| `MouseEvent` | `client_x/y`, `offset_x/y`, `page_x/y`, `screen_x/y` | `i32` | `f64` |
+| `CanvasRenderingContext2d` | `get_image_data` | `f64` | `i32` |
+| `Performance` | `mark`, `measure` | `Result<(), _>` | `Result<PerformanceMark, _>` |
+
+Note the last two rows go the *other* way — there is no direction to memorise.
+
+Turning the flag on to reach WebTransport therefore broke eleven call sites
+across `backend-web` and `media-stream` that had nothing to do with it, with
+`E0308` inside idealyst rather than in the app that set the flag. `MouseEvent`
+is the one to watch: a UI framework reads `client_x()` everywhere, and only the
+sites that bind or pass the value *without* a cast actually break — so the
+blast radius is unpredictable from a grep.
+
+The fix is `expr as _`, letting the cast target come from the signature. It
+compiles **both** ways, so this is not a commitment to the flag — the default
+build is byte-identical and idealyst merely stops obstructing an app that needs
+it. Applied at all eleven sites.
+
+Worth doing deliberately rather than reactively: this flag is exempt from
+semver, so a `cargo update` can change these signatures again. A framework that
+compiles either way is unaffected; one that pins to `i32` is not.
+
+
 ## 14. Small things
 
 - **A bare `view` is `display: block`, not a flex column.** idea-ui's own
