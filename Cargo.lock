@@ -5123,6 +5123,7 @@ dependencies = [
  "voice-dsp",
  "voice-proto",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

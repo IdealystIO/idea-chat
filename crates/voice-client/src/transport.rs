@@ -21,17 +21,28 @@
 //! call on the WebSocket, which cost an extra round trip to prove something the
 //! join itself proves.
 //!
-//! # What it costs on a network where UDP is blocked
+//! # Two ways a dial is not worth waiting for
 //!
-//! A QUIC handshake that nothing answers does not fail fast — the browser
-//! retries until its own timeout, on the order of ten seconds, and there is no
-//! way to shorten it from here without a timer the runtime does not yet
-//! provide. So joining a call from behind a UDP-blocking firewall stalls before
-//! falling back. Recorded in docs/quic-migration.md rather than hidden, because
-//! the fix is a race against a sleep and that is a framework gap, not a voice
-//! one.
+//! A QUIC handshake that nothing answers does not fail fast: the browser retries
+//! until its own timeout, on the order of ten seconds. On the join path, with
+//! somebody watching, that is not an acceptable way to discover a fallback.
+//!
+//! So this gives up twice. **Before dialling**, if the node published an address
+//! this page could not reach even in principle — see
+//! [`datagram::unreachable_from`], which is the tunnelled case and the common
+//! one. **While dialling**, after [`DIAL_TIMEOUT_MS`], which covers a blocked
+//! UDP port and anything else that simply goes quiet.
 
+use futures::FutureExt;
 use serde::Deserialize;
+
+/// How long to wait for a QUIC session before giving up on it.
+///
+/// A handshake to a reachable node settles in well under a tenth of this even
+/// on a poor mobile link; anything slower is a node that is not going to
+/// answer. The browser's own timeout is around ten seconds, which is a fine
+/// number for a page load and a terrible one for a join.
+const DIAL_TIMEOUT_MS: i32 = 3_000;
 
 /// What a node published about its WebTransport listener.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -101,6 +112,15 @@ pub async fn choose(node_url: &str, join: &crate::carrier::Join<'_>) -> Choice {
         ));
     };
 
+    // A QUIC session cannot be reverse-proxied, so a node behind a gateway
+    // publishes its OWN address — which, for a tunnelled deployment, is a
+    // loopback address this page has no route to. Dialling it anyway would
+    // stall the join for the full handshake timeout to reach a conclusion
+    // available for free right here.
+    if let Some(why) = datagram::unreachable_from(&page_host(), &endpoint.url) {
+        return Choice::WebSocket(why);
+    }
+
     // The same query the WebSocket would carry, from the same builder — the
     // node parses both with one parser. Carrying the ticket matters more here
     // than it looks: a node that checks tickets refuses a session without one,
@@ -108,10 +128,39 @@ pub async fn choose(node_url: &str, join: &crate::carrier::Join<'_>) -> Choice {
     // same words it uses for a blocked port. Dialling unauthenticated would
     // report every ticketed node as unreachable.
     let url = format!("{}?{}", endpoint.url, join.query());
-    match datagram::Link::connect(&url, Some(hash)).await {
-        Ok(link) => Choice::WebTransport(link),
-        Err(e) => Choice::WebSocket(format!("{} did not open: {e}", endpoint.url)),
+    let dial = datagram::Link::connect(&url, Some(hash)).fuse();
+    let deadline = sleep(DIAL_TIMEOUT_MS).fuse();
+    futures::pin_mut!(dial, deadline);
+    futures::select! {
+        dialled = dial => match dialled {
+            Ok(link) => Choice::WebTransport(link),
+            Err(e) => Choice::WebSocket(format!("{} did not open: {e}", endpoint.url)),
+        },
+        // Dropping the dial does not cancel the handshake underneath — it is a
+        // JS promise and it will run itself out — so a session may still open
+        // and be discarded a moment from now. That costs a few seconds of an
+        // orphaned connection and saves seven seconds on every join that was
+        // never going to work, which is the right way round.
+        _ = deadline => Choice::WebSocket(format!(
+            "{} did not answer within {DIAL_TIMEOUT_MS} ms",
+            endpoint.url,
+        )),
     }
+}
+
+/// `setTimeout`, as a future.
+async fn sleep(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// Where this page is served from, as `host` or `host:port`.
+fn page_host() -> String {
+    web_sys::window().and_then(|w| w.location().host().ok()).unwrap_or_default()
 }
 
 /// `GET /webtransport`, or `None` when the node does not offer one.
