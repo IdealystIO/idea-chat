@@ -75,6 +75,7 @@ fn rail_body(app: App) -> Element {
         || StyleApplication::new(styles::RailAdd::sheet()),
         move || {
             app.minted_invite.set(String::new());
+            app.invite_copied.set(false);
             app.join_open.set(true);
         },
     ));

@@ -145,6 +145,11 @@ async fn main() {
         eprintln!("        On-device suppression will be unavailable; on-server is unaffected.");
     }
 
+    let index = std::fs::read_to_string(web_dir.join("index.html")).unwrap_or_else(|e| {
+        eprintln!("hearth: could not read {}: {e}", web_dir.join("index.html").display());
+        String::new()
+    });
+
     let mut app: Router = server::router()
         // A route, not another layer of `ServeDir` fallback. Chaining them
         // through `not_found_service` serves the right bytes with the OUTER
@@ -152,10 +157,32 @@ async fn main() {
         // unusable at the same time, and invisible unless you look at the
         // status rather than the body.
         .nest_service("/assets", ServeDir::new(&assets_dir))
+        // A single-page app, so every path the file system does not have is
+        // the app's to route, not a 404. Without this `/claim/<token>` and
+        // `/j/<code>` are dead links — which they were: the server printed a
+        // claim URL at startup that could only be pasted, never clicked.
+        //
+        // `fallback`, NOT `not_found_service`. The two take the same argument
+        // and read the same, and they differ in exactly one way that matters
+        // here: `not_found_service` forces the status to 404 whatever the
+        // inner service returned, while `fallback` passes it through.
+        //
+        // With the wrong one, this served the whole app under a 404 — the page
+        // renders, because browsers render 404 bodies, so it looks like it
+        // works while every cache and crawler is told the app does not exist.
+        // Diagnosed by making the handler return a marker and finding the
+        // marker in a 404 body, which is the only way to tell the two apart
+        // from outside.
+        //
+        // The index is read once at startup: it is 800 bytes and does not
+        // change while the process runs.
         .fallback_service(
             ServeDir::new(&web_dir)
                 .append_index_html_on_directories(true)
-                .not_found_service(ServeDir::new(&web_dir)),
+                .fallback(axum::routing::get(move || {
+                    let index = index.clone();
+                    async move { axum::response::Html(index) }
+                })),
         );
 
     if let Some(voice) = voice {

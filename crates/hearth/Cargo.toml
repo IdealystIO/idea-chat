@@ -107,6 +107,12 @@ wasm-bindgen-futures = "0.4"
 # the session cookie; and a clock for optimistic timestamps.
 web-sys = { version = "0.3", features = [
     "Window", "Location",
+    # Deep links: reading `/j/<code>` and putting the address bar back to `/`
+    # so a credential does not linger in history — see `src/link.rs`.
+    "History",
+    # Handing an invite link over in one click. A link nobody can copy is a
+    # link that gets retyped wrong.
+    "Navigator", "Clipboard",
     # Placeholder notification tones, synthesised — see `src/sound.rs`.
     "AudioContext", "BaseAudioContext", "AudioDestinationNode", "AudioNode",
     "AudioParam", "GainNode", "OscillatorNode", "OscillatorType",

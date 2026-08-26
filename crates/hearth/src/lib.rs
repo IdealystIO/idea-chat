@@ -23,6 +23,10 @@ pub mod api;
 // The synchronized world: state, events, actions, and the reducer that folds
 // them. Compiled into BOTH halves on purpose — one definition of what an event
 // means, so a reconnect and a live update agree by construction.
+// What a URL is asking the app to do. Small, pure, and tested on the host —
+// the app is a single page, so a path never reaches a router and has to be
+// interpreted here.
+pub mod link;
 pub mod live;
 pub mod model;
 // The client half. The server binary never renders, and `net` holds the client

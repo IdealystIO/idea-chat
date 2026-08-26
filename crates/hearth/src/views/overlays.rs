@@ -179,15 +179,32 @@ fn join_body(app: App) -> Element {
     let minted: Vec<Element> = if code.is_empty() {
         Vec::new()
     } else {
+        // A whole URL, not a bare code. "Paste this into the second field of
+        // the sign-in screen" is an instruction somebody has to follow; a link
+        // is not. The app reads `/j/<code>` on load and fills the form itself
+        // — see `crate::link`.
+        let url = crate::link::invite_url(&crate::link::origin(), &code);
+        let copied = app.invite_copied;
+        let shown = url.clone();
         vec![ui! {
             Stack(gap = StackGap::Xs) {
                 Muted(
-                    label = "Share this. It works once, and expires in a week.".to_string(),
+                    label = "Share this link. It works once, and expires in a week.".to_string(),
                     kind = typography_kind::BodySm,
                 )
                 view(style = || StyleApplication::new(styles::CodeBox::sheet())) {
-                    Strong(label = code.clone())
+                    Strong(label = shown.clone())
                 }
+                Button(
+                    label = if copied.get() { "Copied".to_string() } else { "Copy link".to_string() },
+                    tone = ToneRef::from(tone::Neutral),
+                    variant = VariantRef::from(variant::Ghost),
+                    shape = shape::Md,
+                    block = true,
+                    on_click = cb(move || {
+                        copied.set(crate::link::copy(&url));
+                    }),
+                )
             }
         }]
     };

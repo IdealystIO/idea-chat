@@ -12,7 +12,8 @@ use runtime_core::driver::spawn_async;
 use server::ServerError;
 
 use crate::api;
-use crate::model::{App, AuthTab, Phase, Scope};
+use crate::link::{self, Landing};
+use crate::model::{App, AuthTab, JoinTab, Phase, Scope};
 
 /// Point the server-fn client at the right origin.
 ///
@@ -98,11 +99,24 @@ pub fn message(e: ServerError) -> String {
 /// `bootstrap` would fail in a way that reads like "signed out" when the real
 /// answer is "nobody has claimed this yet".
 pub fn start(app: App) {
+    // Read the address bar BEFORE anything async, and clear it immediately.
+    //
+    // Immediately, because a claim token is a credential and should not sit in
+    // history or in the referrer of the next request — and because an invite
+    // left in the URL would be re-applied on every refresh, so someone who
+    // joined and reloaded would be asked to join again.
+    let landing = link::landing();
+    link::clear_path();
+
     spawn_async(async move {
         match api::instance_status().await {
             Ok(status) => {
                 app.instance_name.set(status.instance_name);
                 if status.needs_claim {
+                    // The link the server prints at startup, now clickable.
+                    if let Landing::Claim(token) = &landing {
+                        app.form_claim_token.set(token.clone());
+                    }
                     app.phase.set(Phase::NeedsClaim);
                     return;
                 }
@@ -112,9 +126,26 @@ pub fn start(app: App) {
                 return;
             }
         }
+        // Filled before the session check rather than after, because it has to
+        // be there for BOTH outcomes: on the sign-in screen it pre-fills the
+        // invite field, and for someone already signed in it is the code the
+        // join dialog redeems.
+        if let Landing::Invite(code) = &landing {
+            app.form_invite.set(code.clone());
+            app.join_tab.set(JoinTab::Join);
+        }
+
         // A session may already exist — the cookie survives a reload, so a
         // refresh should not ask for a password again.
         load_shell(app, false).await;
+
+        // Signed in already, and arrived on an invite link: open the dialog on
+        // it rather than dropping them on their own spaces with no sign the
+        // link did anything. Signed OUT, the code is already in the form and
+        // the sign-in screen shows it.
+        if matches!(landing, Landing::Invite(_)) && app.phase.get() == Phase::Ready {
+            app.join_open.set(true);
+        }
     });
 }
 

@@ -68,7 +68,7 @@ TAIL=1 run bash tools/auth-flows.sh
 step "5/11  message flows — 17 assertions over HTTP"
 TAIL=1 run bash tools/message-flows.sh
 
-step "6/11  the whole app — 37 assertions, two browsers"
+step "6/11  the whole app — 39 assertions, two browsers"
 if [ ! -d crates/hearth/dist/web/pkg ]; then
   echo "  no wasm bundle — run: (cd crates/hearth && idealyst build --web)"
   FAILED=1
@@ -90,7 +90,7 @@ else
   SKIPPED=1
 fi
 
-step "8/11  noise suppression — 21 assertions, both modes, a real relay"
+step "8/11  noise suppression — 22 assertions, both modes, a real relay"
 # Needs the same fleet, and needs it to PERMIT server-side suppression —
 # tools/voice-fleet.sh sets VOICE_DENOISE=on. A fleet started without it is not
 # a failure, it is a different (also supported) configuration, so the suite is

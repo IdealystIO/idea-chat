@@ -181,6 +181,22 @@ const hangUp = async (p) => {
 
 // The fake mic beeps periodically, so one reading is zero most of the time.
 // Poll and keep the maximum.
+// Wait until the node actually reports the mode, rather than sleeping and
+// hoping. The neural chain has to fetch and initialise a 7.8 MB model first,
+// and how long that takes depends on the machine — so a fixed sleep is a race
+// that only shows up on a loaded one. When it lost, the measurement window
+// below still contained pre-swap audio and `peakOver` takes the MAXIMUM, so
+// the tone "had not been suppressed" when really it had not been measured.
+const waitForMode = async (page, mode, ms = 30000) => {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    const s = await stats(page);
+    if (s && s.suppress === mode) return true;
+    await page.waitForTimeout(250);
+  }
+  return false;
+};
+
 const peakOver = async (pages, ms) => {
   const best = pages.map(() => ({ mic: 0, remote: 0, sent: 0, recv: 0, peers: 0, suppress: '?' }));
   const until = Date.now() + ms;
@@ -390,11 +406,14 @@ const peakOver = async (pages, ms) => {
       JSON.stringify(before));
 
     await setMode(a, 'This device');
-    // Long enough for the replacement chain's leveller to settle. It starts at
-    // unity gain by design — the first frames of a call should sound like the
-    // microphone, not like a gain sweep — so the first second or two after a
-    // swap is a transient, not a steady state.
-    await a.waitForTimeout(9000);
+    check('mid-call — the swap completes', await waitForMode(a, 'client'));
+    // Then long enough for the replacement chain's leveller to settle. It
+    // starts at unity gain by design — the first frames of a call should sound
+    // like the microphone, not like a gain sweep — so the first second or two
+    // after a swap is a transient, not a steady state. This wait is for the
+    // TRANSIENT, which is a real property of the chain; the wait for the model
+    // to load is above, where it belongs, and is not a guess.
+    await a.waitForTimeout(6000);
     const [after, afterT] = await peakOver([a, t], 4000);
     console.log(`        swap   before: ${JSON.stringify(before)}`);
     console.log(`        swap   after : ${JSON.stringify(after)}`);

@@ -223,6 +223,10 @@ pub struct App {
     pub search_open: Signal<bool>,
     pub query: Signal<String>,
     pub join_open: Signal<bool>,
+    /// Whether the freshly minted invite link made it to the clipboard, so the
+    /// button can say so. Reset whenever a new one is minted — a button still
+    /// reading "Copied" next to a different link is a lie.
+    pub invite_copied: Signal<bool>,
     pub join_tab: Signal<JoinTab>,
     pub join_value: Signal<String>,
     /// The invite code the join dialog minted, shown to be copied.
@@ -360,6 +364,7 @@ impl App {
             search_open: signal(false),
             query: signal(String::new()),
             join_open: signal(false),
+            invite_copied: signal(false),
             join_tab: signal(JoinTab::Join),
             join_value: signal(String::new()),
             minted_invite: signal(String::new()),

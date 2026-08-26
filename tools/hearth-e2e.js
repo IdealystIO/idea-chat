@@ -94,6 +94,28 @@ const clickText = async (p, label) => {
   check('the client asked the server what it is', calls.includes('instance_status'));
   await shot(ana, '01-claim');
 
+  // The claim URL the server prints at startup, opened as a LINK rather than
+  // copied out of and pasted into a form. It used to 404: there was no SPA
+  // fallback, so every deep link died at the file server. And the app has to
+  // read the path itself, because a single page never reaches a router.
+  //
+  // In a throwaway tab, so the claim sequence below is untouched. Loading the
+  // link does not consume the token — only the API call does — so this is
+  // safe to do first.
+  {
+    const peek = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await peek.goto(APP + '/claim/' + claimToken, { waitUntil: 'load' });
+    await peek.waitForTimeout(2500);
+    const prefilled = await peek.evaluate(
+      () => [...document.querySelectorAll('input')].some(i => i.value.length > 20));
+    check('a claim LINK fills the form instead of 404ing', prefilled);
+    // The token is a credential. Left in the address bar it is also in history
+    // and in the referrer of the next request.
+    check('and the token is taken back out of the address bar',
+      new URL(peek.url()).pathname === '/', peek.url());
+    await peek.close();
+  }
+
   await fill(ana, 'Claim link', claimToken);
   await fill(ana, 'Handle', 'ana');
   await fill(ana, 'Display name', 'Ana Ruiz');

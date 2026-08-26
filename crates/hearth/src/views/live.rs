@@ -67,6 +67,7 @@ fn tiles(app: App) -> Element {
         || StyleApplication::new(styles::TileGhost::sheet()),
         move || {
             app.minted_invite.set(String::new());
+            app.invite_copied.set(false);
             app.join_open.set(true);
             net::mint_invite(app);
         },
