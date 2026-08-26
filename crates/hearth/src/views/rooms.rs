@@ -48,6 +48,14 @@ pub fn RoomList(#[prop(static)] app: App) -> Element {
                 // A person menu opened on an occupant renders inside this
                 // body, so opening one is structural.
                 app.menu.get(),
+                // The tray's mic and headphone buttons SHOW these — icon,
+                // colour and variant all change with them. Without them in the
+                // key the tray reads them once, when it is built, and the
+                // buttons never move again: pressing mute muted the microphone
+                // and left the icon saying otherwise, which is the same lie
+                // the button told when it did nothing at all.
+                app.mic.get(),
+                app.deafened.get(),
             )
         },
         move |_| room_list_body(app),
