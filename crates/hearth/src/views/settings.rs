@@ -150,7 +150,13 @@ fn settings_body(app: App) -> Element {
                         // The stored fact is "mic is on"; the question asks the
                         // opposite, so the pills invert it rather than the model
                         // carrying a second, redundant flag.
-                        on_off(!app.mic.get(), move |v| app.mic.set(!v)),
+                        on_off(!app.mic.get(), move |v| {
+                            // `v` is "join muted", so the mic is its opposite. Taken
+                            // from the callback rather than re-read: `Signal::set`
+                            // stages.
+                            app.mic.set(!v);
+                            crate::set_muted(v);
+                        }),
                     ),
                     row(
                         "Camera on by default",

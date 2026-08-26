@@ -20,13 +20,13 @@
 //! the app, a sign-in form, a claim form, or a connection error.
 
 pub mod api;
-// The synchronized world: state, events, actions, and the reducer that folds
-// them. Compiled into BOTH halves on purpose — one definition of what an event
-// means, so a reconnect and a live update agree by construction.
 // What a URL is asking the app to do. Small, pure, and tested on the host —
 // the app is a single page, so a path never reaches a router and has to be
 // interpreted here.
 pub mod link;
+// The synchronized world: state, events, actions, and the reducer that folds
+// them. Compiled into BOTH halves on purpose — one definition of what an event
+// means, so a reconnect and a live update agree by construction.
 pub mod live;
 pub mod model;
 // The client half. The server binary never renders, and `net` holds the client
@@ -58,6 +58,19 @@ pub mod livewire;
 // Placeholder notification tones.
 #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
 pub mod sound;
+
+/// Mute or unmute the live call's microphone, where there is one.
+///
+/// A shim so a mic switch does not carry a `#[cfg]` at every call site. The
+/// `voice` module is absent on builds with no audio output to feed — native
+/// today, and the server binary always — and the UI still has to compile
+/// there, where this is a no-op.
+pub fn set_muted(muted: bool) {
+    #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+    voice::set_muted(muted);
+    #[cfg(not(all(not(feature = "server"), target_arch = "wasm32")))]
+    let _ = muted;
+}
 
 /// SDK-handler registration seam the CLI-generated wrappers invoke after
 /// `runtime_vocabulary::register_builtins`. Hearth renders entirely from

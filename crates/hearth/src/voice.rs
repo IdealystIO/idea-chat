@@ -119,8 +119,12 @@ pub fn join_room(app: App, channel_id: &str) {
                 // Only now — presence claimed at the moment of ASKING to join
                 // would show people in rooms they never reached.
                 crate::livewire::send(Action::JoinVoice { channel_id: room.clone() });
-                // After the session is in the slot: this reaches into it.
+                // After the session is in the slot: these reach into it.
                 apply_volumes(app);
+                // A session starts unmuted. Somebody who joined a room with
+                // "join muted" set, or who muted before the call connected,
+                // must not be live for the first second of it.
+                apply_mic(app);
                 announce(app, room);
             }
             Err(e) => {
@@ -143,6 +147,23 @@ pub fn join_room(app: App, channel_id: &str) {
 /// once — including for people who are not in the room, which costs a hash map
 /// entry and means somebody who walks in twenty minutes later is already at
 /// the level they were set to rather than briefly loud.
+/// Push the mic switch onto the live call.
+///
+/// The button used to toggle a signal nothing read: it changed the label to
+/// "Muted" and the microphone kept transmitting. Called from wherever the
+/// switch is flipped, and again after a join, because a session starts
+/// unmuted and knows nothing about a decision made before it existed.
+/// Mute or unmute directly, for a caller that already knows the answer.
+pub fn set_muted(muted: bool) {
+    session::set_muted(muted);
+}
+
+pub fn apply_mic(app: App) {
+    // `Signal::set` stages, so this takes the value from the caller's own read
+    // rather than reading it back and getting the one being replaced.
+    session::set_muted(!app.mic.get());
+}
+
 pub fn apply_volumes(app: App) {
     LIVE.with(|slot| {
         let live = slot.borrow();
@@ -527,7 +548,7 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"resyncs":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"resyncs":{},"muted":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
         s.bytes_sent,
         // Packets the transport would not carry. On a datagram carrier a
@@ -559,6 +580,9 @@ fn stats_json() -> String {
         // One per rejoin is ordinary. This is here because the bug it stands
         // for was invisible: every other counter healthy, one listener deaf.
         s.resyncs,
+        // Whether the microphone is actually muted, as opposed to whether a
+        // button says so. Those were different things for a long time.
+        s.muted,
         s.peers,
         s.sample_rate,
         (s.mic_peak * 100.0) as u32,

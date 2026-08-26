@@ -732,6 +732,10 @@ impl App {
         self.deafened.set(now);
         if now {
             self.mic.set(false);
+            // Deafening mutes, and that has to reach the microphone rather
+            // than only the label. `Signal::set` stages, so this cannot read
+            // `self.mic` back — it says what it just decided.
+            crate::set_muted(true);
         }
     }
 

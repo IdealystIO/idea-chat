@@ -77,7 +77,7 @@ else
   TAIL=1 run node tools/hearth-e2e.js
 fi
 
-step "7/11  voice — 47 assertions, two browsers and a real relay"
+step "7/11  voice — 51 assertions, two browsers and a real relay"
 # Skipped rather than failed when the fleet is not up: it is a separate set of
 # processes, and a red suite for "you did not start the relay" trains people to
 # ignore the colour. The skip is loud and does NOT count as a pass.

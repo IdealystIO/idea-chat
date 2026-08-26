@@ -164,9 +164,35 @@ static SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 static MODEL_GAIN_DB: AtomicU32 = AtomicU32::new(0);
 
 /// Report voice activity from a capture chain.
+///
+/// Forced to "not speaking" while muted. The chain runs either way — it is
+/// still measuring a live microphone — but a muted person's name lighting up
+/// in everyone else's sidebar is a lie about what the room can hear, and this
+/// verdict is broadcast.
 pub fn report_activity(speaking: bool, model_gain_db: f32) {
-    SPEAKING.store(speaking, Ordering::Relaxed);
+    SPEAKING.store(speaking && !muted(), Ordering::Relaxed);
     MODEL_GAIN_DB.store(model_gain_db.to_bits(), Ordering::Relaxed);
+}
+
+/// Whether this microphone is muted.
+static MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop transmitting, without stopping the stream.
+///
+/// An atomic rather than a method on [`Session`] because the capture callback
+/// reads it on the audio path, where there is nothing to borrow and nobody to
+/// lock against — the same reason every meter here is one.
+///
+/// Deliberately NOT reset by [`reset_stats`]: mute is a decision a person made
+/// about their microphone, and a call that silently unmuted them by starting
+/// is the one behaviour a mute button must never have.
+pub fn set_muted(muted: bool) {
+    MUTED.store(muted, Ordering::Relaxed);
+}
+
+/// Whether this microphone is muted.
+pub fn muted() -> bool {
+    MUTED.load(Ordering::Relaxed)
 }
 
 /// What conditioning the room is actually getting, as reported by the node.
@@ -281,6 +307,10 @@ pub struct Stats {
     pub underruns: u32,
     /// Times a sender's stream restarted and its buffer began again.
     pub resyncs: u32,
+    /// Whether this microphone is muted. Reported so "the button says muted"
+    /// and "nothing is being transmitted" can be checked as separate claims —
+    /// they were separate for a long time, and only one of them was true.
+    pub muted: bool,
     /// Packets that arrived but could not be decoded or played.
     pub dropped: u32,
     /// Distinct remote senders heard from.
@@ -326,6 +356,7 @@ pub fn stats() -> Stats {
         off_main_thread: OFF_MAIN_THREAD.load(Ordering::Relaxed),
         underruns: UNDERRUNS.load(Ordering::Relaxed),
         resyncs: RESYNCS.load(Ordering::Relaxed),
+        muted: muted(),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
         sample_rate: SAMPLE_RATE.load(Ordering::Relaxed),
@@ -963,8 +994,26 @@ pub async fn join(
         // Built on the first block, because the block is what says what rate
         // and channel count the microphone actually gave us.
         let cutter: RefCell<Option<(voice_proto::Packetiser, Encoded)>> = RefCell::new(None);
+        // Reused, so muting allocates nothing per block on the audio path.
+        let silence: RefCell<Vec<f32>> = RefCell::new(Vec::new());
         wire.subscribe(move |frame: &AudioFrame| {
-            meter(&MIC_PEAK, frame.samples, frame.sample_rate, frame.channels);
+            // What is actually LEAVING, so a muted person's own level meter
+            // falls to zero. A meter that kept moving while muted would be the
+            // same lie the button used to tell.
+            //
+            // Metered against a silent buffer of the REAL length, not an empty
+            // one: `hold_peak` takes its fall from the audio's own duration, and
+            // a zero-length block is zero seconds, which it holds through rather
+            // than dividing by. An empty slice freezes the meter at whatever it
+            // last read — which looked exactly like mute not working.
+            let outgoing = muted().then(|| {
+                let mut silence = silence.borrow_mut();
+                silence.clear();
+                silence.resize(frame.samples.len(), 0.0);
+            });
+            let borrowed = silence.borrow();
+            let samples: &[f32] = if outgoing.is_some() { &borrowed } else { frame.samples };
+            meter(&MIC_PEAK, samples, frame.sample_rate, frame.channels);
             SAMPLE_RATE.store(frame.sample_rate, Ordering::Relaxed);
 
             /// Cut and encoder for one capture format, built together because
@@ -994,7 +1043,15 @@ pub async fn join(
                 *codec = fresh_codec;
             }
 
-            cutter.push(frame.samples, frame.pts_micros);
+            // Muted sends SILENCE, not nothing.
+            //
+            // Dropping the packets instead would leave a hole in the far side's
+            // jitter buffer, and a jitter buffer conceals a hole by asking the
+            // codec to invent a plausible continuation — so a mute would come
+            // out the other end as muttering. Sending silence keeps the
+            // sequence unbroken, and DTX makes it cost a byte or two a frame.
+            cutter.push(samples, frame.pts_micros);
+            drop(borrowed);
             let rate = frame.sample_rate;
             let channels = frame.channels;
             cutter.drain(|samples, pts_micros| {

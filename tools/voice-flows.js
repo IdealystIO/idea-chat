@@ -142,7 +142,7 @@ const stats = p => p.evaluate(() => {
 // time. Poll and keep the maximum — the same lesson the loop test learned.
 const peakOver = async (pages, ms) => {
   const best = pages.map(() => (
-    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, concealed: 0, playoutMs: 0, underruns: 0, resyncs: 0, offMainThread: false,
+    { mic: 0, remote: 0, recv: 0, peers: 0, sent: 0, bytes: 0, unsent: 0, concealed: 0, playoutMs: 0, underruns: 0, resyncs: 0, muted: false, offMainThread: false,
       codec: '?', transport: 'none' }));
   const until = Date.now() + ms;
   while (Date.now() < until) {
@@ -160,6 +160,7 @@ const peakOver = async (pages, ms) => {
         best[i].playoutMs = Math.max(best[i].playoutMs, s.playoutMs);
         best[i].underruns = Math.max(best[i].underruns, s.underruns);
         best[i].resyncs = Math.max(best[i].resyncs, s.resyncs);
+        if (s.muted) best[i].muted = true;
         if (s.offMainThread) best[i].offMainThread = true;
         best[i].codec = s.codec;
         if (s.transport && s.transport !== 'none') best[i].transport = s.transport;
@@ -353,6 +354,39 @@ const peakOver = async (pages, ms) => {
   // for a reason it should not.
   check('and no stream had to restart',
     sa.resyncs === 0 && st.resyncs === 0, `ana ${sa.resyncs}, theo ${st.resyncs}`);
+
+  // --- mute ---
+  // The button used to toggle a signal nothing read: the label said "Muted"
+  // and the microphone kept transmitting. So this asserts the thing that
+  // matters — the far side stops HEARING her — and, separately, that packets
+  // keep flowing. Mute is not disconnection: dropping the packets would leave
+  // a hole in theo's jitter buffer, and a jitter buffer conceals a hole by
+  // asking the codec to invent a continuation, so a mute would arrive as
+  // muttering.
+  // The labelled switch is in the CALL view; the tray's is an unlabelled icon.
+  await clickRoom(a, 'The Porch');
+  await a.waitForTimeout(600);
+  await clickText(a, 'Mic on');
+  // Wait for the SWITCH to land, then for the meters to fall, before measuring
+  // anything. `peakOver` takes the maximum over its window, so starting it too
+  // early folds in the last moments of an unmuted microphone and reads them as
+  // a mute that did not work.
+  for (let i = 0; i < 40 && !(await stats(a))?.muted; i++) await a.waitForTimeout(250);
+  await a.waitForTimeout(1500);
+  const [ma, mt] = await peakOver([a, t], 6000);
+  console.log(`        muted  ana : ${JSON.stringify(ma)}`);
+  console.log(`        muted  theo: ${JSON.stringify(mt)}`);
+  check('the mic switch reaches the microphone, not just the label', ma.muted, JSON.stringify(ma));
+  check('muted — her own level meter reads nothing', ma.mic === 0, `${ma.mic}`);
+  check('muted — theo stops hearing her', mt.remote * 4 <= st.remote,
+    `theo heard ${st.remote} before, ${mt.remote} while muted`);
+  check('muted — but she is still sending, so his buffer has nothing to conceal',
+    mt.recv > st.recv && mt.concealed === st.concealed,
+    JSON.stringify([st, mt]));
+  await clickText(a, 'Muted');
+  await a.waitForTimeout(600);
+  await clickText(a, 'Back to chat');
+  await a.waitForTimeout(600);
 
   // --- presence: who the sidebar says is in a room ---
   // The claim is that this works for people who are NOT in the call — you

@@ -439,7 +439,14 @@ fn tray(app: App) -> Element {
                         VariantRef::from(variant::Soft)
                     },
                     size = IconButtonSize::Sm,
-                    on_click = cb(move || app.mic.set(!app.mic.get())),
+                    on_click = cb(move || {
+                    // The value, not a re-read: `Signal::set` STAGES, so asking
+                    // `app.mic` here returns the one being replaced and the
+                    // microphone would be set to the opposite of the button.
+                    let on = !app.mic.get();
+                    app.mic.set(on);
+                    crate::set_muted(!on);
+                }),
                 )
                 IconButton(
                     glyph = String::new(),
