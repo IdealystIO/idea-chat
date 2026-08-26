@@ -501,6 +501,77 @@ mod tests {
         );
     }
 
+    /// What a listener hears while the far side is not talking.
+    ///
+    /// Written to answer a call where one person heard a constant hum and the
+    /// other did not, and the obvious suspect was comfort noise: with DTX on,
+    /// the encoder stops sending during silence and the decoder synthesises a
+    /// noise floor, which is exactly what a hum sounds like.
+    ///
+    /// It is not that. DTX engages on TRUE silence and nothing else — a room
+    /// tone as quiet as 0.01 produces zero DTX frames out of forty, and is
+    /// transmitted faithfully. Which means a listener hearing a hum is hearing
+    /// the other person's ROOM, and the fix is suppression at that end rather
+    /// than anything in here.
+    ///
+    /// | far side | DTX frames | listener hears |
+    /// | --- | --- | --- |
+    /// | digital silence | 38/40 | rms 0.00014 |
+    /// | quiet room (0.01) | 0/40 | rms 0.005 |
+    /// | noisy room (0.05) | 0/40 | rms 0.025 |
+    #[test]
+    fn silence_is_cheap_but_a_quiet_room_is_not_silence() {
+        let quiet = transmitted(0.01);
+        assert_eq!(quiet.dtx_frames, 0, "a room tone is not silence to the encoder");
+        assert!(
+            quiet.heard > 0.001,
+            "and the listener hears it: rms {}. A hum on a call is the other \
+             person's room, not this codec inventing one.",
+            quiet.heard,
+        );
+
+        let silent = transmitted(0.0);
+        assert!(silent.dtx_frames > 30, "true silence still costs almost nothing");
+        assert!(silent.heard < 0.001, "and is not audible: rms {}", silent.heard);
+    }
+
+    struct Transmitted {
+        dtx_frames: usize,
+        heard: f32,
+    }
+
+    /// Encode a room tone at `floor`, decode it, and report what came out.
+    fn transmitted(floor: f32) -> Transmitted {
+        let mut enc = Encoder::new(Settings::default(), RATE, 1).expect("encoder");
+        let mut dec = Decoder::new(Settings::default().frame, RATE, 1).expect("decoder");
+        let frame = enc.frame();
+        let mut scratch = vec![0u8; MAX_PACKET];
+        let mut out = vec![0.0f32; frame];
+
+        let mut seed = 12_345u32;
+        let mut noise = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / 8_388_608.0 - 1.0) * floor
+        };
+
+        let mut dtx_frames = 0;
+        let mut heard = 0.0f32;
+        for i in 0..80 {
+            let block: Vec<f32> = (0..frame).map(|_| noise()).collect();
+            let packet = enc.encode(&block, &mut scratch).expect("encode");
+            dec.decode(Some(packet), &mut out);
+            // Past the encoder settling in.
+            if i >= 40 {
+                if packet.len() <= 8 {
+                    dtx_frames += 1;
+                }
+                let rms = (out.iter().map(|s| s * s).sum::<f32>() / out.len() as f32).sqrt();
+                heard = heard.max(rms);
+            }
+        }
+        Transmitted { dtx_frames, heard }
+    }
+
     /// The seam this crate exists for: the codec inside the buffer, with loss
     /// and reordering happening together, producing continuous audio.
     ///
@@ -550,4 +621,5 @@ mod tests {
         assert!(rms(audible) > 0.01, "nothing came out: {}", rms(audible));
     }
 }
+
 
