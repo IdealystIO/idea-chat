@@ -11,6 +11,7 @@
 //! | `CAPACITY` | max participants before the node refuses NEW rooms (0 = unbounded) |
 //! | `COORD_BACKEND` | `memory` \| `redis` \| `postgres`. Unset means single-node mode |
 //! | `VOICE_WEBTRANSPORT` | UDP port for the QUIC listener. Unset means WebSocket only |
+//! | `VOICE_PUBLIC_HOST` | hostname clients dial for QUIC. Defaults to `PUBLIC_URL`'s host |
 //!
 //! Without `COORD_BACKEND` the node runs standalone and owns every room, which
 //! is the original single-relay behavior and correct for development.
@@ -87,15 +88,27 @@ async fn main() {
     match std::env::var("VOICE_WEBTRANSPORT").ok().and_then(|p| p.parse::<u16>().ok()) {
         Some(quic_port) => {
             // The certificate has to name what clients DIAL, which behind NAT
-            // is not what this process binds. `PUBLIC_URL` already carries that
-            // distinction for the WebSocket, so it is the same answer here.
-            let host = public_url
-                .trim_start_matches("ws://")
-                .trim_start_matches("wss://")
-                .split(':')
-                .next()
-                .unwrap_or("127.0.0.1")
-                .to_string();
+            // is not what this process binds.
+            //
+            // Usually that is `PUBLIC_URL`'s host, which already carries the
+            // distinction for the WebSocket. But the two genuinely come apart
+            // when a gateway is in front: the WebSocket is PROXIED, so
+            // `PUBLIC_URL` has to be an address the gateway can reach —
+            // `127.0.0.1` on a single box — while QUIC cannot be proxied at
+            // all and has to name an address the BROWSER can reach. Publishing
+            // a loopback address to the internet is not a subtle failure, but
+            // it is a quiet one: the client refuses to dial it and every call
+            // runs on the WebSocket with nothing in the UI to say so.
+            let host = std::env::var("VOICE_PUBLIC_HOST").ok().filter(|h| !h.is_empty())
+                .unwrap_or_else(|| {
+                    public_url
+                        .trim_start_matches("ws://")
+                        .trim_start_matches("wss://")
+                        .split(':')
+                        .next()
+                        .unwrap_or("127.0.0.1")
+                        .to_string()
+                });
             let names: Vec<&str> = if host == "127.0.0.1" || host == "localhost" {
                 vec!["127.0.0.1", "localhost"]
             } else {

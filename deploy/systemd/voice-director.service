@@ -1,0 +1,17 @@
+[Unit]
+Description=Voice director — decides which node owns a room
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/hearth
+EnvironmentFile=/opt/hearth/voice.env
+Environment=PORT=9100
+ExecStart=/opt/hearth/bin/voice-director
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

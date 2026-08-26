@@ -1,0 +1,20 @@
+[Unit]
+Description=Hearth
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/hearth
+EnvironmentFile=/opt/hearth/hearth.env
+# HEARTH_ROOT, not the compiled-in manifest directory: the binary was built in
+# a container and would otherwise look for the web bundle at a path that does
+# not exist here — serving 404s for the whole app with nothing in the log.
+Environment=HEARTH_ROOT=/opt/hearth
+ExecStart=/opt/hearth/bin/server
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

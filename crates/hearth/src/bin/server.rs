@@ -93,7 +93,18 @@ async fn main() {
         origins.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     ));
 
-    let project_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // `CARGO_MANIFEST_DIR` is baked in at COMPILE time, which is right for
+    // `cargo run` from a checkout and wrong for anything deployed: the binary
+    // is built somewhere that does not exist on the machine serving it, so it
+    // looks for the bundle in a directory that was never copied there and
+    // silently serves 404s for the whole app.
+    //
+    // `HEARTH_ROOT` is the override. Unset, nothing changes.
+    let project_dir = std::env::var("HEARTH_ROOT")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let web_dir = project_dir.join("dist/web");
     if !web_dir.exists() {
         eprintln!("hearth: {} does not exist — run `idealyst build --web` first.", web_dir.display());

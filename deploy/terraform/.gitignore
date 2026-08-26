@@ -1,0 +1,5 @@
+id_ed25519
+.terraform/
+# .terraform.lock.hcl IS committed on purpose: it pins provider versions so a
+# fresh clone plans the same infrastructure.
+terraform.tfstate*

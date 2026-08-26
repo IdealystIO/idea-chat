@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Runs ONCE, on first boot. Everything here is the machine, not the app —
+# the app arrives separately via ship.sh, because it is built elsewhere.
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+# rsync is not on the minimal AMI, and ship.sh needs it on BOTH ends.
+apt-get install -y --no-install-recommends ca-certificates curl gnupg debian-keyring \
+  debian-archive-keyring apt-transport-https rsync
+
+# Docker, for Postgres and Redis only. The app runs as plain systemd units:
+# there is no image to build, and putting a binary in a container to run one
+# process on one box buys nothing.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+  > /etc/apt/sources.list.d/docker.list
+
+# Caddy, for TLS. Chosen over nginx + certbot because getUserMedia needs a
+# secure context and this is one line of config instead of a renewal cron.
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+  > /etc/apt/sources.list.d/caddy-stable.list
+
+apt-get update
+apt-get install -y --no-install-recommends \
+  docker-ce docker-ce-cli containerd.io docker-compose-plugin caddy
+
+systemctl enable --now docker
+
+# ship.sh creates the rest of the layout on every deploy; this is just the root.
+install -d -o admin -g admin /opt/hearth
+install -d /opt/hearth/data
+
+# Postgres and Redis. Bound to loopback: nothing outside this box has any
+# business reaching either, and the security group does not open them.
+cat > /opt/hearth/docker-compose.yml <<'YML'
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports: ["127.0.0.1:5432:5432"]
+    environment:
+      POSTGRES_PASSWORD: hearth
+      POSTGRES_DB: hearth
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redisdata:/data]
+volumes:
+  pgdata:
+  redisdata:
+YML
+cd /opt/hearth && docker compose up -d
+
+# The voice coordination database is separate from the app's, deliberately:
+# they have different lifecycles and one is safe to wipe.
+until docker compose exec -T postgres pg_isready -U postgres; do sleep 1; done
+docker compose exec -T postgres psql -U postgres -c "CREATE DATABASE voice" || true
+
+cat > /etc/caddy/Caddyfile <<'CADDY'
+${hostname} {
+	# The wasm bundle is served straight off disk, not through the app.
+	#
+	# `idealyst build --release` emits a `.br` next to every compressible file,
+	# and `precompressed br` hands those over as-is. The alternative is Caddy
+	# gzipping a 9 MB wasm on every cold load, on a t3.small, which is the most
+	# expensive thing this box would do all day and would produce a worse
+	# result than the brotli already sitting there.
+	#
+	# `pkg/` filenames carry the build hash, so they are immutable forever.
+	handle_path /pkg/* {
+		root * /opt/hearth/dist/web/pkg
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server {
+			precompressed br gzip
+		}
+	}
+
+	# Everything else, including /_srv and the /_voice WebSocket, which Caddy
+	# upgrades without being told to.
+	handle {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:8080
+	}
+}
+CADDY
+systemctl reload caddy || systemctl restart caddy
+
+touch /opt/hearth/.bootstrapped

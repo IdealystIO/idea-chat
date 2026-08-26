@@ -1,0 +1,25 @@
+[Unit]
+Description=Voice relay node
+After=network-online.target docker.service voice-director.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/hearth
+EnvironmentFile=/opt/hearth/voice.env
+Environment=PORT=8797
+Environment=NODE_ID=node-a
+# The WebSocket is PROXIED by Hearth, so this has to be an address Hearth can
+# reach — loopback, on one box.
+Environment=PUBLIC_URL=ws://127.0.0.1:8797
+# QUIC is NOT proxied and cannot be: a session terminates at whoever holds the
+# certificate. So the browser dials this host directly, on the UDP port the
+# security group opens, and it has to be the public name.
+Environment=VOICE_WEBTRANSPORT=8798
+ExecStart=/opt/hearth/bin/voice-node
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
