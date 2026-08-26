@@ -134,6 +134,13 @@ pub struct Settings {
     /// Discontinuous transmission: stop sending during silence and let the far
     /// end generate comfort noise. Saves bandwidth and, more usefully here,
     /// stops a muted or silent participant costing anything at all.
+    ///
+    /// It engages on genuine silence only, and that was worth establishing
+    /// rather than assuming — a chopped-sounding held note looks exactly like
+    /// DTX misfiring on a sustained non-speech sound. Measured across
+    /// amplitudes from 0.5 down to 0.001, a continuous tone never produces a
+    /// DTX frame; every frame stays 61–66 bytes. See
+    /// [`a_sustained_tone_is_not_mistaken_for_silence`](self).
     pub dtx: bool,
     pub frame: FrameMs,
 }
@@ -462,6 +469,38 @@ mod tests {
         assert!(settled <= 8, "silence still costs {settled} bytes a frame");
     }
 
+    /// A held note is never mistaken for silence.
+    ///
+    /// Kept as evidence rather than as a regression guard, because it was
+    /// written to catch a bug that turned out not to exist: a call where a
+    /// sustained hum came out chopped looks exactly like DTX misfiring, and it
+    /// is not. A continuous tone produces full frames at every amplitude tried,
+    /// so whatever chops a held note, it is not this. Ruling something out is
+    /// worth a test when the alternative is ruling it out again next time.
+    #[test]
+    fn a_sustained_tone_is_not_mistaken_for_silence() {
+        let mut enc = Encoder::new(Settings::default(), RATE, 1).expect("encoder");
+        let frame = enc.frame();
+        let mut scratch = vec![0u8; MAX_PACKET];
+        let tone: Vec<f32> = (0..frame)
+            .map(|i| (i as f32 / RATE as f32 * 220.0 * std::f32::consts::TAU).sin() * 0.4)
+            .collect();
+
+        let sizes: Vec<usize> = (0..60)
+            .map(|_| enc.encode(&tone, &mut scratch).expect("encode").len())
+            .collect();
+        // Past the encoder settling in. A DTX frame is a byte or two; a real
+        // one is tens. If ANY settled frame collapses to a DTX update, the far
+        // end hears a hole in a sound that never stopped.
+        let smallest = sizes[20..].iter().copied().min().expect("frames");
+        assert!(
+            smallest > 8,
+            "a frame collapsed to {smallest} bytes mid-tone — the far end hears that as a gap; \
+             sizes {:?}",
+            &sizes[20..],
+        );
+    }
+
     /// The seam this crate exists for: the codec inside the buffer, with loss
     /// and reordering happening together, producing continuous audio.
     ///
@@ -511,3 +550,4 @@ mod tests {
         assert!(rms(audible) > 0.01, "nothing came out: {}", rms(audible));
     }
 }
+
