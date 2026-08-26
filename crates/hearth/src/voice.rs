@@ -527,7 +527,7 @@ fn announce(app: App, room: String) {
 fn stats_json() -> String {
     let s = session::stats();
     format!(
-        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"resyncs":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
         s.sent,
         s.bytes_sent,
         // Packets the transport would not carry. On a datagram carrier a
@@ -556,6 +556,9 @@ fn stats_json() -> String {
         // machine is busy, which is never during a test that does not check.
         s.off_main_thread,
         s.underruns,
+        // One per rejoin is ordinary. This is here because the bug it stands
+        // for was invisible: every other counter healthy, one listener deaf.
+        s.resyncs,
         s.peers,
         s.sample_rate,
         (s.mic_peak * 100.0) as u32,

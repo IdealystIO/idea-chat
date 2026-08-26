@@ -132,6 +132,13 @@ static OFF_MAIN_THREAD: std::sync::atomic::AtomicBool =
 /// mean the producer could not keep up — the render callback itself cannot be
 /// late any more.
 static UNDERRUNS: AtomicU32 = AtomicU32::new(0);
+/// Times a sender's stream restarted far enough that the jitter buffer began
+/// again. One per rejoin is ordinary; anything more is not.
+///
+/// Surfaced because the failure it stands for looked completely healthy from
+/// outside: packets sent, packets received, nothing unsent, and one listener
+/// hearing silence for the rest of the call.
+static RESYNCS: AtomicU32 = AtomicU32::new(0);
 static PACKETS_DROPPED: AtomicU32 = AtomicU32::new(0);
 static PEER_COUNT: AtomicU32 = AtomicU32::new(0);
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(0);
@@ -272,6 +279,8 @@ pub struct Stats {
     pub off_main_thread: bool,
     /// Times an output ran dry since joining.
     pub underruns: u32,
+    /// Times a sender's stream restarted and its buffer began again.
+    pub resyncs: u32,
     /// Packets that arrived but could not be decoded or played.
     pub dropped: u32,
     /// Distinct remote senders heard from.
@@ -316,6 +325,7 @@ pub fn stats() -> Stats {
         playout_ms: PLAYOUT_MS.load(Ordering::Relaxed),
         off_main_thread: OFF_MAIN_THREAD.load(Ordering::Relaxed),
         underruns: UNDERRUNS.load(Ordering::Relaxed),
+        resyncs: RESYNCS.load(Ordering::Relaxed),
         dropped: PACKETS_DROPPED.load(Ordering::Relaxed),
         peers: PEER_COUNT.load(Ordering::Relaxed),
         sample_rate: SAMPLE_RATE.load(Ordering::Relaxed),
@@ -332,8 +342,8 @@ pub fn stats() -> Stats {
 fn reset_stats() {
     for c in [
         &MIC_PEAK, &REMOTE_PEAK, &PACKETS_OUT, &BYTES_OUT, &PACKETS_UNSENT, &PACKETS_IN,
-        &PACKETS_DROPPED, &CONCEALED, &PLAYOUT_MS, &UNDERRUNS, &PEER_COUNT, &SAMPLE_RATE,
-        &CODEC, &TRANSPORT,
+        &PACKETS_DROPPED, &CONCEALED, &PLAYOUT_MS, &UNDERRUNS, &RESYNCS, &PEER_COUNT,
+        &SAMPLE_RATE, &CODEC, &TRANSPORT,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -383,6 +393,8 @@ struct PeerSink {
     /// Concealed + starved frames already reported to [`CONCEALED`], so the
     /// global counter can be advanced by the difference rather than recomputed.
     reported_conceal: u64,
+    /// Restarts already reported to [`RESYNCS`], for the same reason.
+    reported_resyncs: u64,
     /// Underruns already reported to [`UNDERRUNS`], for the same reason.
     reported_underruns: u32,
 }
@@ -430,6 +442,7 @@ impl PeerSink {
             frame: Vec::new(),
             clock: None,
             reported_conceal: 0,
+            reported_resyncs: 0,
             reported_underruns: 0,
         })
     }
@@ -471,6 +484,7 @@ impl PeerSink {
             let frame_ms = self.buffer.as_ref().expect("just built").frame_ms();
             self.clock = Some(jitter::Clock::new(frame_ms, MAX_CATCHUP, now_ms));
             self.reported_conceal = 0;
+            self.reported_resyncs = 0;
         }
         let buffer = self.buffer.as_mut().expect("built above");
         let clock = self.clock.as_mut().expect("built with it");
@@ -496,6 +510,11 @@ impl PeerSink {
             Ordering::Relaxed,
         );
         self.reported_conceal = invented;
+        RESYNCS.fetch_add(
+            stats.resyncs.saturating_sub(self.reported_resyncs) as u32,
+            Ordering::Relaxed,
+        );
+        self.reported_resyncs = stats.resyncs;
         PLAYOUT_MS.store(buffer.target_ms() as u32, Ordering::Relaxed);
 
         // The worklet's own count, reported the same way: by difference, since

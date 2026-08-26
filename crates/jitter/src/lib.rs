@@ -143,11 +143,38 @@ pub struct Stats {
     /// causes are different: this one means the sender stopped, or the target
     /// is too shallow for the link.
     pub starved: u64,
+    /// Times the sequence jumped so far that the buffer concluded it was
+    /// looking at a different stream and started over. See
+    /// [`RESYNC_FRAMES`].
+    ///
+    /// Should be zero, or one per rejoin. Anything else means sequence numbers
+    /// are not what this buffer thinks they are.
+    pub resyncs: u64,
     /// Times the buffer had to discard audio to stop unbounded growth. With a
     /// healthy link this stays at zero; a number that climbs steadily is clock
     /// drift, which this crate cannot correct — see the module docs.
     pub drift_events: u64,
 }
+
+/// How far a packet may sit from the expected one before the buffer concludes
+/// it is a *different stream* rather than a late or early one.
+///
+/// Two hundred frames — four seconds at 20 ms — which is orders of magnitude
+/// beyond any reorder a network produces and comfortably beyond the buffer's
+/// own ceiling.
+///
+/// Without this the buffer deadlocks, and it did, in a real call. A sender's
+/// sequence restarts whenever its session does: a rejoin, a redirect to another
+/// node, a reconnect. The participant id survives all three, so the receiver
+/// keeps the same buffer, its `next` is still up in the thousands, and every
+/// packet of the new stream is refused as [`Rejected::Late`].
+///
+/// The refusal is self-sustaining, which is what makes it fatal rather than
+/// noisy: `next` only ever advances when a packet PLAYS, and nothing can play
+/// while everything is being refused. That listener is deaf for the rest of the
+/// call, in one direction only, with every counter except this one looking
+/// healthy.
+pub const RESYNC_FRAMES: u32 = 200;
 
 /// One packet, as the buffer stores it — still encoded. See [`Decode`].
 struct Slot {
@@ -276,6 +303,15 @@ impl<D: Decode> Buffer<D> {
             return Err(Rejected::Empty);
         }
         self.stats.received += 1;
+
+        // Before anything else looks at `seq`, because everything else assumes
+        // the two streams are the same one — the late test would refuse this
+        // packet and the jitter estimator would take a nonsense interval from
+        // it. See [`RESYNC_FRAMES`].
+        if self.next.map(|next| distance(seq, next) > RESYNC_FRAMES).unwrap_or(false) {
+            self.restart(seq);
+        }
+
         self.observe_arrival(seq, arrival_ms);
 
         if let Some(next) = self.next {
@@ -365,6 +401,26 @@ impl<D: Decode> Buffer<D> {
         self.next = Some(want.wrapping_add(1));
         self.adapt();
         false
+    }
+
+    /// Begin again at `seq`, keeping nothing.
+    ///
+    /// Everything held belongs to a stream that has ended, and every measurement
+    /// describes it: the jitter estimate, the arrival bookkeeping, and the fact
+    /// that playout had started. Carrying any of it over would mean the new
+    /// stream inherits the old one's idea of the network.
+    ///
+    /// The target depth is deliberately NOT reset. It is a property of the link,
+    /// which has not changed just because the far side reconnected over it, and
+    /// rebuilding it from `min_ms` would spend the first second of the new
+    /// stream rediscovering what was already known.
+    fn restart(&mut self, seq: u32) {
+        self.slots.clear();
+        self.next = Some(seq);
+        self.playing = false;
+        self.jitter = 0.0;
+        self.last_arrival = None;
+        self.stats.resyncs += 1;
     }
 
     /// Interarrival jitter, RFC 3550's estimator.
@@ -512,6 +568,101 @@ mod tests {
         );
         // Left in as a record of the magnitude, not as a bound to defend.
         println!("steady {steady:.1} ms, bursty {bursty:.1} ms");
+    }
+
+    #[test]
+    fn a_sender_that_restarts_its_sequence_is_not_rejected_forever() {
+        // Measured in a real call before it was a test. Every packet arrived,
+        // every packet decoded, and every one was refused as `Late` — so the
+        // buffer held nothing, every pull starved, and that listener heard
+        // silence for the rest of the session while the far side sounded fine.
+        // One direction only, which is what makes it so hard to place from
+        // outside.
+        //
+        // Sequence numbers restart whenever a sender's session does — a rejoin,
+        // a redirect to another node, a reconnect. The id is stable across
+        // those, so the receiver keeps the same buffer and its `next` stays up
+        // in the thousands while the sender counts from zero again.
+        //
+        // The deadlock is the important part: `next` only ever advances when a
+        // packet PLAYS, and nothing can play while everything is rejected. It
+        // cannot recover on its own, however long you wait.
+        let mut buffer = buffer();
+        let mut out = vec![0.0f32; FRAME];
+
+        prime(&mut buffer, 5_000, 12);
+        let mut played = 0;
+        for _ in 0..12 {
+            if buffer.pull(&mut out) {
+                played += 1;
+            }
+        }
+        assert!(played > 0, "the first stream should have played");
+
+        // The far side rejoins and starts again from zero.
+        let mut restarted = 0;
+        for seq in 0..40u32 {
+            if buffer.push(seq, &payload(seq), 20_000.0 + seq as f64 * 10.0).is_ok() {
+                restarted += 1;
+            }
+        }
+        assert!(
+            restarted > 0,
+            "every packet of the new stream was refused; this listener is deaf for the rest \
+             of the call",
+        );
+
+        let mut after = 0;
+        for _ in 0..40 {
+            if buffer.pull(&mut out) {
+                after += 1;
+            }
+        }
+        assert!(after > 0, "the buffer accepted the new stream but never played any of it");
+    }
+
+    #[test]
+    fn a_restart_is_counted_once_and_the_stream_carries_on() {
+        // The other way this could go wrong: a threshold that re-triggers on
+        // every packet would clear the buffer each time, so nothing would ever
+        // accumulate and playout could never start — silence again, by a
+        // different route and with a counter racing instead of frozen.
+        let mut buffer = buffer();
+        let mut out = vec![0.0f32; FRAME];
+        prime(&mut buffer, 9_000, 12);
+        for _ in 0..12 {
+            buffer.pull(&mut out);
+        }
+
+        // Interleaved, because a call is: pushing sixty frames before pulling
+        // any would trip the anti-drift ceiling, which is correct behaviour
+        // that would make this measure the wrong thing.
+        let mut played = 0;
+        for seq in 0..60u32 {
+            let _ = buffer.push(seq, &payload(seq), 30_000.0 + seq as f64 * 10.0);
+            if buffer.pull(&mut out) {
+                played += 1;
+            }
+        }
+        assert_eq!(buffer.stats().resyncs, 1, "one discontinuity, one restart");
+        assert!(played > 40, "only {played} of 60 frames played after the restart");
+    }
+
+    #[test]
+    fn an_ordinary_late_packet_is_still_just_late() {
+        // The resync must not swallow the case it sits next to. A packet a few
+        // frames behind is the network doing what networks do, and treating it
+        // as a new stream would throw away everything buffered every time one
+        // turned up.
+        let mut buffer = buffer();
+        let mut out = vec![0.0f32; FRAME];
+        prime(&mut buffer, 100, 12);
+        for _ in 0..6 {
+            buffer.pull(&mut out);
+        }
+        let played_to = 100 + 6;
+        assert!(matches!(buffer.push(played_to - 3, &payload(1), 500.0), Err(Rejected::Late)));
+        assert_eq!(buffer.stats().resyncs, 0, "a late packet is not a new stream");
     }
 
     /// Push enough to get past the initial fill, at a steady arrival rate.
