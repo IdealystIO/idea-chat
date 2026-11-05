@@ -13,11 +13,12 @@
 # engine that was compiled against it. Downloading a "current" one from upstream
 # would not.
 #
-#   ./tools/fetch-model.sh          # copy into crates/hearth/assets/
+#   ./tools/fetch-model.sh            # copy into crates/hearth/assets/
+#   ./tools/fetch-model.sh quic-call  # or into another app crate's assets/
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dest="$root/crates/hearth/assets"
+dest="$root/crates/${1:-hearth}/assets"
 name="DeepFilterNet3_onnx.tar.gz"
 
 # The rev is pinned in the SDK's manifest; matching on the package directory

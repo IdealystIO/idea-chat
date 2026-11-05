@@ -175,11 +175,12 @@ fn settings_body(app: App) -> Element {
                         "Noise suppression",
                         // Says what each choice costs, because the choice is
                         // not "better or worse" — it is who pays.
-                        "Neural, on top of your browser's. On this device costs an 8 MB download and some CPU; on the server costs neither, but the noise still travels.",
+                        "Neural, on top of your browser's. It runs on this device: an 8 MB download and some CPU.",
+                        // No "on the server": the call relay forwards audio
+                        // without decoding it, so there is no server to run it on.
                         vec![
                             option("Off", suppress == Mode::Off, move || pick(app, Mode::Off)),
                             option("This device", suppress == Mode::Client, move || pick(app, Mode::Client)),
-                            option("Server", suppress == Mode::Server, move || pick(app, Mode::Server)),
                         ],
                     ),
                     suppression_note(app),
@@ -349,19 +350,12 @@ fn suppression_note(app: App) -> Element {
         Mode::Client => {
             "DeepFilterNet runs here, before anything is sent. The first call after choosing this downloads the model, so it connects more slowly than the ones after it."
         }
+        // Stored from before the relay changed: calls get the browser's own.
         Mode::Server => {
-            "DeepFilterNet runs on the relay. Nothing to download — but the relay has to be willing, and it says so when you connect. If it declines you get an ordinary call, not a failed one."
+            "Suppression on the server is no longer offered — your browser's own is doing the work. Choose \"This device\" for DeepFilterNet."
         }
     };
-    // Only meaningful once there is a call to describe — and only the server
-    // choice has to wait. The client chain is swapped under the running call
-    // (see `voice::set_suppression`); the node's decision is made when the
-    // relay socket opens and cannot be revisited without opening another.
-    let live = if app.in_voice.get().is_empty() || app.suppress.get() != Mode::Server {
-        String::new()
-    } else {
-        " Takes effect on your next call.".to_string()
-    };
+    let live = String::new();
     ui! {
         view(style = || StyleApplication::new(styles::SettingsRow::sheet())) {
             Muted(label = format!("{text}{live}"), kind = typography_kind::BodySm)
@@ -436,7 +430,7 @@ fn master_volume(app: App) -> Element {
         app.volume.set(position);
         crate::volume::set_master(position);
         #[cfg(target_arch = "wasm32")]
-        crate::voice::refresh_master(position);
+        crate::voice::refresh_master(app, position);
     }) as std::rc::Rc<dyn Fn(f32)>;
 
     ui! {

@@ -4,14 +4,14 @@
 //!
 //! Three reasons, and only the first is the obvious one.
 //!
-//! **Bandwidth.** Mono 48 kHz i16 is 768 kbps per talker. Opus does the same
-//! job at 24 — a factor of thirty — which is the difference between a room of
-//! six being unremarkable and being a problem.
+//! **Bandwidth.** Mono 48 kHz i16 is 768 kbps per talker. Opus codes the
+//! whole audible range at 40 — a factor of twenty — which is the difference
+//! between a room of six being unremarkable and being a problem.
 //!
 //! **Datagram size.** This is the one that forces the issue. A QUIC datagram
 //! must fit in a single packet, so roughly 1200 bytes. One 85 ms block of raw
 //! PCM is 8160 bytes: it does not fit, and no amount of tuning makes it fit.
-//! A 20 ms Opus frame at 24 kbps is about 60 bytes.
+//! A 20 ms Opus frame at 40 kbps is about 100 bytes.
 //!
 //! **Concealment.** Least obvious, most valuable. A codec that loses a packet
 //! can resynthesise a plausible continuation from its own decoder state,
@@ -61,7 +61,7 @@
 
 #![forbid(unsafe_code)]
 
-use rusty_opus::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, Bandwidth, OpusDecoder, OpusEncoder};
 
 /// Opus frame durations that make sense for a call, in milliseconds.
 ///
@@ -96,8 +96,9 @@ impl FrameMs {
 /// What the encoder is being asked for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
-    /// Target bitrate. 24 kbps is transparent-enough mono speech; below about
-    /// 16 it starts to sound like a codec rather than a person.
+    /// Target bitrate. Fullband speech wants 32–40 kbps from CELT; wideband
+    /// is transparent-enough at 24, and below about 16 it starts to sound like
+    /// a codec rather than a person.
     pub bitrate_bps: i32,
     /// 0..=10. Encoder effort, not quality-per-bit at the low end — this is the
     /// CPU dial, and the browser is the machine that cares.
@@ -143,12 +144,63 @@ pub struct Settings {
     /// [`a_sustained_tone_is_not_mistaken_for_silence`](self).
     pub dtx: bool,
     pub frame: FrameMs,
+    /// The widest audio band the encoder may code — and with it, which of
+    /// Opus's two codecs codes it.
+    ///
+    /// **Fullband (to 20 kHz) by default, CELT alone.** Sibilants, breath and
+    /// the air in a voice live above 8 kHz; wideband cuts them off, which is
+    /// what makes a call sound like a call.
+    ///
+    /// Above wideband, Opus's VoIP mode is *hybrid*: SILK below 8 kHz, CELT
+    /// above. `rusty-opus` 0.9.1's hybrid mode fills the upper band with noise
+    /// of its own — at every bitrate tried (24 to 64 kbps) and through digital
+    /// silence, where a listener hears it as a constant high-pitched hiss: a
+    /// pause floor of rms 0.0005 against 0.0001 at wideband. Its CELT-only
+    /// mode does not: pauses decode to silence and the band above 8 kHz comes
+    /// back at the source's level. So above wideband the encoder runs CELT
+    /// only (`RestrictedLowDelay`, which also takes ~4 ms of SILK lookahead
+    /// off the delay), and hybrid is never used. See
+    /// [`fullband_does_not_hiss_in_the_pauses`](self) and
+    /// [`hybrid_still_hisses_upstream`](self).
+    ///
+    /// [`MaxBandwidth::Wideband`] stays SILK-only VoIP — the better codec when
+    /// bits are short.
+    pub max_bandwidth: MaxBandwidth,
+}
+
+/// See [`Settings::max_bandwidth`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxBandwidth {
+    /// To 8 kHz.
+    Wideband,
+    /// To 12 kHz.
+    Superwideband,
+    /// To 20 kHz.
+    Fullband,
+}
+
+impl MaxBandwidth {
+    /// Which Opus mode codes this band: see [`Settings::max_bandwidth`].
+    fn application(self) -> Application {
+        match self {
+            MaxBandwidth::Wideband => Application::Voip,
+            MaxBandwidth::Superwideband | MaxBandwidth::Fullband => Application::RestrictedLowDelay,
+        }
+    }
+
+    fn opus(self) -> Bandwidth {
+        match self {
+            MaxBandwidth::Wideband => Bandwidth::Wideband,
+            MaxBandwidth::Superwideband => Bandwidth::Superwideband,
+            MaxBandwidth::Fullband => Bandwidth::Fullband,
+        }
+    }
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            bitrate_bps: 24_000,
+            bitrate_bps: 40_000,
             // 5 rather than 10: this runs inline on the browser's main thread,
             // alongside a neural suppressor that already wants that thread.
             complexity: 5,
@@ -161,6 +213,8 @@ impl Default for Settings {
             expected_loss_pct: 5,
             dtx: true,
             frame: FrameMs::Twenty,
+            // See the field docs: fullband, by CELT alone, which does not hiss.
+            max_bandwidth: MaxBandwidth::Fullband,
         }
     }
 }
@@ -190,21 +244,28 @@ pub struct Encoder {
 impl Encoder {
     pub fn new(settings: Settings, rate: u32, channels: u16) -> Result<Encoder, CodecError> {
         let channels = channels.max(1) as usize;
-        // `Voip` rather than `Audio`: it biases toward speech intelligibility
-        // and lets SILK handle the low band, which is the whole point here.
-        let mut inner = OpusEncoder::new(rate as i32, channels, Application::Voip)
+        // SILK-only VoIP at wideband, CELT-only above: never hybrid, which
+        // hisses (see `Settings::max_bandwidth`).
+        let mut inner = OpusEncoder::new(rate as i32, channels, settings.max_bandwidth.application())
             .map_err(CodecError)?;
         inner.bitrate_bps = settings.bitrate_bps;
         inner.complexity = settings.complexity;
         inner.use_inband_fec = settings.fec;
         inner.packet_loss_perc = settings.expected_loss_pct;
         inner.use_dtx = settings.dtx;
+        inner.max_bandwidth = settings.max_bandwidth.opus();
         Ok(Encoder { inner, frame: settings.frame.frames(rate) * channels, channels })
     }
 
     /// Samples per call to [`Encoder::encode`], interleaved.
     pub fn frame(&self) -> usize {
         self.frame
+    }
+
+    /// Change the target bitrate, live, from the next frame — for bitrate
+    /// control. The band is fixed at construction: changing it changes codec.
+    pub fn set_bitrate(&mut self, bps: i32) {
+        self.inner.bitrate_bps = bps;
     }
 
     /// Encode exactly one frame.
@@ -380,7 +441,7 @@ mod tests {
         let (_, _, sizes) = round_trip(Settings::default(), 60);
         let biggest = *sizes.iter().max().expect("frames");
         assert!(biggest <= MAX_PACKET, "largest packet {biggest} exceeds our own ceiling");
-        assert!(biggest < 400, "24 kbps should not produce {biggest}-byte frames");
+        assert!(biggest < 400, "40 kbps should not produce {biggest}-byte frames");
         assert!(biggest > 0);
     }
 
@@ -405,9 +466,19 @@ mod tests {
     /// fork's. When this test starts failing, FEC works — turn it on in
     /// [`Settings::default`], because recovering a lost packet outright beats
     /// concealing it.
+    ///
+    /// In-band FEC is SILK's, so this is pinned at wideband. The default,
+    /// fullband CELT, has none to break: its losses are concealed.
     #[test]
     fn fec_is_still_broken_upstream() {
-        let settings = Settings { fec: true, expected_loss_pct: 5, dtx: false, ..Settings::default() };
+        let settings = Settings {
+            fec: true,
+            expected_loss_pct: 5,
+            dtx: false,
+            bitrate_bps: 24_000,
+            max_bandwidth: MaxBandwidth::Wideband,
+            ..Settings::default()
+        };
         let (original, decoded, _) = round_trip(settings, 60);
         let skip = settings.frame.frames(RATE) * 6;
         let c = correlation(&original[skip..], &decoded[skip..]);
@@ -453,8 +524,92 @@ mod tests {
         assert!(out.iter().all(|s| s.abs() <= 1.5), "out-of-range samples");
     }
 
-    /// Silence should cost almost nothing. This is what stops a room of six
-    /// costing six streams of bandwidth while one person talks.
+    /// What the decoder puts out in the pauses of one second of speech, one
+    /// second of digital silence, three times over. DTX off, so the pauses are
+    /// coded frames rather than skipped ones — which is the case a noisy room
+    /// is in.
+    fn pauses_rms(mut encode: impl FnMut(&[f32], &mut [u8]) -> usize) -> f32 {
+        let mut dec = Decoder::new(FrameMs::Twenty, RATE, 1).unwrap();
+        let n = FrameMs::Twenty.frames(RATE);
+        let mut out = [0u8; MAX_PACKET];
+        let mut pcm = vec![0.0f32; n];
+        let mut pauses = Vec::new();
+        for f in 0..300 {
+            let speaking = (f / 50) % 2 == 0;
+            let input = if speaking { speech(n, f * n) } else { vec![0.0; n] };
+            let len = encode(&input, &mut out);
+            dec.decode(Some(&out[..len]), &mut pcm);
+            // Skip the first few frames of each pause: the codec's tail.
+            if !speaking && f % 50 >= 5 {
+                pauses.extend_from_slice(&pcm);
+            }
+        }
+        rms(&pauses)
+    }
+
+    fn ours(max_bandwidth: MaxBandwidth) -> impl FnMut(&[f32], &mut [u8]) -> usize {
+        let mut enc = Encoder::new(Settings { dtx: false, max_bandwidth, ..Default::default() }, RATE, 1).unwrap();
+        move |pcm, out| enc.encode(pcm, out).unwrap().len()
+    }
+
+    /// The default codes to 20 kHz and the pauses are as silent as wideband's:
+    /// the hiss that kept calls at wideband was hybrid mode's, and hybrid is
+    /// never used.
+    #[test]
+    fn fullband_does_not_hiss_in_the_pauses() {
+        let wide = pauses_rms(ours(MaxBandwidth::Wideband));
+        let full = pauses_rms(ours(MaxBandwidth::Fullband));
+        assert!(wide < 0.0002, "wideband pauses hiss at rms {wide}");
+        assert!(full <= wide, "fullband pauses hiss at rms {full}, against wideband's {wide}");
+    }
+
+    /// And fullband is fullband: a tone at 12 kHz — where sibilants live —
+    /// comes through, where wideband drops it.
+    #[test]
+    fn fullband_keeps_what_is_above_8_khz() {
+        let through = |max_bandwidth| {
+            let settings = Settings { dtx: false, max_bandwidth, ..Default::default() };
+            let mut enc = Encoder::new(settings, RATE, 1).unwrap();
+            let mut dec = Decoder::new(settings.frame, RATE, 1).unwrap();
+            let n = enc.frame();
+            let (mut out, mut pcm, mut heard) = ([0u8; MAX_PACKET], vec![0.0f32; n], Vec::new());
+            for f in 0..50 {
+                let tone: Vec<f32> = (0..n)
+                    .map(|i| ((f * n + i) as f32 / RATE as f32 * 12_000.0 * std::f32::consts::TAU).sin() * 0.1)
+                    .collect();
+                let len = enc.encode(&tone, &mut out).unwrap().len();
+                dec.decode(Some(&out[..len]), &mut pcm);
+                if f >= 10 {
+                    heard.extend_from_slice(&pcm);
+                }
+            }
+            rms(&heard)
+        };
+        let sent = 0.1 / std::f32::consts::SQRT_2;
+        let full = through(MaxBandwidth::Fullband);
+        let wide = through(MaxBandwidth::Wideband);
+        assert!(full > sent * 0.7, "fullband lost a 12 kHz tone: rms {full} of {sent}");
+        assert!(wide < sent * 0.2, "wideband let a 12 kHz tone through: rms {wide}");
+    }
+
+    /// Pins the third-party bug the codec's mode is chosen around: hybrid
+    /// mode (VoIP above wideband) fills the upper band with hiss, even over
+    /// digital silence. When this fails, `rusty-opus` has fixed it, and hybrid
+    /// — SILK's efficiency on speech below 8 kHz — is worth reconsidering.
+    #[test]
+    fn hybrid_still_hisses_upstream() {
+        let mut hybrid = OpusEncoder::new(RATE as i32, 1, Application::Voip).unwrap();
+        hybrid.bitrate_bps = 40_000;
+        hybrid.complexity = 5;
+        hybrid.use_dtx = false;
+        hybrid.packet_loss_perc = 5;
+        hybrid.max_bandwidth = Bandwidth::Fullband;
+        let n = FrameMs::Twenty.frames(RATE);
+        let hissing = pauses_rms(move |pcm, out| hybrid.encode(pcm, n, out).unwrap());
+        let wide = pauses_rms(ours(MaxBandwidth::Wideband));
+        assert!(hissing > 2.0 * wide, "hybrid pauses at rms {hissing}, wideband at {wide} — fixed upstream?");
+    }
+
     #[test]
     fn dtx_makes_silence_cheap() {
         let mut enc = Encoder::new(Settings::default(), RATE, 1).expect("encoder");

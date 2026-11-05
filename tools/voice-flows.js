@@ -13,7 +13,7 @@
 const { chromium } = require('./node_modules/playwright-core');
 
 const CHROME = process.env.CHROME ||
-  '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
+  process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
 const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';
@@ -231,7 +231,10 @@ const peakOver = async (pages, ms) => {
   const mine = await call('voice_ticket', [porch.id], anaJar);
   check('a member gets a ticket for their room', !!mine.body.Ok, JSON.stringify(mine.body));
   check('and it names this room', mine.body.Ok && mine.body.Ok.room === porch.id);
-  check('and points at this origin', mine.body.Ok && mine.body.Ok.relay === '/_voice');
+  // The call relay this server runs, and a call-auth grant for this room and
+  // this person — the relay checks it itself.
+  check('and points at a call relay', mine.body.Ok && /^https:\/\//.test(mine.body.Ok.relay), JSON.stringify(mine.body.Ok));
+  check('with a grant for this room', mine.body.Ok && mine.body.Ok.token.startsWith(`g1.${porch.id}.`), mine.body.Ok && mine.body.Ok.token);
 
   const strangerSpace = (await call('create_space', ['vault', 'The Vault'], theoJar)).body.Ok;
   const secretRoom = strangerSpace.channels.find(c => c.name === 'The Porch');
@@ -251,8 +254,9 @@ const peakOver = async (pages, ms) => {
     // console; without this a fallback is a one-word verdict with no cause.
     p.on('console', m => {
       const t = m.text();
-      if (t.includes('[voice] transport')) console.log(`        ${handle}: ${t}`);
+      if (/\[(voice|call-[a-z]+)\]/.test(t) || m.type() === 'error') console.log(`        ${handle}: ${t}`);
     });
+    p.on('pageerror', e => console.log(`        ${handle} page error: ${e.message}`));
     // Suppression OFF for this suite, pinned before the app boots.
     //
     // Not a workaround — the fixture and the feature are incompatible by

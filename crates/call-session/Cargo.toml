@@ -1,0 +1,24 @@
+[package]
+name = "call-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A call over one link to a call-relay: dialling, routing datagrams to call-audio and call-video, grants and their renewal, round trips, and who is in the room."
+
+[dependencies]
+call-proto = { workspace = true }
+call-audio = { workspace = true }
+call-video = { workspace = true }
+call-e2ee = { workspace = true }
+call-rate = { workspace = true }
+
+# The session is web-only, like the media under it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+runtime-core = { workspace = true, features = ["async-driver"] }
+datagram = { workspace = true }
+# For fetching a fresh grant from a renew URL.
+net = { workspace = true }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location", "console", "Crypto"] }

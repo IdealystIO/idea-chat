@@ -366,7 +366,20 @@ fn tray(app: App) -> Element {
     // room — see that you are connected, open the call, leave — is here, so
     // that joining never has to take over the main column.
     let strip: Vec<Element> = if in_voice.is_empty() {
-        Vec::new()
+        // Out of a call that ended without being asked to — removed by a
+        // moderator, the connection lost, a join that failed — the reason
+        // stays here until it is tapped away, rather than vanishing with the
+        // strip that would have shown it.
+        let trouble = app.voice_error.get();
+        if trouble.is_empty() {
+            Vec::new()
+        } else {
+            vec![press(
+                vec![ui! { Strong(label = trouble, kind = typography_kind::Overline) }],
+                || StyleApplication::new(styles::VoiceStrip::sheet()),
+                move || app.voice_error.set(String::new()),
+            )]
+        }
     } else {
         let room_name = app.voice_room_name();
         let open_room = in_voice.clone();

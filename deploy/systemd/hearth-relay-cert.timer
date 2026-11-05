@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep Hearth's call relay on the site's current certificate
+
+[Timer]
+# Caddy renews a month before expiry; daily is far inside that.
+OnBootSec=2min
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "idealyst": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@idealyst/mcp-server"
+      ],
+      "env": {}
+    }
+  }
+}

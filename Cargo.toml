@@ -19,8 +19,27 @@ members = [
     "crates/voice-coord",
     "crates/voice-server",
     "crates/voice-client",
-    "crates/hearth",
+    # Hearth is out of the build: it predates idealyst 4 / idea-ui 13 and
+    # Idea Chat replaces it. The source stays in crates/hearth.
+    # "crates/hearth",
     "crates/hearth-db",
+    "crates/call-proto",
+    "crates/call-auth",
+    "crates/call-relay",
+    "crates/av-sync",
+    "crates/call-audio",
+    "crates/call-video",
+    "crates/call-session",
+    "crates/call-e2ee",
+    "crates/call-rate",
+    "crates/quic-call",
+    # Idea Chat: the app (see crates/chat/README.md).
+    "crates/chat-model",
+    "crates/chat-keys",
+    "crates/chat-db",
+    "crates/chat-api",
+    "crates/chat",
+    "crates/chat-server",
 ]
 
 [workspace.package]
@@ -39,21 +58,61 @@ voice-auth  = { path = "crates/voice-auth" }
 idea-state  = { path = "crates/idea-state" }
 voice-coord = { path = "crates/voice-coord" }
 hearth-db   = { path = "crates/hearth-db" }
+call-proto  = { path = "crates/call-proto" }
+call-auth   = { path = "crates/call-auth" }
+av-sync     = { path = "crates/av-sync" }
+call-audio  = { path = "crates/call-audio", default-features = false }
+call-video  = { path = "crates/call-video" }
+call-session = { path = "crates/call-session" }
+call-e2ee   = { path = "crates/call-e2ee" }
+call-rate   = { path = "crates/call-rate" }
+chat-model  = { path = "crates/chat-model" }
+chat-keys   = { path = "crates/chat-keys" }
+chat-db     = { path = "crates/chat-db" }
+chat-api    = { path = "crates/chat-api" }
 
-# Framework, by path. idea-chat is not part of the idealyst-native workspace;
-# cargo resolves each crate's own `workspace = true` inheritance from ITS root.
-idealyst           = { path = "../idealyst-native/crates/idealyst" }
-runtime-core       = { path = "../idealyst-native/crates/runtime/core" }
-runtime-vocabulary = { path = "../idealyst-native/crates/runtime/vocabulary" }
-runtime-scene      = { path = "../idealyst-native/crates/runtime/scene" }
-idea-ui            = { path = "../idealyst-native/crates/ui/idea-ui" }
-idea-ui-nav        = { path = "../idealyst-native/crates/ui/idea-ui-nav" }
-icons-lucide       = { path = "../idealyst-native/crates/ui/icons-lucide" }
-microphone         = { path = "../idealyst-native/crates/sdk/client/microphone" }
-media-stream       = { path = "../idealyst-native/crates/sdk/client/media-stream" }
+# Framework, from the idealyst registry (crates.idealyst.io).
+idealyst           = { version = "4.0.0", registry = "idealyst" }
+runtime-core       = { version = "3.2.0", registry = "idealyst" }
+runtime-vocabulary = { version = "4.1.0", registry = "idealyst" }
+runtime-scene      = { version = "1.11.0", registry = "idealyst" }
+idea-ui            = { version = "13.0.0", registry = "idealyst" }
+idea-ui-nav        = { version = "10.0.0", registry = "idealyst" }
+icons-lucide       = { version = "3.0.0", registry = "idealyst" }
+microphone         = { version = "3.0.1", registry = "idealyst" }
+server             = { version = "3.0.0", registry = "idealyst" }
+server-kit         = { version = "3.0.0", registry = "idealyst" }
+cache              = { version = "3.0.0", registry = "idealyst" }
+credentials        = { version = "1.5.3", registry = "idealyst" }
+net                = { version = "1.7.3", registry = "idealyst" }
+storage            = { version = "3.0.0", registry = "idealyst" }
+email              = { version = "3.0.0", registry = "idealyst", default-features = false }
+pubsub             = { version = "3.0.0", registry = "idealyst", default-features = false }
+swap-navigator     = { version = "3.0.0", registry = "idealyst" }
+deep-link          = { version = "4.0.0", registry = "idealyst" }
+file-picker        = { version = "3.0.1", registry = "idealyst" }
+clipboard          = { version = "3.0.0", registry = "idealyst" }
+idea-ui-mail       = { version = "3.0.0", registry = "idealyst" }
+# denoise is not yet published to the registry, so it stays by path — and a
+# path crate resolves its `workspace = true` deps from idealyst-native's root,
+# which are paths too. media-stream must be a path dep so denoise sees the same
+# copy. The [patch] section below redirects registry crates' transitive copies
+# to these paths too, giving the whole graph exactly one instance of each.
 denoise            = { path = "../idealyst-native/crates/sdk/client/denoise" }
-net                = { path = "../idealyst-native/crates/sdk/client/net" }
-server             = { path = "../idealyst-native/crates/api/server" }
-server-kit         = { path = "../idealyst-native/crates/api/server-kit" }
-cache              = { path = "../idealyst-native/crates/sdk/server/cache" }
-credentials        = { path = "../idealyst-native/crates/sdk/client/credentials" }
+media-stream       = { path = "../idealyst-native/crates/sdk/client/media-stream" }
+
+# Redirect registry crates to the local paths that denoise drags in, so that
+# every crate — path-based or registry-based — resolves to a single copy.
+#
+# web-glue is not optional. The path media-stream pulls web-glue by path, the
+# registry crates pull the published one, and both copies export the same
+# `#[no_mangle]` glue entry points (`__glue_invoke`, `__glue_err_slot`, ...).
+# `cargo check` cannot see that; only the wasm link does, as rust-lld
+# "duplicate symbol" errors from `idealyst build --web`.
+#
+# runtime-tls likewise: the path media-stream pulls it by path, everything else
+# from the registry, and two copies means two sets of thread-locals.
+[patch."sparse+https://crates.idealyst.io/index/"]
+media-stream = { path = "../idealyst-native/crates/sdk/client/media-stream" }
+web-glue     = { path = "../idealyst-native/crates/runtime/web-glue" }
+runtime-tls  = { path = "../idealyst-native/crates/runtime/tls" }

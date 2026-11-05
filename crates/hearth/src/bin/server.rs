@@ -110,26 +110,12 @@ async fn main() {
         eprintln!("hearth: {} does not exist — run `idealyst build --web` first.", web_dir.display());
     }
 
-    // Voice, on this origin. A browser on an https page may only open wss, and
-    // the session cookie is scoped to this host — pointing people at a second
-    // origin for audio means a second certificate and a second set of rules to
-    // get wrong. The relay fleet still runs as its own processes; this is only
-    // the door.
-    let voice: Option<Router> = match std::env::var("VOICE_DIRECTOR_URL") {
-        Ok(url) if !url.is_empty() => {
-            if srv::voice_secret().is_none() {
-                eprintln!("hearth: VOICE_DIRECTOR_URL is set but VOICE_SHARED_SECRET is not.");
-                eprintln!("        Voice stays OFF: without the secret this server cannot mint");
-                eprintln!("        the tickets the relays check, and a relay that is not");
-                eprintln!("        checking them admits anyone who can guess a channel id.");
-                None
-            } else {
-                println!("hearth: voice enabled — relays via {url}");
-                Some(voice_server::gateway::voice_routes(url))
-            }
-        }
-        _ => None,
-    };
+    // Voice: a call-relay, in this process, on its own UDP port. Clients get
+    // a grant from `voice_ticket` and dial it over WebTransport; moderators'
+    // removals apply to it directly through its handle. Off without the
+    // secret: a relay that is not checking grants admits anyone who can guess
+    // a channel id.
+    start_call_relay();
 
     // The noise-suppression model, served from its own directory rather than
     // from `dist/web`, because `idealyst build` owns that one and an 8 MB file
@@ -150,7 +136,7 @@ async fn main() {
         String::new()
     });
 
-    let mut app: Router = server::router()
+    let app: Router = server::router()
         // A route, not another layer of `ServeDir` fallback. Chaining them
         // through `not_found_service` serves the right bytes with the OUTER
         // service's 404 still attached — a response that is correct and
@@ -185,10 +171,6 @@ async fn main() {
                 })),
         );
 
-    if let Some(voice) = voice {
-        app = app.merge(voice);
-    }
-
     println!("Hearth is running.");
     println!("  UI  → http://{bind}/");
     println!("  API → http://{bind}/_srv/<fn>");
@@ -211,4 +193,78 @@ async fn main() {
 
 fn redis_client(url: &str) -> redis::Client {
     redis::Client::open(url).expect("REDIS_URL must be a valid redis:// URL")
+}
+
+/// Start the call relay, if voice is configured.
+///
+/// - `CALL_RELAY_BIND`: where to listen (UDP), default `0.0.0.0:8798`.
+/// - `CALL_RELAY_HOST`: the name browsers dial, default `127.0.0.1` — not
+///   `localhost`, which a browser may resolve to `::1` first and find nothing
+///   listening (the bind below is IPv4).
+/// - `CALL_RELAY_CERT` / `CALL_RELAY_KEY`: a CA-issued chain and key (PEM), for
+///   production. Without them the relay makes a self-signed certificate whose
+///   hash `voice_ticket` hands out for pinning — which browsers accept for
+///   about two weeks, so that is for development, or a restart at least that
+///   often.
+fn start_call_relay() {
+    let Some(secret) = srv::voice_secret() else {
+        eprintln!("hearth: VOICE_SHARED_SECRET unset — voice is off.");
+        return;
+    };
+    let bind = std::env::var("CALL_RELAY_BIND").unwrap_or_else(|_| "0.0.0.0:8798".into());
+    let host = std::env::var("CALL_RELAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    // The CA certificate when it is there and readable; otherwise — first boot,
+    // before the TLS proxy has one — a self-signed one, said out loud.
+    let ca = match (std::env::var("CALL_RELAY_CERT"), std::env::var("CALL_RELAY_KEY")) {
+        (Ok(cert), Ok(key)) => match (std::fs::read(&cert), std::fs::read(&key)) {
+            (Ok(c), Ok(k)) => match datagram::Identity::from_pem(&c, &k) {
+                Ok(identity) => Some(identity),
+                Err(e) => {
+                    eprintln!("hearth: {cert}: {e} — the call relay falls back to a self-signed certificate.");
+                    None
+                }
+            },
+            _ => {
+                eprintln!("hearth: cannot read {cert} / {key} — the call relay falls back to a self-signed certificate.");
+                None
+            }
+        },
+        _ => None,
+    };
+    let pinned = ca.is_none();
+    let identity = match ca {
+        Some(identity) => identity,
+        None => datagram::Identity::self_signed(&[host.as_str(), "localhost", "127.0.0.1"]).expect("certificate"),
+    };
+    let addr: std::net::SocketAddr = bind.parse().expect("CALL_RELAY_BIND must be host:port");
+    let listener = match datagram::Listener::bind(addr, &identity) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("hearth: could not bind the call relay on {addr}: {e} — voice is off.");
+            return;
+        }
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(addr.port());
+    let config = call_relay::Config {
+        auth: Some(call_relay::Auth {
+            secret,
+            // Renewal refreshes a grant well inside this; it bounds how long a
+            // revocation must be remembered.
+            max_ttl: std::time::Duration::from_millis(srv::GRANT_TTL_MS * 2),
+        }),
+        grace: std::time::Duration::from_secs(15),
+        // Holding back video from members whose download cannot take it all:
+        // steadier calls for them, a header read per datagram per member for
+        // the server. Off unless asked for.
+        throttle: matches!(std::env::var("CALL_RELAY_THROTTLE").as_deref(), Ok("on" | "1" | "true")),
+        ..Default::default()
+    };
+    let handle = call_relay::spawn(listener, config);
+    let url = format!("https://{host}:{port}/");
+    println!("hearth: voice on — call relay at {url}{}", if pinned { " (self-signed)" } else { "" });
+    srv::install_call_relay(srv::CallRelay {
+        handle,
+        url,
+        cert_hash: if pinned { identity.hash_hex() } else { String::new() },
+    });
 }

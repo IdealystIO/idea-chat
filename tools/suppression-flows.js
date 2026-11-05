@@ -17,14 +17,17 @@
 const { chromium } = require('./node_modules/playwright-core');
 
 const CHROME = process.env.CHROME ||
-  '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
+  process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
 const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';
 // What the node was started with. The refusal path is a real, supported
 // outcome, so the suite asserts against whichever one is actually running
 // rather than demanding the permissive one.
-const NODE_ALLOWS = process.env.NODE_ALLOWS !== '0';
+// The call relay forwards audio without decoding it, so it never runs
+// suppression: a server request is always refused. `NODE_ALLOWS=1` was for the
+// old voice-node.
+const NODE_ALLOWS = process.env.NODE_ALLOWS === '1';
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail) => {
@@ -103,7 +106,7 @@ const clickRoom = async (p, label) => {
 /// semantics would get wrong while reporting it as a missing feature. So the
 /// row is "the smallest box that contains both the row's name and something
 /// whose text is exactly this option".
-const pickInRow = async (p, rowName, option) => {
+const pickInRow = async (p, rowName, option, { dryRun = false } = {}) => {
   const at = await p.evaluate(({ rowName, option }) => {
     const exactly = (el, s) => (el.innerText || '').trim() === s;
     const rows = [...document.querySelectorAll('div')]
@@ -129,6 +132,7 @@ const pickInRow = async (p, rowName, option) => {
     const r = el.getBoundingClientRect();
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
   }, { rowName, option });
+  if (dryRun) return !!at;
   if (at) await p.mouse.click(at.x, at.y);
   return !!at;
 };
@@ -278,8 +282,7 @@ const peakOver = async (pages, ms) => {
   await a.mouse.click(35, 872);
   await a.waitForTimeout(1200);
   check('settings offer noise suppression', await has(a, 'Noise suppression'));
-  check('and say what each choice costs',
-    (await has(a, '8 MB download')) && (await has(a, 'the noise still travels')));
+  check('and say what it costs', await has(a, '8 MB download'));
 
   /// Choose a suppression mode in one tab, and confirm the page agrees.
   const setMode = async (p, option) => {
@@ -372,23 +375,11 @@ const peakOver = async (pages, ms) => {
     neuralChecks('on-device', sa, st);
   }
 
-  // --- on the server: the node decides, and says so ---
-  {
-    const [sa, st] = await callWith('Server');
-    console.log(`        server ana: ${JSON.stringify(sa)}`);
-    const expected = NODE_ALLOWS ? 'server' : 'off';
-    check(`on-server — the node answers "${expected}"`, sa.suppress === expected,
-      `${JSON.stringify(sa)} (node ${NODE_ALLOWS ? 'permits' : 'refuses'} server-side)`);
-    if (NODE_ALLOWS) {
-      neuralChecks('on-server', sa, st);
-    } else {
-      // Refused: this is an ordinary relay, so the tone must come through
-      // exactly as it did with the feature off. A refusal that also broke the
-      // audio would be a worse bug than the one the gate exists to prevent.
-      check('on-server — a refused request still carries the call',
-        Math.max(sa.remote, st.remote) > 0, JSON.stringify([sa, st]));
-    }
-  }
+  // --- no "on the server" ---
+  // The call relay forwards audio without decoding it, so there is nowhere
+  // server-side for a model to run, and the setting must not offer one.
+  check('settings do not offer suppression on the server',
+    !(await pickInRow(a, 'Noise suppression', 'Server', { dryRun: true })), 'a "Server" option is still offered');
 
   // --- changing your mind without hanging up ---
   //

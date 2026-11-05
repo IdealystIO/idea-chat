@@ -592,6 +592,18 @@ pub fn delete_message(app: App, id: &str) {
     });
 }
 
+/// Take someone out of a voice room, as a moderator. The server revokes
+/// their grant at the relay — their call ends at once — and takes them out
+/// of the room's presence, which everyone sees through the live socket.
+pub fn remove_from_call(app: App, channel_id: &str, user_id: &str) {
+    let (channel, user) = (channel_id.to_string(), user_id.to_string());
+    spawn_async(async move {
+        if let Err(e) = api::voice_remove(channel, user).await {
+            app.notice.set(message(e));
+        }
+    });
+}
+
 // ===========================================================================
 // Spaces and invites
 // ===========================================================================

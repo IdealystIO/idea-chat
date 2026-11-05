@@ -1,0 +1,36 @@
+[package]
+name = "chat-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Idea Chat's server: the API and live connections, the call relay, the web app's files, and the emails — one process, configured from the environment."
+
+[[bin]]
+name = "chat-server"
+path = "src/main.rs"
+
+[dependencies]
+chat-api = { workspace = true, features = ["server"] }
+chat-db = { workspace = true }
+chat-model = { workspace = true }
+call-relay = { path = "../call-relay" }
+datagram = { workspace = true }
+server = { workspace = true, features = ["server"] }
+server-kit = { workspace = true, features = ["server", "redis"] }
+cache = { workspace = true, features = ["redis"] }
+pubsub = { workspace = true, features = ["redis", "memory"] }
+email = { workspace = true, features = ["ses"] }
+# Email templates are idealyst components, rendered to inline-styled HTML.
+runtime-core = { workspace = true }
+runtime-vocabulary = { workspace = true }
+idea-ui-mail = { workspace = true }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "set-header"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+rand = "0.8"
+base64 = "0.22"

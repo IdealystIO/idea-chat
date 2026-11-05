@@ -410,20 +410,53 @@ pub async fn voice_ticket(
     let channel = srv::parse_id(&channel_id)?;
     srv::require_channel_access(&db.0, channel, me).await?;
 
-    let Some(secret) = srv::voice_secret() else {
+    let (Some(secret), Some(relay)) = (srv::voice_secret(), srv::call_relay()) else {
         return Err(ServerError::failed("voice is not configured on this instance"));
     };
-
+    let user = me.to_string();
     Ok(VoiceTicket {
-        relay: srv::voice_relay(),
+        relay: relay.url.clone(),
+        cert_hash: relay.cert_hash.clone(),
         room: channel_id.clone(),
-        // Derived from the user id rather than random, so reconnecting keeps
-        // the same wire identity — the relay suppresses your own frames by it,
-        // and a new number each time would make a stale connection audible to
-        // you as an echo of yourself.
-        participant: srv::participant_number(me),
-        token: voice_auth::mint(&secret, &channel_id, &me.to_string(), srv::now_secs()),
+        token: call_auth::Grant::mint(&secret, &channel_id, &user, call_auth::Send::ALL, srv::now_ms(), srv::GRANT_TTL_MS),
+        user,
     })
+}
+
+/// Take someone out of a voice room, now: a moderator's kick.
+///
+/// Signs a call-auth revocation for them in this room and applies it to the
+/// relay this process runs, so their connection is closed at once and the
+/// grants they hold stop working; and takes them out of the room's presence.
+/// They may come back by joining again — this is a kick, not a ban; removing
+/// them from the space is what stops the next ticket.
+#[server(tags(limit = "30/min"))]
+pub async fn voice_remove(
+    channel_id: String,
+    user_id: String,
+    #[cfg(feature = "server")] who: server_kit::Auth<Principal>,
+    #[cfg(feature = "server")] db: server::State<srv::AppDb>,
+    #[cfg(feature = "server")] hub: server::State<srv::LiveHub>,
+) -> Result<(), ServerError> {
+    let me = srv::parse_id(&who.0.user_id)?;
+    let channel = srv::parse_id(&channel_id)?;
+    let target = srv::parse_id(&user_id)?;
+    srv::require_channel_access(&db.0, channel, me).await?;
+    if !srv::moderates_channel(&db.0, channel, me).await {
+        return Err(ServerError::failed("only moderators can remove someone from a call"));
+    }
+    let (Some(secret), Some(relay)) = (srv::voice_secret(), srv::call_relay()) else {
+        return Err(ServerError::failed("voice is not configured on this instance"));
+    };
+    let token = call_auth::Revocation::mint(
+        &secret,
+        Some(&channel_id),
+        &target.to_string(),
+        call_auth::Action::Kick,
+        srv::now_ms(),
+    );
+    relay.handle.revoke(&token).await.map_err(|e| ServerError::failed(format!("could not remove them: {e}")))?;
+    socket::leave(&db.0, &hub.0, target, &channel_id).await
 }
 
 #[server]

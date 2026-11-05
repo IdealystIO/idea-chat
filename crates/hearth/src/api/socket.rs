@@ -10,6 +10,7 @@
 //! happened by the time it is on the wire.
 
 use idea_state::{Down, Up};
+#[cfg(feature = "server")]
 use server::{Socket, ServerError};
 
 use crate::live::{Action, Event, State};
@@ -347,7 +348,7 @@ async fn act(
 
 /// Take someone out of a room and say so.
 #[cfg(feature = "server")]
-async fn leave(
+pub(crate) async fn leave(
     db: &hearth_db::Db,
     hub: &srv::LiveHub,
     user: uuid::Uuid,

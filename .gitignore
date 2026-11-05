@@ -7,3 +7,4 @@ dist/
 # that already exist in every contributor’s cargo checkout — committing them
 # would put the same bytes in the repo for no gain.
 crates/hearth/assets/
+crates/quic-call/assets/

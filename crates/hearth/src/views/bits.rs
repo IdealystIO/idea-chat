@@ -15,7 +15,7 @@
 //! braced `{ expr }` sibling immediately after a childless component tag is
 //! taken as that component's children block.
 
-use idea_ui::{typography_kind, Avatar, AvatarColor, AvatarSize, Typography, TypographyKindRef};
+use idea_ui::{tone, typography_kind, Avatar, AvatarSize, ToneRef, Typography, TypographyKindRef};
 use runtime_core::{component, icon, pressable, text, ui, Element, IconData, StyleApplication};
 use std::rc::Rc;
 
@@ -26,14 +26,14 @@ use crate::styles;
 ///
 /// Keyed on a person's **id**, so renaming yourself does not recolour every
 /// message you have ever sent.
-pub fn avatar_color(id: &str) -> AvatarColor {
+pub fn avatar_color(id: &str) -> ToneRef {
     match tone_index(id) {
-        0 => AvatarColor::Primary,
-        1 => AvatarColor::Info,
-        2 => AvatarColor::Warning,
-        3 => AvatarColor::Success,
-        4 => AvatarColor::Danger,
-        _ => AvatarColor::Neutral,
+        0 => tone::Primary.into(),
+        1 => tone::Info.into(),
+        2 => tone::Warning.into(),
+        3 => tone::Success.into(),
+        4 => tone::Danger.into(),
+        _ => tone::Neutral.into(),
     }
 }
 
@@ -53,7 +53,7 @@ pub fn Face(
     ui! {
         Avatar(
             initials = initials(&name),
-            color = avatar_color(&id),
+            tone = avatar_color(&id),
             size = size,
         )
     }

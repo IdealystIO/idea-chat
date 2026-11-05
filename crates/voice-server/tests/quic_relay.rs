@@ -147,14 +147,17 @@ async fn a_call_crosses_a_room_over_webtransport() {
     );
     assert_eq!(ana_heard_itself, 0, "a talker must not hear their own voice back");
 
-    // Aligned at the start: Opus adds no algorithmic delay of its own at these
-    // settings, and the buffer is fed in order.
+    // The buffer is fed in order, so the only offset is the codec's own
+    // lookahead — 2.5 ms for fullband CELT — and the best correlation over a
+    // few ms of lag is the one that measures the transport.
     let n = heard.len().min(said.len());
     // The first few frames are the encoder warming up; correlating them
     // measures that rather than the transport.
     let from = FRAME * 4;
     assert!(n > from + FRAME * 4, "not enough audio arrived to judge: {n} samples");
-    let corr = correlation(&said[from..n], &heard[from..n]);
+    let corr = (0..=RATE as usize / 200)
+        .map(|lag| correlation(&said[from..n - lag], &heard[from + lag..n]))
+        .fold(f32::MIN, f32::max);
     assert!(
         corr > 0.6,
         "what theo heard should resemble what ana said, correlation {corr}",

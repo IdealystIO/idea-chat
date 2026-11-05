@@ -1045,6 +1045,21 @@ stylesheet! {
     }
 }
 
+// The name plate when it sits over video: on a pill of its own, so it reads
+// on any picture.
+stylesheet! {
+    pub TilePlate<IdeaThemeRef> {
+        base(t) {
+            padding_left: 8.0,
+            padding_right: 8.0,
+            padding_top: 2.0,
+            padding_bottom: 2.0,
+            border_radius: t.radius.sm(),
+            background: t.color.surface(),
+        }
+    }
+}
+
 // The "invite someone" tile — same footprint, outlined rather than
 // filled. Dashed in the design; `StyleRules` has no `border_style`.
 stylesheet! {

@@ -17,7 +17,7 @@ default = []
 # The wasm client build never turns this on, so none of it reaches the bundle.
 server = [
     "server/server", "server-kit/server",
-    "dep:hearth-db", "dep:voice-auth", "dep:voice-server", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand", "dep:time",
+    "dep:hearth-db", "dep:call-auth", "dep:call-relay", "dep:datagram", "cache/redis", "dep:redis", "dep:axum", "dep:tokio", "dep:tower-http", "dep:rand", "dep:time",
 ]
 
 [dependencies]
@@ -32,11 +32,12 @@ credentials = { workspace = true }
 
 # --- server-only ---
 hearth-db = { workspace = true, optional = true }
-# Mints room tickets the voice relays verify. Server-only: the client is given
-# a ticket, it never makes one.
-voice-auth = { workspace = true, optional = true }
-# The `/_voice` routes, mounted on this origin. Server-only.
-voice-server = { path = "../voice-server", optional = true }
+# Voice: this server mints call-auth grants and revocations, and runs the
+# call-relay they are checked at, in-process on its own UDP port. Server-only:
+# the client is given a grant, it never makes one.
+call-auth = { workspace = true, optional = true }
+call-relay = { path = "../call-relay", optional = true }
+datagram = { workspace = true, optional = true }
 cache = { workspace = true, optional = true }
 # The Redis client is the app's to provide: `cache` and `server_kit`'s rate
 # limiter both read the one installed here, so they share a connection pool.
@@ -63,6 +64,11 @@ voice-dsp = { workspace = true }
 # the same way — see `srv::participant_number` and `voice::set_person_volume`.
 voice-proto = { workspace = true }
 icons-lucide = { workspace = true }
+# Video, for the call stage. Its pipeline is web-only; on other targets it is
+# only the scene registration, which is a no-op there.
+call-video = { workspace = true }
+# The call wire format: the stage names tracks by its numbers. Platform-free.
+call-proto = { workspace = true }
 
 [[bin]]
 name = "server"
@@ -89,11 +95,18 @@ camera     = "Hearth uses your camera when you turn it on in a room."
 # what makes a retry idempotent — so this is a real dependency, not a
 # workaround for one that leaked in from the server half.
 uuid = { version = "1", features = ["v7", "serde", "js"] }
-# Voice, on the one target that can carry it. `voice-client` owns the audio
-# path — capture out, remote PCM in, playback — and Hearth drives it rather
-# than reimplementing it. Web-only because playback on native is the missing
-# `audio-output` SDK (docs/framework-gap-analysis.md §9); the UI degrades to
-# saying so rather than pretending to connect.
+# Voice, on the one target that can carry it: the call stack — one session
+# over a call-relay (call-session), with audio and video under it. Web-only
+# because playback on native is the missing `audio-output` SDK
+# (docs/framework-gap-analysis.md §9); the UI says so rather than pretending.
+#
+# `call-audio` WITHOUT its built-in DeepFilterNet: that is several MB of wasm,
+# and Hearth installs its own from the lazily loaded suppression chunk (see
+# `views::suppressor`). `denoise` is named here for that chunk, and
+# `voice-client` only for the model fetch and the benchmark it already has.
+call-session = { workspace = true }
+call-audio = { workspace = true }
+denoise = { workspace = true }
 voice-client = { path = "../voice-client" }
 # Timers. The runtime driver can spawn a future but has nothing that waits, and
 # presence needs a heartbeat — see `voice::HEARTBEAT_MS`.

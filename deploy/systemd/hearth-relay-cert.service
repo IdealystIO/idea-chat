@@ -1,0 +1,9 @@
+[Unit]
+Description=Copy the site certificate to Hearth's call relay
+After=caddy.service
+
+[Service]
+Type=oneshot
+# Root: Caddy's certificate store is readable by Caddy alone.
+EnvironmentFile=/opt/hearth/fqdn.env
+ExecStart=/opt/hearth/bin/sync-relay-cert ${HEARTH_FQDN}

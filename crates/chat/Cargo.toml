@@ -1,0 +1,75 @@
+[package]
+name = "chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Idea Chat: the app. One idealyst tree for every target — spaces, channels, threads, direct messages, friends, and end-to-end encrypted calls."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+idealyst = { workspace = true }
+runtime-core = { workspace = true, features = ["async-driver"] }
+runtime-vocabulary = { workspace = true }
+runtime-scene = { workspace = true }
+idea-ui = { workspace = true }
+idea-ui-nav = { workspace = true }
+icons-lucide = { workspace = true }
+swap-navigator = { workspace = true }
+storage = { workspace = true }
+server = { workspace = true }
+
+chat-api = { workspace = true }
+chat-model = { workspace = true }
+chat-keys = { workspace = true }
+idea-state = { workspace = true }
+uuid = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = { version = "0.2", features = ["js"] }
+file-picker = { workspace = true }
+clipboard = { workspace = true }
+net = { workspace = true }
+# Reads an image's size from its header, for laying out attachments.
+imagesize = "0.13"
+
+# Calls run in the browser: native has no audio output or codecs yet.
+call-proto = { workspace = true }
+call-video = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+call-session = { workspace = true }
+call-audio = { workspace = true }
+call-e2ee = { workspace = true }
+call-rate = { workspace = true }
+deep-link = { workspace = true }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window", "Location", "History", "Navigator", "Document", "Performance",
+    "Url", "UrlSearchParams", "console", "Blob", "File", "Request", "RequestInit", "Response", "Headers",
+    "HtmlImageElement", "HtmlInputElement", "FileList", "Event", "EventTarget", "HtmlElement", "VisibilityState",
+    # Call cues (`sounds`), synthesised.
+    "AudioContext", "AudioContextState", "BaseAudioContext", "AudioNode", "AudioParam", "AudioDestinationNode",
+    "AudioScheduledSourceNode", "GainNode", "OscillatorNode", "OscillatorType", "BiquadFilterNode", "BiquadFilterType",
+] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+credentials = { workspace = true }
+
+# Linux (GTK) runs async work on GLib's main loop: see `linux_executor`.
+[target.'cfg(all(target_os = "linux", not(target_arch = "wasm32")))'.dependencies]
+glib = "0.20"
+pollster = "0.4"
+
+[package.metadata.idealyst.app]
+name      = "Idea Chat"
+bundle_id = "dev.ideachat.app"
+version   = "0.1.0"
+targets   = ["web", "macos", "ios", "android"]
+
+[package.metadata.idealyst.app.permissions]
+microphone = "Idea Chat sends your microphone to the people in your call, end-to-end encrypted."
+camera = "Idea Chat sends your camera to the people in your call when you turn it on, end-to-end encrypted."

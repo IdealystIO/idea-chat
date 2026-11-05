@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 mod fader;
+mod hum;
 mod level;
 mod meter;
 mod residual;
@@ -51,9 +52,15 @@ mod transient;
 mod verdict;
 
 pub use fader::{taper, Fader, MAX_GAIN};
+pub use hum::{Dehum, Hum, Mains};
 pub use meter::{hold_peak, FALL_SECS};
 pub use level::{Leveler, Leveling};
 pub use residual::{Expander, Residual};
+/// How far each stage delays the signal, for anyone who has to account for
+/// where a sample ends up in time — lip sync, for one. Both run their delay
+/// line whether or not they are changing anything.
+pub use residual::LOOKAHEAD_MS as EXPANDER_LOOKAHEAD_MS;
+pub use transient::LOOKAHEAD_MS as DECLICKER_LOOKAHEAD_MS;
 pub use transient::{Declicker, Transients};
 pub use verdict::{model_gain_db, rms, Alignment, Meter, MODEL_HOPS};
 

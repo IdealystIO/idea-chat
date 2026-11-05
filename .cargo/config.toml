@@ -1,3 +1,6 @@
+[registries.idealyst]
+index = "sparse+https://crates.idealyst.io/index/"
+
 # WebTransport, for the wasm build only.
 #
 # `web-sys` gates its WebTransport bindings behind `--cfg=web_sys_unstable_apis`
@@ -9,8 +12,14 @@
 # changes the fingerprint of every host unit too — one `cargo test` would
 # rebuild the world.
 #
-# Note this file reaches `idealyst build --web` only from CLI 1.3.16 onward.
-# Before that the web builder set `CARGO_ENCODED_RUSTFLAGS`, which makes cargo
-# skip its config lookup entirely, and the flag was silently dropped.
+# This file does NOT reach `idealyst build --web` (CLI 1.5.2). The web builder
+# sets `CARGO_ENCODED_RUSTFLAGS` (for `+simd128` and its link args), which makes
+# cargo skip this lookup entirely. It does fold in `RUSTFLAGS`, so every script
+# that runs the web build passes the flag that way too — tools/check-all.sh and
+# deploy/ship.sh. Running it by hand:
+#
+#   RUSTFLAGS=--cfg=web_sys_unstable_apis idealyst build --web
+#
+# This section still serves plain `cargo check/build --target wasm32-...`.
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=web_sys_unstable_apis"]

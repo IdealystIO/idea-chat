@@ -189,16 +189,19 @@ pub struct Bootstrap {
 /// this room?" — in a form the relay can check by itself. See `voice_auth`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceTicket {
-    /// Where to reach the fleet. Same-origin under `/_voice` so the session
-    /// cookie's rules and the page's TLS both carry over unchanged.
+    /// The call relay to dial: `https://host:port/`, WebTransport.
     pub relay: String,
+    /// The relay's certificate hash (hex) when it is self-signed and must be
+    /// pinned; empty for a CA certificate, which the browser checks itself.
+    pub cert_hash: String,
     /// The room name: the channel's id, so a room is exactly a channel.
     pub room: String,
-    /// This connection's number on the wire. Not the user id — the transport
-    /// wants something small, and the user is named inside the ticket.
-    pub participant: u32,
-    /// The signed ticket, presented on connect.
+    /// A call-auth grant for this user in this room, presented on connect
+    /// and renewed by asking for another ticket.
     pub token: String,
+    /// Who the grant names — our account id — so the client knows itself in
+    /// the relay's roster.
+    pub user: String,
 }
 
 /// Who is in one voice room, right now.

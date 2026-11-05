@@ -24,7 +24,7 @@ const { chromium } = require('./node_modules/playwright-core');
 const path = require('path');
 
 const CHROME = process.env.CHROME ||
-  '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
+  process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
 const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';

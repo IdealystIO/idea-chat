@@ -14,6 +14,11 @@ services:
       # container rebuilds.
       - cargo-registry:/usr/local/cargo/registry
       - target-cache:/workspaces/idea-chat/target
+      # Home-directory state that would otherwise die with the container:
+      # Claude Code's sessions, memory and login, and the AWS CLI's
+      # credentials/config (terraform reads the same files).
+      - claude-config:/home/vscode/.claude
+      - aws-config:/home/vscode/.aws
     command: sleep infinity
     networks: [devnet]
     environment:
@@ -21,6 +26,10 @@ services:
       POSTGRES_URL: postgres://postgres:dev@postgres:5432/voice
       REDIS_URL: redis://redis:6379
       COORD_BACKEND: postgres
+      # Claude Code keeps `.claude.json` (settings, onboarding, project
+      # history) beside `~/.claude`, not inside it. Pointing the config dir at
+      # the volume pulls that file in too, so a single mount covers everything.
+      CLAUDE_CONFIG_DIR: /home/vscode/.claude
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,3 +90,5 @@ networks:
 volumes:
   cargo-registry:
   target-cache:
+  claude-config:
+  aws-config:

@@ -65,6 +65,11 @@ pub struct Leveling {
     /// because the receiver resamples and a resampler's interpolation can
     /// overshoot a sample that was exactly at full scale.
     pub ceiling_dbfs: f32,
+    /// How far above the tracked noise floor the signal must be to count as
+    /// speech, in dB. `0.0` disables the floor and leaves only
+    /// [`gate_dbfs`](Self::gate_dbfs). See [`Leveler`] on why the absolute
+    /// gate alone is not enough.
+    pub floor_margin_db: f32,
 }
 
 impl Default for Leveling {
@@ -75,7 +80,10 @@ impl Default for Leveling {
             target_dbfs: -20.0,
             // +18 dB rescues a laptop mic across a desk. Beyond that a
             // suppressor's residue starts arriving with the voice.
-            max_gain_db: 18.0,
+            // +12 dB, down from 18: a boost is applied to whatever the
+            // suppressor left in as well as to the voice, and 18 dB of it made
+            // a room's residue clearly louder than it went in.
+            max_gain_db: 12.0,
             min_gain_db: -12.0,
             attack_ms: 15.0,
             release_ms: 400.0,
@@ -83,12 +91,30 @@ impl Default for Leveling {
             // a suppressed noise floor.
             gate_dbfs: -55.0,
             ceiling_dbfs: -1.0,
+            floor_margin_db: 12.0,
         }
     }
 }
 
 /// One speaker's levelling state. Not `Copy`: the whole point is that it
 /// remembers, so a per-stream instance is the unit.
+///
+/// # The gate follows the room
+///
+/// An absolute gate assumes the pauses are near digital silence, which is true
+/// after a perfect suppressor and of nothing else. A real room left at, say,
+/// -45 dBFS by the suppressor is above a -55 dBFS gate, so the leveller reads
+/// the pauses as a quiet speaker and turns them *up* — toward the target, by
+/// as much as the maximum gain allows. Heard as a call that gets noisier
+/// between words, then a word that arrives with the gain already high and
+/// clips on the limiter. Measured in the browser on real speech in real noise:
+/// with the leveller on, the noise in the pauses came out 3–9 dB louder than
+/// without it.
+///
+/// So the gate also tracks the noise floor — the fast energy's running minimum,
+/// quick to fall and slow to rise — and nothing counts as speech unless it is
+/// [`Leveling::floor_margin_db`] above it. Noise alone, however loud, cannot
+/// move the gain.
 pub struct Leveler {
     cfg: Leveling,
     /// Smoothing coefficients, derived once for this sample rate.
@@ -104,6 +130,13 @@ pub struct Leveler {
     /// only — deciding whether anyone is speaking — because the slow envelope
     /// above cannot answer that question quickly enough to be useful.
     fast_mean_square: f32,
+    /// The noise floor, as a mean square: the fast energy's running minimum.
+    floor_mean_square: f32,
+    floor_fall_coef: f32,
+    /// Per-sample multiplier on the floor while the signal is above it: a
+    /// fixed rate in dB per second, the usual way a noise floor is tracked.
+    floor_rise: f32,
+    floor_margin: f32,
     /// Current gain, linear.
     gain: f32,
     /// Current limiter attenuation, linear, `0.0..=1.0`.
@@ -156,6 +189,16 @@ impl Leveler {
             limiter_release_coef: coefficient(120.0, rate),
             mean_square: 0.0,
             fast_mean_square: 0.0,
+            // Starts AT the absolute gate and can only climb from there. Not
+            // high: falling onto the first thing heard would make the floor
+            // the voice of whoever was already talking when the call opened.
+            floor_mean_square: gate_lin * gate_lin,
+            // Falls to a pause in ~50 ms. Rises at +6 dB/s: a real room is
+            // reached within a couple of seconds, while a voice — which dips
+            // between syllables — keeps pulling it back down to the room.
+            floor_fall_coef: coefficient(50.0, rate),
+            floor_rise: 10f32.powf(6.0 / 10.0 / rate.max(1) as f32),
+            floor_margin: if cfg.floor_margin_db > 0.0 { 10f32.powf(cfg.floor_margin_db / 10.0) } else { 0.0 },
             // Start at unity: the first frames of a call should sound like the
             // microphone, not like a gain sweep.
             gain: 1.0,
@@ -193,7 +236,16 @@ impl Leveler {
             //    running through a silence. `sqrt` of a smoothed mean square is
             //    the RMS; comparing squares keeps the gate out of the square
             //    root's way.
-            if self.fast_mean_square > self.gate_mean_square {
+            if self.fast_mean_square < self.floor_mean_square {
+                self.floor_mean_square = self.fast_mean_square
+                    + (self.floor_mean_square - self.fast_mean_square) * self.floor_fall_coef;
+            } else {
+                self.floor_mean_square = (self.floor_mean_square * self.floor_rise)
+                    .min(self.fast_mean_square)
+                    .max(self.gate_mean_square);
+            }
+            let gate = self.gate_mean_square.max(self.floor_mean_square * self.floor_margin);
+            if self.fast_mean_square > gate {
                 self.mean_square =
                     self.mean_square * self.env_coef + energy * (1.0 - self.env_coef);
                 let rms = self.mean_square.sqrt();
@@ -383,5 +435,57 @@ mod tests {
         for (a, b) in whole.iter().zip(chunked.iter()) {
             assert!((a - b).abs() < 1e-6, "{a} vs {b}");
         }
+    }
+
+    /// White-ish noise at `amplitude` RMS-ish, deterministic.
+    fn noise(seconds: f32, amplitude: f32, seed: u32) -> Vec<f32> {
+        let mut seed = seed;
+        (0..(seconds * RATE as f32) as usize)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((seed >> 9) as f32 / (1u32 << 23) as f32 * 2.0 - 1.0) * amplitude * 1.7
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_noisy_room_on_its_own_is_not_turned_up() {
+        // Room noise around -45 dBFS: above the absolute gate, and exactly
+        // what the old leveller boosted toward the target.
+        let mut l = Leveler::new(Leveling::default(), RATE);
+        let mut x = noise(4.0, 0.0056, 7);
+        l.process(&mut x);
+        assert!(l.gain_db() < 1.0, "noise alone raised the gain to {:.1} dB", l.gain_db());
+    }
+
+    #[test]
+    fn a_quiet_speaker_in_a_noisy_room_is_still_levelled() {
+        // Speech bursts at about -32 dBFS over that same room.
+        let mut l = Leveler::new(Leveling::default(), RATE);
+        let room = noise(6.0, 0.0056, 9);
+        let speech = tone(6.0, 0.035);
+        let mut x: Vec<f32> = room
+            .iter()
+            .zip(&speech)
+            .enumerate()
+            .map(|(i, (n, s))| n + if (i / (RATE as usize / 2)) % 2 == 0 { *s } else { 0.0 })
+            .collect();
+        l.process(&mut x);
+        assert!(l.gain_db() > 6.0, "a quiet speaker should be brought up, got {:.1} dB", l.gain_db());
+        assert!(l.gain_db() <= 12.0 + 1e-3);
+    }
+
+    #[test]
+    fn a_word_after_a_noisy_pause_does_not_arrive_boosted() {
+        // Talk, pause in room noise for two seconds, talk again: the gain at
+        // the second word must be what the first word earned, not what the
+        // noise in between would have asked for.
+        let mut l = Leveler::new(Leveling::default(), RATE);
+        let mut talk = tone(2.0, 0.1);
+        l.process(&mut talk);
+        let earned = l.gain_db();
+        let mut pause = noise(2.0, 0.0056, 11);
+        l.process(&mut pause);
+        assert!((l.gain_db() - earned).abs() < 1.0, "{earned:.1} dB -> {:.1} dB across the pause", l.gain_db());
     }
 }

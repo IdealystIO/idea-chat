@@ -1,0 +1,48 @@
+[package]
+name = "quic-call"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A one-room voice call straight over `datagram`: mic, Opus, QUIC datagrams, jitter buffer, speakers. No chat app."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+idealyst = { workspace = true }
+runtime-core = { workspace = true, features = ["async-driver"] }
+runtime-vocabulary = { workspace = true }
+runtime-scene = { workspace = true }
+idea-ui = { workspace = true }
+icons-lucide = { workspace = true }
+# The wire format, shared with the relay. Platform-free: the room reads its
+# track numbers.
+call-proto = { workspace = true }
+# The call's two halves. Their pipelines are web-only; their settings and
+# scene registration build everywhere.
+# With its built-in DeepFilterNet: this page has no chunk to load it from.
+call-audio = { workspace = true, features = ["neural"] }
+call-video = { workspace = true }
+call-session = { workspace = true }
+# Bitrate control's modes and reasons, for the settings and the indicator.
+call-rate = { workspace = true }
+
+# The call itself is web-only: native has no audio output yet (see `audio-io`),
+# so there is nothing for a native build to play the far end through.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location", "History", "Crypto", "Performance", "UrlSearchParams", "console"] }
+# The room's end-to-end key: generating one, and reading it from the address.
+call-e2ee = { workspace = true }
+
+[package.metadata.idealyst.app]
+name      = "quic-call"
+bundle_id = "dev.ideachat.quiccall"
+version   = "0.1.0"
+targets   = ["web"]
+
+[package.metadata.idealyst.app.permissions]
+microphone = "quic-call sends your microphone to the relay you connect to."
+camera = "quic-call sends your camera to the relay you connect to, when you turn it on."

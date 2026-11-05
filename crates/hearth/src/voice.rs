@@ -1,35 +1,49 @@
-//! The live voice session — the one piece of the app that is not a request.
+//! The live voice call — the one piece of the app that is not a request.
 //!
 //! Everything else Hearth does is a round trip: ask the server, render the
-//! answer. A call is a socket that stays open, a microphone that stays on, and
-//! a `Session` that has to outlive whatever component started it. So it lives
-//! here, in a thread-local, rather than in the reactive graph:
-//! `voice_client::session::Session` leaves the room when it is dropped, and
-//! anything owned by a component would hang up the moment that component
-//! re-rendered.
+//! answer. A call is a connection that stays open, a microphone that stays on,
+//! and a `Call` that has to outlive whatever component started it. So it lives
+//! here, in a thread-local, rather than in the reactive graph: dropping the
+//! `Call` hangs up, and anything owned by a component would hang up the moment
+//! that component re-rendered.
 //!
 //! # Getting in
 //!
 //! ```text
 //!   join_room ──▶ api::voice_ticket   channel access is checked HERE
-//!             ◀── relay, room, participant, token
-//!             ──▶ session::join(…, token)
-//!                     └─ ws /_voice/node/{n}/ws?room=…&token=…
-//!                        the relay verifies the ticket itself
+//!             ◀── relay, cert_hash, room, grant, user
+//!             ──▶ call_session::join(relay, …, grant)
+//!                     └─ WebTransport https://relay/?room=…&grant=…
+//!                        the relay checks the grant itself (call-auth)
 //! ```
 //!
 //! The client never decides whether it may enter a room; it asks, and carries
-//! the answer. That is the whole reason the ticket exists — see `voice_auth`.
+//! the answer. The grant lasts two minutes, and the session renews it at
+//! half-life by asking for another ticket — which is the server re-checking,
+//! every minute, that we may still see the channel. A moderator removing us
+//! revokes it outright (`api::voice_remove`), and the relay closes us at once.
+//!
+//! # Who is who
+//!
+//! The relay numbers connections and names each by its grant's user — our
+//! account ids — in the session's roster. Per-person volume and mute are kept
+//! by account id (`crate::volume`) and applied to whatever number that person
+//! has in this call, whenever someone arrives.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
+use call_proto::relay::FromRelay;
+use call_session::{Access, Call, Renew, Settings};
 use runtime_core::driver::spawn_async;
-use voice_client::session::{self, Capture, Session};
-use voice_client::suppress;
 
 use crate::api;
 use crate::live::Action;
 use crate::model::App;
+
+/// Where the DeepFilterNet model is served from — `/assets`, which the
+/// server maps to `crates/hearth/assets/`.
+const MODEL_PATH: &str = "/assets/DeepFilterNet3_onnx.tar.gz";
 
 /// Wait, on the one target that has voice.
 ///
@@ -42,9 +56,9 @@ async fn sleep(ms: u32) {
 
 thread_local! {
     /// The one live call. Replaced on join, cleared on leave — and dropping the
-    /// old value is what actually closes the previous socket, so switching
+    /// old value is what actually closes the previous connection, so switching
     /// rooms cannot leave two microphones publishing.
-    static LIVE: RefCell<Option<Session>> = const { RefCell::new(None) };
+    static LIVE: Rc<RefCell<Option<Call>>> = Rc::default();
 
     /// Which suppression swap is the current one.
     ///
@@ -60,17 +74,89 @@ thread_local! {
     static SWAP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+fn live() -> Rc<RefCell<Option<Call>>> {
+    LIVE.with(Rc::clone)
+}
+
+/// Run `f` against the live call, if there is one.
+pub fn with_call<R>(f: impl FnOnce(&Call) -> R) -> Option<R> {
+    live().borrow().as_ref().map(f)
+}
+
+/// What the call's audio does, from this device's settings. Client-side
+/// suppression starts OFF and is switched on by the lazy chunk once it has
+/// loaded (see [`engage`]) — the call does not wait for 15 MB of model engine.
+fn settings(app: App) -> Settings {
+    let tuning = app.tuning();
+    Settings {
+        processing: processing(voice_dsp::Mode::Off),
+        voice: call_audio::VoiceStages {
+            dehum: true,
+            declick: tuning.transients.is_some(),
+            level: tuning.leveling.is_some(),
+            expand: tuning.residual.is_some(),
+        },
+        model: model_settings(&tuning),
+        model_path: MODEL_PATH,
+        gains: gains(app, app.deafened.get()).0,
+        default_gain: gains(app, app.deafened.get()).1,
+    }
+}
+
+/// Our gain on each person this device has an opinion about, and on everyone
+/// else: master × their slider, or nothing (muted for us, or deafened).
+fn gains(app: App, deafened: bool) -> (std::collections::HashMap<String, f32>, f32) {
+    let master = if deafened { 0.0 } else { voice_dsp::taper(crate::volume::master()) };
+    let muted = app.muted.get();
+    let mut by_user: std::collections::HashMap<String, f32> = crate::volume::everyone()
+        .into_iter()
+        .map(|(user, position)| {
+            let gain = master * crate::volume::person_gain(position, muted.contains(&user));
+            (user, gain)
+        })
+        .collect();
+    for user in &muted {
+        by_user.insert(user.clone(), 0.0);
+    }
+    (by_user, master * crate::volume::person_gain(crate::volume::PERSON_DEFAULT, false))
+}
+
+fn processing(mode: voice_dsp::Mode) -> call_audio::Processing {
+    call_audio::Processing {
+        // Browser echo cancellation on: a real call is the case it exists for.
+        echo_cancellation: true,
+        // `Off` leaves the browser's own suppressor on — the ordinary
+        // video-call baseline. `Client` turns it off, because stacking it under
+        // DeepFilterNet sounds worse than either.
+        suppression: match mode {
+            voice_dsp::Mode::Client => call_audio::Suppression::Neural,
+            _ => call_audio::Suppression::Browser,
+        },
+        auto_gain_control: false,
+    }
+}
+
+fn model_settings(tuning: &voice_dsp::Tuning) -> call_audio::ModelSettings {
+    call_audio::ModelSettings {
+        max_reduction_db: tuning.atten_lim_db.unwrap_or(call_audio::UNLIMITED_DB),
+        post_filter: tuning.post_filter,
+        ..Default::default()
+    }
+}
+
 /// Join `channel_id`, asking the server for permission first.
 ///
-/// Optimistic in the UI — `in_voice` is set before the socket opens, because a
-/// room you have tapped should look joined immediately — but honest about the
-/// difference: the tray says "Connecting" until audio is actually flowing, and
-/// says what went wrong if it does not.
+/// Optimistic in the UI — `in_voice` is set before the connection opens,
+/// because a room you have tapped should look joined immediately — but honest
+/// about the difference: the tray says "Connecting" until audio is actually
+/// flowing, and says what went wrong if it does not.
 pub fn join_room(app: App, channel_id: &str) {
     let room = channel_id.to_string();
     app.in_voice.set(room.clone());
     app.voice_live.set(false);
     app.voice_error.set(String::new());
+    // A previous call goes now, not when the new one connects.
+    live().borrow_mut().take();
 
     spawn_async(async move {
         let ticket = match api::voice_ticket(room.clone()).await {
@@ -87,44 +173,47 @@ pub fn join_room(app: App, channel_id: &str) {
             }
         };
 
-        // `Processed` — browser echo cancellation on. The loopback demo wants
-        // it off, because there the signal you are listening for IS your own
-        // voice out of the speakers; a real call is the case AEC exists for.
-        //
-        // The MODE is a separate axis and decides the neural pass: it also
-        // turns the browser's own noise suppression off, because stacking the
-        // two sounds worse than either. See `voice_dsp`.
-        let mode = app.suppress.get();
-        let joined = session::join(
-            &ticket.relay,
-            &ticket.room,
-            ticket.participant,
-            Capture::Processed,
-            mode,
-            Some(&ticket.token),
-        )
+        // Renewal is another ticket: the server checks again that we may see
+        // the channel, and the relay swaps the grant in without a reconnect.
+        let renew_room = room.clone();
+        let fetch: call_session::Fetch = Rc::new(move || {
+            let room = renew_room.clone();
+            Box::pin(async move { api::voice_ticket(room).await.map(|t| t.token).map_err(crate::net::message) })
+        });
+        // No end-to-end key yet: the relay runs inside this server, so a key
+        // it handed out would protect nothing. That waits on clients agreeing
+        // keys among themselves.
+        let access = Access {
+            room: ticket.room.clone(),
+            grant: Some(ticket.token.clone()),
+            renew: Some(Renew::With(fetch)),
+            key: None,
+        };
+        let control_room = room.clone();
+        let joined = call_session::join(&ticket.relay, &ticket.cert_hash, access, settings(app), move |text| {
+            on_control(app, &control_room, &text)
+        })
         .await;
 
         // The user may have left, or moved to another room, while the
-        // microphone was being opened. Dropping the new session here is the
+        // microphone was being opened. Dropping the new call here is the
         // correct outcome — not an error to report.
         if app.in_voice.get() != room {
             return;
         }
 
         match joined {
-            Ok(session) => {
-                LIVE.with(|slot| *slot.borrow_mut() = Some(session));
+            Ok(call) => {
+                *live().borrow_mut() = Some(call);
                 app.voice_live.set(true);
                 // Only now — presence claimed at the moment of ASKING to join
                 // would show people in rooms they never reached.
                 crate::livewire::send(Action::JoinVoice { channel_id: room.clone() });
-                // After the session is in the slot: these reach into it.
-                apply_volumes(app);
-                // A session starts unmuted. Somebody who joined a room with
-                // "join muted" set, or who muted before the call connected,
+                // After the call is in the slot: these reach into it. A call
+                // starts unmuted, and somebody who muted before it connected
                 // must not be live for the first second of it.
                 apply_mic(app);
+                apply_volumes(app);
                 announce(app, room);
             }
             Err(e) => {
@@ -136,50 +225,76 @@ pub fn join_room(app: App, channel_id: &str) {
     });
 }
 
+/// What the relay says, as far as the app cares.
+fn on_control(app: App, room: &str, text: &str) {
+    match FromRelay::parse(text) {
+        FromRelay::Revoked => end(app, room, "A moderator removed you from this call."),
+        FromRelay::Expires { secs: 0 } => {
+            app.voice_error.set("Your access to this room ended — you cannot be heard.".to_string());
+        }
+        FromRelay::Refused(why) => app.voice_error.set(format!("Could not stay in the call: {why}")),
+        FromRelay::Other(t) if t == "link closed" => end(app, room, "Lost the connection to voice."),
+        _ => {}
+    }
+}
+
+/// The call ended without us asking: say why, and stand down as if we left.
+fn end(app: App, room: &str, why: &str) {
+    // Only for the call we are in; and a revocation's message outranks the
+    // close that follows it.
+    if app.in_voice.get() != room || live().borrow().is_none() {
+        return;
+    }
+    if app.voice_error.get().is_empty() {
+        app.voice_error.set(why.to_string());
+    }
+    let error = app.voice_error.get();
+    let error = if error.is_empty() { why.to_string() } else { error };
+    leave_room(app);
+    // Kept after the call is gone: the tray shows it until it is tapped away
+    // (see `views::rooms`), so an ending nobody asked for says why.
+    app.voice_error.set(error);
+}
+
+// ---------------------------------------------------------------------------
+// The microphone
+// ---------------------------------------------------------------------------
+
+/// Mute or unmute directly, for a caller that already knows the answer.
+pub fn set_muted(muted: bool) {
+    call_session::set_muted(&live(), muted);
+}
+
+/// Push the mic switch onto the live call. `Signal::set` stages, so this
+/// takes the value from the signal as committed — call it after the switch.
+pub fn apply_mic(app: App) {
+    call_session::set_muted(&live(), !app.mic.get());
+}
+
 // ---------------------------------------------------------------------------
 // Listener volume
 // ---------------------------------------------------------------------------
 
-/// Push the whole volume picture onto the live call.
-///
-/// Called after a join, because the session starts at unity and knows nothing
-/// about this device's opinions. Everything the store remembers is applied at
-/// once — including for people who are not in the room, which costs a hash map
-/// entry and means somebody who walks in twenty minutes later is already at
-/// the level they were set to rather than briefly loud.
-/// Push the mic switch onto the live call.
-///
-/// The button used to toggle a signal nothing read: it changed the label to
-/// "Muted" and the microphone kept transmitting. Called from wherever the
-/// switch is flipped, and again after a join, because a session starts
-/// unmuted and knows nothing about a decision made before it existed.
-/// Mute or unmute directly, for a caller that already knows the answer.
-pub fn set_muted(muted: bool) {
-    session::set_muted(muted);
-}
-
-pub fn apply_mic(app: App) {
-    // `Signal::set` stages, so this takes the value from the caller's own read
-    // rather than reading it back and getting the one being replaced.
-    session::set_muted(!app.mic.get());
-}
-
+/// Push the whole volume picture onto the live call — after a join, and
+/// whenever it changes wholesale (deafen). Gains are kept by account id in
+/// the session, which applies them to whatever relay numbers a person has,
+/// including ones they open later.
 pub fn apply_volumes(app: App) {
-    LIVE.with(|slot| {
-        let live = slot.borrow();
-        let Some(session) = live.as_ref() else { return };
-        session.set_volume(voice_dsp::taper(crate::volume::master()));
+    apply_volumes_deafened(app, app.deafened.get());
+}
 
-        // Two sources of a non-default gain — a stored slider position, and a
-        // mute, which is that slider at zero (see `volume::person_gain`). A
-        // muted person with no stored position has nothing under the prefix,
-        // so the mute list has to be walked separately or muting would only
-        // silence people who had also been turned down.
-        for (user_id, position) in crate::volume::everyone() {
-            set_person(session, &user_id, position, app.is_muted(&user_id));
-        }
-        for user_id in app.muted.get() {
-            set_person(session, &user_id, crate::volume::person(&user_id), true);
+/// Deafen or undeafen: everyone's audio to nothing, or back. `deafened` is
+/// passed because the caller has just set the signal, and it stages.
+pub fn set_deafened(app: App, deafened: bool) {
+    apply_volumes_deafened(app, deafened);
+}
+
+fn apply_volumes_deafened(app: App, deafened: bool) {
+    let (by_user, default) = gains(app, deafened);
+    with_call(|call| {
+        call.set_default_volume(default);
+        for (user, gain) in &by_user {
+            call.set_user_volume(user, *gain);
         }
     });
 }
@@ -190,36 +305,29 @@ pub fn apply_volumes(app: App) {
 /// caller that has just toggled mute and then asked us to read it back would
 /// apply the value it was replacing.
 pub fn refresh_person(user_id: &str, position: f32, muted: bool) {
-    LIVE.with(|slot| {
-        if let Some(session) = slot.borrow().as_ref() {
-            set_person(session, user_id, position, muted);
+    let master = voice_dsp::taper(crate::volume::master());
+    with_call(|call| call.set_user_volume(user_id, master * crate::volume::person_gain(position, muted)));
+}
+
+/// Push the master onto the live call, if there is one. `position` is the
+/// slider's, passed because the signal stages.
+pub fn refresh_master(app: App, position: f32) {
+    let master = voice_dsp::taper(position);
+    let muted = app.muted.get();
+    with_call(|call| {
+        call.set_default_volume(master * crate::volume::person_gain(crate::volume::PERSON_DEFAULT, false));
+        for (user, slider) in crate::volume::everyone() {
+            call.set_user_volume(&user, master * crate::volume::person_gain(slider, muted.contains(&user)));
+        }
+        for user in &muted {
+            call.set_user_volume(user, 0.0);
         }
     });
 }
 
-/// Push the master onto the live call, if there is one.
-pub fn refresh_master(position: f32) {
-    LIVE.with(|slot| {
-        if let Some(session) = slot.borrow().as_ref() {
-            session.set_volume(voice_dsp::taper(position));
-        }
-    });
-}
-
-/// Translate a person into a sender number and set their gain.
-///
-/// The session deals in the `u32` a packet header carries, and the app deals
-/// in account ids; `voice_proto::participant_id` is the one place that mapping
-/// is written, and the server mints tickets through the same function. An id
-/// that will not parse is dropped rather than defaulted — a fallback number
-/// here would silently turn down whichever real person happened to own it.
-fn set_person(session: &Session, user_id: &str, position: f32, muted: bool) {
-    let Ok(uuid) = uuid::Uuid::parse_str(user_id) else { return };
-    session.set_peer_volume(
-        voice_proto::participant_id(uuid.as_bytes()),
-        crate::volume::person_gain(position, muted),
-    );
-}
+// ---------------------------------------------------------------------------
+// Noise suppression
+// ---------------------------------------------------------------------------
 
 /// Change where suppression runs, on the call that is already up.
 ///
@@ -234,53 +342,35 @@ fn set_person(session: &Session, user_id: &str, position: f32, muted: bool) {
 /// `Signal::set` stages: the caller has just set it, and a read here would
 /// still return the previous value.
 pub fn set_suppression(app: App, mode: voice_dsp::Mode) {
-    // Nothing to swap. The next join reads the setting like it always did.
-    if LIVE.with(|slot| slot.borrow().is_none()) {
-        return;
+    if live().borrow().is_none() {
+        return; // The next join reads the setting.
     }
     match mode {
-        voice_dsp::Mode::Server => {
-            note("server-side is decided when the call connects — this one keeps what it has");
-        }
+        voice_dsp::Mode::Server => note("suppression on the server is not available on this relay"),
         // The chunk's job. Mounting it is what starts the load.
         voice_dsp::Mode::Client => {}
-        voice_dsp::Mode::Off => disengage(app),
+        voice_dsp::Mode::Off => swap(app, voice_dsp::Mode::Off),
     }
 }
 
-/// Put the call back on the plain microphone.
-///
-/// Names nothing from the denoise SDK — `direct` is a subscription that
-/// forwards frames — so this whole path stays in the main bundle, which is
-/// what lets turning suppression *off* work even if the chunk never loaded.
-fn disengage(app: App) {
+/// Reopen the call's audio with `mode`'s processing, keeping the link. A
+/// mic reopen when the browser's own suppressor flips (it is fixed when the
+/// track is opened); a stage swap with no gap otherwise.
+fn swap(app: App, mode: voice_dsp::Mode) {
     let generation = claim_swap();
     spawn_async(async move {
-        // A new capture device, because whether the BROWSER suppresses is
-        // fixed when the track is opened. Going back to `Off` has to restore
-        // WebRTC's own suppressor, which is not something the running track
-        // can be talked into.
-        let mic = match session::open_capture(Capture::Processed, voice_dsp::Mode::Off).await {
-            Ok(mic) => mic,
-            Err(e) => {
-                app.voice_error.set(e);
-                return;
-            }
-        };
+        let result = call_session::reprocess(&live(), processing(mode)).await;
         if !still_wanted(generation) {
             return;
         }
-        LIVE.with(|slot| {
-            let borrowed = slot.borrow();
-            let Some(session) = borrowed.as_ref() else {
-                note("the call ended while the microphone was reopening");
-                return;
-            };
-            let chain = suppress::direct(&mic, session.wire());
-            session.install(mic, chain, voice_dsp::Mode::Off);
-            note("switched to off mid-call");
-        });
-        app.voice_error.set(String::new());
+        match result {
+            Ok(()) => {
+                note(&format!("switched to {mode:?} mid-call"));
+                app.voice_error.set(String::new());
+            }
+            // Say so; the call carries on with what it had.
+            Err(e) => app.voice_error.set(e),
+        }
     });
 }
 
@@ -289,57 +379,37 @@ fn disengage(app: App) {
 /// **Only ever called from `views::suppressor::Suppressor`'s body.** That is
 /// not a style rule — it is the entire mechanism. `wasm-split` moves code that
 /// is reachable *only* from a lazy component's body into that component's
-/// chunk, so a second caller anywhere in the app would drag DeepFilterNet,
-/// `tract` and the model plumbing back into the main bundle and the split would
-/// silently stop paying for itself.
+/// chunk; this installs the DeepFilterNet builder with `call_audio`, and a
+/// second caller anywhere in the app would drag `denoise`, `tract` and the
+/// model plumbing back into the main bundle.
 pub fn engage(app: App) {
-    if LIVE.with(|slot| slot.borrow().is_none()) {
+    install_neural();
+    if live().borrow().is_none() {
         return;
     }
-    let generation = claim_swap();
+    swap(app, voice_dsp::Mode::Client);
+}
 
-    spawn_async(async move {
-        // A new capture device, not the running one. Whether the browser is
-        // suppressing is fixed when the microphone is opened, so reusing the
-        // existing track would leave WebRTC's suppressor stacked under
-        // DeepFilterNet — the one combination the design forbids, and audible
-        // as a thin, over-processed voice rather than a clean one.
-        let mic = match session::open_capture(Capture::Processed, voice_dsp::Mode::Client).await {
-            Ok(mic) => mic,
-            Err(e) => {
-                app.voice_error.set(e);
-                return;
+/// Hand `call_audio` a DeepFilterNet builder. From the lazy chunk only; see
+/// [`engage`]. Idempotent.
+fn install_neural() {
+    use voice_client::suppress;
+    let build: call_audio::BuildNeural = Rc::new(|mic, model: call_audio::ModelSettings| {
+        Box::pin(async move {
+            let mut denoiser = denoise::Denoiser::with_weights(suppress::weights().await?)
+                .post_filter(model.post_filter)
+                .thresholds(model.min_db_thresh, model.max_db_erb_thresh, model.max_db_df_thresh);
+            if model.max_reduction_db < call_audio::UNLIMITED_DB {
+                denoiser = denoiser.attenuation_limit_db(model.max_reduction_db);
             }
-        };
-
-        let prepared = match suppress::prepare(&mic, app.tuning()).await {
-            Ok(prepared) => prepared,
-            Err(e) => {
-                // Say so, and leave the call exactly as it was. A half-applied
-                // setting is worse than one that did not apply: the old chain
-                // and the old microphone are both still running, so the call
-                // keeps working.
-                app.voice_error.set(e);
-                return;
-            }
-        };
-
-        if !still_wanted(generation) {
-            return;
-        }
-
-        LIVE.with(|slot| {
-            let borrowed = slot.borrow();
-            let Some(session) = borrowed.as_ref() else {
-                note("the call ended while the model was loading");
-                return;
-            };
-            let chain = prepared.install(session.wire());
-            session.install(mic, chain, voice_dsp::Mode::Client);
-            note("switched to client mid-call");
-        });
-        app.voice_error.set(String::new());
+            let clean =
+                denoiser.process(&mic).await.map_err(|e| format!("DeepFilterNet could not start: {e}"))?;
+            // Three 10 ms hops at 48 kHz, measured natively.
+            Ok(call_audio::NeuralStage { clean, latency: 1440 })
+        })
     });
+    let prepare: call_audio::PrepareNeural = Rc::new(|| Box::pin(async { suppress::weights().await.map(|_| ()) }));
+    call_audio::install_neural(build, Some(prepare));
 }
 
 /// Fetch the model without starting a call, from inside the lazy chunk.
@@ -349,8 +419,9 @@ pub fn engage(app: App) {
 /// the last moment before a call at which 8 MB can be downloaded without
 /// anybody waiting on it.
 pub fn warm(app: App) {
+    install_neural();
     spawn_async(async move {
-        match suppress::weights().await {
+        match voice_client::suppress::weights().await {
             Ok(bytes) => note(&format!("model ready ({} KB)", bytes.len() / 1024)),
             Err(e) => {
                 // Not an error banner: nothing is broken yet, and the call that
@@ -366,17 +437,13 @@ pub fn warm(app: App) {
 ///
 /// Here rather than next to the other probe in [`install_stats_probe`] for the
 /// same reason [`engage`] is: it calls the model, and a probe installed at boot
-/// would anchor the inference engine in the main bundle. The cost is that the
-/// benchmark only exists once client-side suppression has been selected, which
-/// `tools/denoise-bench.js` does before looking for it.
-///
-/// Idempotent — the component remounts whenever a call starts or ends.
+/// would anchor the inference engine in the main bundle. Idempotent.
 pub fn install_denoise_probe() {
     use wasm_bindgen::prelude::*;
 
     let bench = Closure::wrap(Box::new(|seconds: u32| -> js_sys::Promise {
         wasm_bindgen_futures::future_to_promise(async move {
-            match suppress::bench(seconds).await {
+            match voice_client::suppress::bench(seconds).await {
                 Ok(json) => Ok(JsValue::from_str(&json)),
                 Err(e) => Err(JsValue::from_str(&e)),
             }
@@ -384,18 +451,10 @@ pub fn install_denoise_probe() {
     }) as Box<dyn Fn(u32) -> js_sys::Promise>);
     let global = js_sys::global();
     let _ = js_sys::Reflect::set(&global, &JsValue::from_str("__hearthDenoiseBench"), bench.as_ref());
-    // Handed to JS for the life of the page; dropping it would leave a dead
-    // function object behind that throws when called.
     bench.forget();
 }
 
-/// Claim the next swap, synchronously.
-///
-/// A counter rather than a read of `app.suppress`, and that is the whole point:
-/// `Signal::set` STAGES. The caller sets the signal on the line before this
-/// runs, and reading it back — even after an await — can still return the
-/// previous value, so a guard written that way threw away the swap it was meant
-/// to protect and the setting silently did nothing.
+/// Claim the next swap, synchronously. See `SWAP`.
 fn claim_swap() -> u64 {
     SWAP.with(|g| {
         let next = g.get() + 1;
@@ -413,36 +472,25 @@ fn still_wanted(generation: u64) -> bool {
     false
 }
 
-/// How often to read voice activity out of the audio path.
-///
-/// The audio callbacks decide this a hundred times a second and must never
-/// touch the reactive graph, so the decision is left in an atomic and collected
-/// here. 50 ms is well under the ~200 ms at which an indicator stops feeling
-/// attached to the voice, and the signal is only *written* when the answer
-/// changes — which for speech is a few times a second, not twenty.
+// ---------------------------------------------------------------------------
+// Speaking
+// ---------------------------------------------------------------------------
+
+/// How often to read voice activity out of the audio path. The audio
+/// callbacks decide it a hundred times a second; the signal is only written
+/// when the answer changes.
 const ACTIVITY_MS: u32 = 50;
 
-/// How long the answer must stay "not talking" before that is broadcast.
-///
-/// Speech is full of gaps — stops between words, the closure before a plosive —
-/// and an edge-triggered broadcast without this would send several messages a
-/// second and make everyone's sidebar flicker. Going quiet waits; starting does
-/// not, because a late highlight is worse than a slightly long one.
+/// How long "not talking" must hold before that is broadcast. Speech is full
+/// of gaps; going quiet waits, starting does not.
 const QUIET_MS: u32 = 250;
 
 /// Keep `app.speaking` current, and tell the room about it.
 ///
-/// Started once at boot rather than per call: it costs one timer, it reads an
-/// atomic, and a loop that started and stopped with calls would be one more
-/// thing to get wrong at exactly the moment the indicator matters.
-///
-/// Two consumers, deliberately different. Your own highlight comes from the
-/// local signal and is instant. Everyone else's comes from the broadcast and
-/// costs a round trip — which is right, because the alternative is lighting
-/// yourself up from an event you sent, and being 50 ms behind your own voice.
+/// Started once at boot rather than per call. Your own highlight comes from
+/// the local signal and is instant; everyone else's from the broadcast.
 pub fn watch_activity(app: App) {
     spawn_async(async move {
-        // How long the local answer has been "quiet", in ticks.
         let mut quiet_for = 0u32;
         let mut told_the_room = false;
         loop {
@@ -451,8 +499,8 @@ pub fn watch_activity(app: App) {
             // Only while a call is up. Otherwise the last value from the
             // previous call would sit there lit.
             let room = app.in_voice.get();
-            let live = app.voice_live.get() && !room.is_empty();
-            let now = live && session::stats().speaking;
+            let live_now = app.voice_live.get() && !room.is_empty();
+            let now = live_now && with_call(|c| c.stats.borrow().speaking).unwrap_or(false);
 
             if now != app.speaking.get() {
                 app.speaking.set(now);
@@ -462,16 +510,10 @@ pub fn watch_activity(app: App) {
 
             // Rising edge immediately; falling edge only once it has held.
             let should_tell = if now { true } else { quiet_for < QUIET_MS };
-            if live && should_tell != told_the_room {
+            if live_now && should_tell != told_the_room {
                 told_the_room = should_tell;
-                crate::livewire::send(Action::Speaking {
-                    channel_id: room,
-                    speaking: should_tell,
-                });
-            } else if !live && told_the_room {
-                // The call ended while we were lit. Nothing will clear it for
-                // us — the server clears on leave, but only if it hears about
-                // it, and this is the cheaper guarantee.
+                crate::livewire::send(Action::Speaking { channel_id: room, speaking: should_tell });
+            } else if !live_now && told_the_room {
                 told_the_room = false;
             }
         }
@@ -479,64 +521,143 @@ pub fn watch_activity(app: App) {
 }
 
 /// Say what happened to a setting that did not visibly do anything.
-///
-/// Every path out of `set_suppression` that is not "it worked" is a case where
-/// somebody moved a control and heard no difference. None of them are errors
-/// worth a banner, and all of them are worth being able to find — a silent
-/// no-op is indistinguishable from a broken feature.
 fn note(what: &str) {
     use wasm_bindgen::JsValue;
-    web_sys::console::log_1(&JsValue::from_str(&format!("[suppress] {what}")));
+    web_sys::console::log_1(&JsValue::from_str(&format!("[voice] {what}")));
 }
+
+// ---------------------------------------------------------------------------
+// Video
+// ---------------------------------------------------------------------------
+
+/// Keep the call's video in step with the buttons, and the stage in step with
+/// the call — once a display frame, from boot.
+///
+/// - `app.cam` / `app.sharing` are what the buttons ask for; the call is
+///   changed to match, one change at a time (so a camera and a share asked
+///   for together do not stack two permission prompts), and they are put back
+///   when the browser refuses or the share is stopped from its own control.
+/// - A screen share's audio is sent as its own track whenever the share has
+///   some.
+/// - `app.video` (who is sending video, and our own camera and screen) and
+///   `app.mic_off` are written only when they change, because the stage
+///   rebuilds on them and a rebuild restarts every video on it.
+pub fn watch_media(app: App) {
+    let pending = Rc::new(std::cell::Cell::new(false));
+    let raf = runtime_core::raf_loop(move || {
+        let slot = live();
+        let Some((video, roster, resync)) =
+            slot.borrow().as_ref().map(|c| (c.video.clone(), c.roster.clone(), c.screen_audio_out_of_sync()))
+        else {
+            if app.video.get() != crate::model::VideoState::default() {
+                app.video.set(crate::model::VideoState::default());
+            }
+            if !app.mic_off.get().is_empty() {
+                app.mic_off.set(Vec::new());
+            }
+            return;
+        };
+        if resync {
+            spawn_async(async move { call_session::sync_screen_audio(&live()).await });
+        }
+        if video.camera_failed() {
+            app.cam.set(false);
+            app.sharing.set(false);
+            app.voice_error.set("The camera stopped — see the console".to_string());
+        }
+        if video.screen_ended() && app.sharing.get() {
+            app.sharing.set(false);
+        }
+        if !pending.get() {
+            let want_camera = app.cam.get() && !video.camera_failed();
+            let want_screen = app.sharing.get() && !video.screen_ended();
+            let change = if want_camera != video.camera_on() {
+                Some((true, want_camera))
+            } else if want_screen != video.screen_on() {
+                Some((false, want_screen))
+            } else {
+                None
+            };
+            if let Some((is_camera, on)) = change {
+                pending.set(true);
+                let (pending, video) = (pending.clone(), video.clone());
+                spawn_async(async move {
+                    let done = if is_camera { video.set_camera(on).await } else { video.set_screen(on).await };
+                    if let Err(e) = done {
+                        if is_camera { app.cam.set(false) } else { app.sharing.set(false) }
+                        app.voice_error.set(e);
+                    }
+                    pending.set(false);
+                });
+            }
+        }
+
+        let r = roster.borrow();
+        let mut remote: Vec<(String, u8)> = video
+            .remotes()
+            .into_iter()
+            .filter_map(|(id, track)| r.names.get(&id).map(|user| (user.clone(), track)))
+            .collect();
+        remote.sort();
+        let next = crate::model::VideoState { remote, camera: video.camera_on(), screen: video.screen_on() };
+        if next != app.video.get() {
+            app.video.set(next);
+        }
+        let mut off: Vec<String> = r.mic_off.iter().filter_map(|id| r.names.get(id).cloned()).collect();
+        off.sort();
+        if off != app.mic_off.get() {
+            app.mic_off.set(off);
+        }
+    });
+    std::mem::forget(raf);
+}
+
+/// Someone's video, to show: a camera (`call_proto::TRACK_MAIN`) or a screen
+/// share (`TRACK_SCREEN`), by account id — ours too.
+pub fn player(app: App, user: &str, track: u8) -> Option<runtime_core::Element> {
+    let screen = track == call_proto::TRACK_SCREEN;
+    with_call(|c| {
+        let stream = if user == app.my_id() {
+            c.video.local(track)
+        } else {
+            let id = c.roster.borrow().id_of(user)?;
+            c.video.remote(id, track)
+        };
+        stream.map(|s| call_video::player(s, screen))
+    })
+    .flatten()
+}
+
+// ---------------------------------------------------------------------------
+// Leaving, and staying
+// ---------------------------------------------------------------------------
 
 /// Hang up. Idempotent — leaving a room you are not in is not an error.
 pub fn leave_room(app: App) {
-    LIVE.with(|slot| slot.borrow_mut().take());
+    live().borrow_mut().take();
     let was = app.in_voice.get();
     app.voice_live.set(false);
     app.voice_error.set(String::new());
+    app.in_voice.set(String::new());
     if !was.is_empty() {
         // The server takes them out of the room and tells everyone, including
-        // this client — the sidebar updates because the event arrives, not
-        // because we also changed it locally. One path, so there is nothing to
-        // disagree.
+        // this client — the sidebar updates because the event arrives.
         crate::livewire::send(Action::LeaveVoice { channel_id: was });
     }
 }
 
-/// How often to tell the server we are still in the room.
-///
-/// Comfortably inside the server's freshness window (`PRESENCE_TTL_SECS`), so
-/// a single dropped request does not blink someone out of the sidebar. The gap
-/// between the two is the whole tolerance budget — closing it would make every
-/// slow request a disappearance.
+/// How often to tell the server we are still in the room — comfortably inside
+/// its freshness window (`PRESENCE_TTL_SECS`).
 const HEARTBEAT_MS: u32 = 15_000;
 
 /// Keep saying "still here" until the room changes or the call ends.
-///
-/// A loop rather than an interval so it cannot outlive its own room: every tick
-/// re-reads `in_voice` and stops the moment it is something else, which is what
-/// makes switching rooms safe — the old loop retires instead of racing the new
-/// one to write presence.
 fn announce(app: App, room: String) {
     spawn_async(async move {
         loop {
-            // Send BEFORE reading anything back. `Signal::set` stages: the
-            // caller set `voice_live` true on the line that reached here, and
-            // reads return the committed value until the world flushes — so a
-            // loop that checked liveness first would see `false`, exit, and
-            // never send a single heartbeat. The room is the argument for the
-            // same reason: it does not have to be read out of a signal.
-            //
-            // `StillHere` doubles as the join: the server treats presence in a
-            // room it does not already have as an arrival and announces it, so
-            // a reconnect mid-call re-asserts itself without a separate step.
+            // Send BEFORE reading anything back: `Signal::set` stages, and the
+            // caller set `voice_live` on the line that reached here.
             crate::livewire::send(Action::StillHere { channel_id: room.clone() });
             sleep(HEARTBEAT_MS).await;
-
-            // By now those writes are long committed, so this is a real
-            // question: are we still in this room? Leaving, or moving to
-            // another, retires this loop rather than racing the new one.
             if app.in_voice.get() != room {
                 return;
             }
@@ -544,81 +665,68 @@ fn announce(app: App, room: String) {
     });
 }
 
-/// Live transport counters, as JSON.
+// ---------------------------------------------------------------------------
+// The test seam
+// ---------------------------------------------------------------------------
+
+/// Live call counters, as JSON — what the end-to-end suites read.
 fn stats_json() -> String {
-    let s = session::stats();
+    let Some((s, t, peers_peak, muted, processing)) = with_call(|c| {
+        let mut st = c.stats.borrow_mut();
+        let s = *st;
+        // Peaks are "since last read".
+        st.mic_peak = 0.0;
+        st.out_peak = 0.0;
+        // A window nobody has heard into for a while is silence, not its last
+        // loud moment.
+        let fresh = call_audio::now_ms() - s.remote_peak_ms < 2.0 * call_audio::PEAK_WINDOW_MS;
+        (s, *c.traffic.borrow(), if fresh { s.remote_peak } else { 0.0 }, c.muted(), c.processing())
+    }) else {
+        // No call: zeros, so "torn down" reads as nobody, not as an error.
+        return r#"{"sent":0,"bytesSent":0,"unsent":0,"codec":"none","transport":"none","recv":0,"dropped":0,"concealed":0,"playoutMs":0,"offMainThread":false,"underruns":0,"resyncs":0,"muted":false,"peers":0,"rate":0,"micPeak":0,"remotePeak":0,"suppress":"off","speaking":false,"modelGainDb":0.0,"rttMs":-1,"videoUp":0,"videoDown":0}"#.to_string();
+    };
+    let suppress = match processing.suppression {
+        call_audio::Suppression::Neural => "client",
+        _ => "off",
+    };
     format!(
-        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"{}","transport":"{}","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"resyncs":{},"muted":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1}}}"#,
+        r#"{{"sent":{},"bytesSent":{},"unsent":{},"codec":"opus","transport":"webtransport","recv":{},"dropped":{},"concealed":{},"playoutMs":{},"offMainThread":{},"underruns":{},"resyncs":0,"muted":{},"peers":{},"rate":{},"micPeak":{},"remotePeak":{},"suppress":"{}","speaking":{},"modelGainDb":{:.1},"rttMs":{},"videoUp":{},"videoDown":{}}}"#,
         s.sent,
-        s.bytes_sent,
-        // Packets the transport would not carry. On a datagram carrier a
-        // stalled send path is silent in exactly the way a quiet room is, so
-        // the difference has to be a number somebody can read.
+        t.audio_up,
+        // Packets the transport would not carry: on datagrams a stalled send
+        // path is silent in exactly the way a quiet room is.
         s.unsent,
-        // What is on the wire, not what was configured. A silent fallback to
-        // raw PCM sounds identical and costs thirty times the bandwidth, so it
-        // has to be observable from outside.
-        s.codec.as_str(),
-        // Which transport carries this call. Observable from outside because
-        // "it works" over the fallback is indistinguishable from "it works".
-        s.transport,
         s.received,
-        s.dropped,
-        // What the jitter buffer had to invent, and how much delay it is
-        // carrying to avoid inventing more. On a reliable transport both were
-        // structurally zero; on datagrams they are the health of the link, and
-        // a call that sounds fine while concealing steadily is a call about to
-        // stop sounding fine.
+        s.late,
         s.concealed,
         s.playout_ms,
-        // Whether audio I/O actually runs on a thread of its own. Observable
-        // from outside for the same reason the transport is: a device that
-        // silently fell back to the main thread works fine right up until the
-        // machine is busy, which is never during a test that does not check.
         s.off_main_thread,
         s.underruns,
-        // One per rejoin is ordinary. This is here because the bug it stands
-        // for was invisible: every other counter healthy, one listener deaf.
-        s.resyncs,
-        // Whether the microphone is actually muted, as opposed to whether a
-        // button says so. Those were different things for a long time.
-        s.muted,
+        muted,
         s.peers,
-        s.sample_rate,
+        s.rate,
         (s.mic_peak * 100.0) as u32,
-        (s.remote_peak * 100.0) as u32,
-        // What the room is ACTUALLY getting, per the node — not what was
-        // asked for. A test that asserted the request would pass against a
-        // relay that quietly refused it.
-        s.suppression.as_str(),
+        (peers_peak * 100.0) as u32,
+        suppress,
         s.speaking,
-        s.model_gain_db,
+        s.model_gain_db.unwrap_or(0.0),
+        t.rtt_ms.map(|r| r.round() as i64).unwrap_or(-1),
+        t.video_up,
+        t.video_down,
     )
 }
 
 /// Publish [`stats_json`] as `globalThis.__hearthVoiceStats()`.
 ///
-/// A deliberate seam, not a feature. Whether a call is *connected* shows in the
-/// UI; whether audio is actually **moving** does not, and "the socket opened"
-/// is a far weaker claim than "the far side heard a signal". The end-to-end
-/// test needs the stronger one, and the alternative — rendering peak meters as
-/// text so a test can scrape them — would be shaping the product around its
-/// test.
-///
-/// Installed explicitly rather than as a plain `#[wasm_bindgen]` export
-/// because the bundle is an ES module: its exports are module-scoped and never
-/// appear on a global, so an exported function is unreachable from a page
-/// script or a test harness.
-///
-/// Reads counters the voice client already keeps; it starts nothing.
+/// A deliberate seam, not a feature: whether audio is actually **moving** does
+/// not show in the UI, and the end-to-end test needs that stronger claim.
+/// Installed on the global because the bundle is an ES module whose exports
+/// never reach a page script.
 pub fn install_stats_probe() {
     use wasm_bindgen::prelude::*;
 
     let cb = Closure::wrap(Box::new(stats_json) as Box<dyn Fn() -> String>);
     let global = js_sys::global();
     let _ = js_sys::Reflect::set(&global, &JsValue::from_str("__hearthVoiceStats"), cb.as_ref());
-    // Handed to JS for the life of the page; dropping it would leave a dead
-    // function object behind that throws when called.
     cb.forget();
-
 }

@@ -24,7 +24,7 @@ const { chromium } = require('./node_modules/playwright-core');
 const path = require('path');
 
 const CHROME = process.env.CHROME ||
-  '/home/nicho/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
+  process.env.HOME + '/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome';
 const APP = process.env.APP || 'http://localhost:8091';
 const API = APP + '/_srv';
 const LOG = '/tmp/hearth-server.log';
@@ -195,6 +195,8 @@ const menuAction = async (p, person, item) => {
   /// has to survive a refresh.
   const open = async (handle, password, prefs = {}) => {
     const p = await browser.newPage({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+    p.on('console', m => { const t = m.text(); if (/\[(voice|call-[a-z]+)\]/.test(t) && !t.includes('capture 48000')) console.log(`        ${handle}: ${t}`); });
+    p.on('pageerror', e => console.log(`        ${handle} page error: ${e.message}`));
     await p.addInitScript(prefs => {
       try {
         localStorage.setItem('hearth.suppress', 'off');

@@ -31,13 +31,16 @@ if [ -f "$PIDFILE" ]; then
 fi
 sleep 0.5
 
-docker exec idea-chat-postgres-1 psql -U postgres \
+# Whichever Postgres is up: the root compose names it idea-chat-postgres-1,
+# the devcontainer idea-chat_devcontainer-postgres-1. Both publish :55432.
+PG=${HEARTH_PG_CONTAINER:-$(docker ps --format '{{.Names}}' | grep -m1 -E 'idea-chat.*postgres')}
+docker exec "$PG" psql -U postgres \
   -c "DROP DATABASE IF EXISTS $DB" -c "CREATE DATABASE $DB" >/dev/null
 
 DATABASE_URL=postgres://postgres:dev@localhost:55432/$DB \
   HEARTH_BIND=127.0.0.1:$PORT REDIS_URL=redis://localhost:6399 \
-  VOICE_DIRECTOR_URL=${VOICE_DIRECTOR_URL:-http://127.0.0.1:9100} \
   VOICE_SHARED_SECRET=${VOICE_SHARED_SECRET:-a-shared-secret-for-local-testing} \
+  CALL_RELAY_BIND=127.0.0.1:${CALL_RELAY_PORT:-8799} CALL_RELAY_HOST=127.0.0.1 \
   ./target/debug/server > /tmp/hearth-server.log 2>&1 &
 echo $! > "$PIDFILE"
 

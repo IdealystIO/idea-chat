@@ -1,0 +1,52 @@
+[package]
+name = "chat-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Idea Chat's API: every #[server] function and the live connection, plus the types on the wire. Without the `server` feature it is the client's stubs; with it, the real bodies over chat-db. It names no UI type, so a server body cannot reach for client state."
+
+[features]
+default = []
+server = [
+    "server/server",
+    "server-kit/server",
+    "server-kit/redis",
+    "cache/redis",
+    "pubsub/redis",
+    "pubsub/memory",
+    "dep:chat-db",
+    "dep:call-auth",
+    "dep:tokio",
+    "dep:futures-util",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:hex",
+    "dep:time",
+    "dep:aws-config",
+    "dep:aws-sdk-s3",
+    "dep:redis",
+]
+
+[dependencies]
+chat-model = { workspace = true }
+idea-state = { workspace = true }
+server = { workspace = true }
+server-kit = { workspace = true }
+cache = { workspace = true }
+pubsub = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde"] }
+
+# Server-only.
+chat-db = { workspace = true, optional = true }
+call-auth = { workspace = true, optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
+futures-util = { version = "0.3", optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+time = { version = "0.3", optional = true }
+aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", optional = true, features = ["behavior-version-latest"] }
+redis = { version = "0.27", optional = true, features = ["tokio-comp"] }

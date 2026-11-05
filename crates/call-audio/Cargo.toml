@@ -1,0 +1,32 @@
+[package]
+name = "call-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A call's voice: the microphone to Opus datagrams, and datagrams to the speakers."
+
+[features]
+default = ["neural"]
+# The built-in DeepFilterNet stage (`denoise`, several MB of wasm). An app that
+# loads its own lazily turns this off and installs it; see `neural`.
+neural = ["dep:denoise", "dep:net"]
+
+[dependencies]
+call-proto = { workspace = true }
+av-sync = { workspace = true }
+
+# The pipeline itself is web-only for now: native has no audio output yet
+# (see `audio-io`). The settings types build everywhere.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+audio-io = { workspace = true }
+audio-codec = { workspace = true }
+jitter = { workspace = true }
+voice-dsp = { workspace = true }
+# DeepFilterNet 3, the neural suppression stage; `media-stream` is its input
+# and output type, so the stage speaks it too.
+denoise = { workspace = true, optional = true }
+media-stream = { workspace = true }
+# For fetching the model, which is not compiled into the wasm.
+net = { workspace = true, optional = true }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+web-sys = { version = "0.3", features = ["Window", "Performance", "console", "MediaStream"] }

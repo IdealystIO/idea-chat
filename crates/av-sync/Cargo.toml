@@ -1,0 +1,10 @@
+[package]
+name = "av-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lip sync for a call: when sound was captured, when it is heard, and which video frame goes with it."
+
+# Arithmetic on timestamps, nothing else — no platform, no codec, no
+# transport — so every rule in it is unit-tested natively.
+[dependencies]

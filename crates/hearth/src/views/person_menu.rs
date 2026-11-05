@@ -12,9 +12,7 @@
 //! correctly on every backend, whereas viewport coordinates are a web idea
 //! that has to be re-derived on iOS and Android. See README.md for the gap.
 
-use icons_lucide::{
-    MESSAGE_SQUARE, VOLUME_2, VOLUME_X,
-};
+use icons_lucide::{MESSAGE_SQUARE, PHONE_OFF, VOLUME_2, VOLUME_X};
 use idea_ui::{AvatarSize, ControlSize, Menu, MenuItem, MenuLabel, MenuSeparator, Slider};
 use runtime_core::{text, ui, Element, Ref, StyleApplication, ViewHandle};
 
@@ -70,6 +68,15 @@ fn person_menu(app: App, user_id: &str, anchor: Ref<ViewHandle>) -> Element {
         .map(|m| m.display_name.clone())
         .unwrap_or_else(|| "Someone".to_string());
     let is_moderator = member.as_ref().map(|m| m.role != "member").unwrap_or(false);
+    // The voice room they are in, if any — where a moderator can remove them
+    // from. Never ourselves: that is "Leave room".
+    let their_room = (is_mod_view && user_id != app.my_id())
+        .then(|| {
+            app.voice_rooms
+                .with(|rooms| rooms.iter().find(|r| r.people.iter().any(|p| p.id == user_id)).map(|r| r.channel_id.clone()))
+        })
+        .flatten();
+    let n_remove = user_id.clone();
 
     // Menu adornments are `Option<Element>`, so they're built up front rather
     // than inline: an `Element` can't be constructed inside a prop position
@@ -131,6 +138,21 @@ fn person_menu(app: App, user_id: &str, anchor: Ref<ViewHandle>) -> Element {
                 } else {
                     "Member".to_string()
                 })
+            }
+            // Works because the relay enforces it: the server revokes their
+            // grant there, and their call ends then and there.
+            if let Some(room) = their_room.clone() {
+                MenuItem(
+                    label = "Remove from call".to_string(),
+                    leading = Some(glyph(PHONE_OFF)),
+                    on_select = cb({
+                        let (room, user) = (room.clone(), n_remove.clone());
+                        move || {
+                            net::remove_from_call(app, &room, &user);
+                            app.close_menu();
+                        }
+                    }),
+                )
             }
         }
     }

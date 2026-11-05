@@ -161,12 +161,18 @@ pub fn hearth_light(accent: Accent) -> IdeaThemeDefaults {
 
             focus_ring: c("color-focus-ring", accent.solid()),
             overlay: c("color-overlay", "rgba(28, 25, 23, 0.45)"),
+            table_header: c("color-table-header", "#f0eeeb"),
+            // The toned-row tints. Hearth has no tables, so idea-ui's stand.
+            ..base.colors
         },
         intents: with_accent(base.intents, accent, false),
         spacing: spacing(),
         radius: radius(),
         typography: typography(),
         font: base.font,
+        // No glows, the stock gradient, and the per-user hues avatars draw on.
+        effects: base.effects,
+        palette: base.palette,
     }
 }
 
@@ -193,12 +199,18 @@ pub fn hearth_dark(accent: Accent) -> IdeaThemeDefaults {
 
             focus_ring: c("color-focus-ring", accent.fg(true)),
             overlay: c("color-overlay", "rgba(8, 7, 10, 0.66)"),
+            table_header: c("color-table-header", "#201f26"),
+            // The toned-row tints. Hearth has no tables, so idea-ui's stand.
+            ..base.colors
         },
         intents: with_accent(base.intents, accent, true),
         spacing: spacing(),
         radius: radius(),
         typography: typography(),
         font: base.font,
+        // No glows, the stock gradient, and the per-user hues avatars draw on.
+        effects: base.effects,
+        palette: base.palette,
     }
 }
 

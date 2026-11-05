@@ -1,0 +1,31 @@
+[package]
+name = "call-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A call's video: cameras and screen shares to VP8 datagrams, and datagrams to <video>s held in step with the audio."
+
+[dependencies]
+call-proto = { workspace = true }
+av-sync = { workspace = true }
+runtime-core = { workspace = true }
+runtime-vocabulary = { workspace = true }
+runtime-scene = { workspace = true }
+idealyst = { workspace = true }
+
+# The codec is the browser's (WebCodecs), so all of it is web-only.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+idea-ui = { workspace = true }
+media-stream = { workspace = true }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Performance", "console", "MediaStream"] }
+# The camera, the `<video>` that shows a stream, and web-glue — the
+# framework's JS boundary — for WebCodecs, which nothing in the SDK wraps yet.
+camera = { version = "3.0.0", registry = "idealyst" }
+permissions = { version = "3.0.0", registry = "idealyst" }
+# Renamed: this crate's own name is close enough to confuse.
+video_sdk = { package = "video", version = "4.0.0", registry = "idealyst" }
+# `wasm-bindgen-bridge`: a screen share's stream is a web-glue handle, and its
+# audio goes to `audio-io`, which speaks web-sys — the bridge crosses between.
+web-glue = { version = "2.1.0", registry = "idealyst", features = ["wasm-bindgen-bridge"] }

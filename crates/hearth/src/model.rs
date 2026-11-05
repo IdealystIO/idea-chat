@@ -248,8 +248,18 @@ pub struct App {
     // --- voice, still local-only ---
     pub mic: Signal<bool>,
     pub deafened: Signal<bool>,
+    /// What the camera and share buttons ASK for; the call follows (see
+    /// `voice::watch_media`), and [`App::video`] says what is actually on.
     pub cam: Signal<bool>,
     pub sharing: Signal<bool>,
+    /// Who is sending video in the call, and whether our own camera and
+    /// screen are actually live. Refreshed by `voice::watch_media` only when
+    /// it changes, so the stage rebuilds when a camera starts or stops and
+    /// not otherwise — a rebuild restarts every video on it.
+    pub video: Signal<VideoState>,
+    /// Who in the call has their microphone off, by account id, as they
+    /// announce it.
+    pub mic_off: Signal<Vec<String>>,
     /// The room you are connected to. Independent of what you are reading.
     ///
     /// Set the moment you tap a room — before the socket opens — because a
@@ -378,6 +388,8 @@ impl App {
             deafened: signal(false),
             cam: signal(false),
             sharing: signal(false),
+            video: signal(VideoState::default()),
+            mic_off: signal(Vec::new()),
             in_voice: signal(String::new()),
             voice_live: signal(false),
             voice_error: signal(String::new()),
@@ -386,34 +398,33 @@ impl App {
             speaking_now: signal(Vec::new()),
             stage: signal(String::new()),
 
-            // Off by default, and this is the honest default rather than a
-            // timid one: on-device costs an 8 MB model fetch, on-server costs
-            // someone else's CPU, and neither should start happening because
-            // an app was opened.
             // Remembered per device — see `crate::prefs` for why these and not
             // the account-level ones.
             //
-            // On by default. Suppression is the behaviour people expect from a
-            // call in 2024, and a feature that has to be discovered in Settings
-            // before a call sounds right is a feature most people never get.
-            // The bundle cost of that decision is paid on the first voice join
-            // rather than on every page load — see `views::suppressor`.
+            // The browser's own noise suppression by default, with nothing of
+            // ours stacked on it: DeepFilterNet ("This device") is a choice in
+            // Settings, and costs its 8 MB model and engine chunk only for
+            // whoever makes it. De-click and levelling are off too — both are
+            // tuned to sit behind the model, and levelling's noise gate, in
+            // front of the browser's higher noise floor, was dropping quiet,
+            // distant speech. Everything is still switchable, and a choice
+            // already made is kept.
             suppress: signal(crate::prefs::parsed(
                 "suppress",
                 voice_dsp::Mode::parse,
-                voice_dsp::Mode::Client,
+                voice_dsp::Mode::Off,
             )),
             sup_transients: signal(crate::prefs::parsed(
                 "suppress.transients",
                 voice_dsp::Strength::parse,
-                voice_dsp::Strength::Standard,
+                voice_dsp::Strength::Off,
             )),
             sup_residual: signal(crate::prefs::parsed(
                 "suppress.residual",
                 voice_dsp::Strength::parse,
                 voice_dsp::Strength::Standard,
             )),
-            sup_leveling: signal(crate::prefs::flag("suppress.leveling", true)),
+            sup_leveling: signal(crate::prefs::flag("suppress.leveling", false)),
             speaking: signal(false),
             dark: signal(crate::prefs::flag("dark", true)),
             accent: signal(crate::theme::Accent::Indigo),
@@ -737,12 +748,27 @@ impl App {
             // `self.mic` back — it says what it just decided.
             crate::set_muted(true);
         }
+        // And everyone else goes quiet — deafened used to change the label and
+        // leave playback running.
+        crate::set_deafened(*self, now);
     }
 
     /// Note that something loaded, so regions keyed on `revision` rebuild.
     pub fn touch(&self) {
         self.revision.update(|r| r.wrapping_add(1));
     }
+}
+
+/// The video in the call right now.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VideoState {
+    /// (account id, track) of everyone else sending video — track
+    /// `call_proto::TRACK_MAIN` is a camera, `TRACK_SCREEN` a screen share.
+    pub remote: Vec<(String, u8)>,
+    /// Our camera, actually encoding.
+    pub camera: bool,
+    /// Our screen share, actually encoding.
+    pub screen: bool,
 }
 
 impl Default for App {

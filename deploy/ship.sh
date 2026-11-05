@@ -35,15 +35,18 @@ docker run --rm \
   -v idea-chat-deploy-target:/target \
   -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target \
   -w /w/idea-chat rust:1-bookworm \
-  bash -c 'cargo build --release -p hearth --bin server --features server \
-        && cargo build --release -p voice-server --bin voice-node --bin voice-director'
+  bash -c 'cargo build --release -p hearth --bin server --features server'
 
+# One binary: voice is the call relay inside it (call-relay, on UDP 8798).
 mkdir -p "$STAGE/bin"
 docker run --rm -v idea-chat-deploy-target:/target -v "$STAGE:/out" debian:bookworm-slim \
-  cp /target/release/server /target/release/voice-node /target/release/voice-director /out/bin/
+  cp /target/release/server /out/bin/
+cp deploy/sync-relay-cert.sh "$STAGE/bin/sync-relay-cert"
 
 echo "==> building the web bundle (release, with brotli siblings)"
-( cd crates/hearth && idealyst build --web --release --out-dir "$STAGE/web" )
+# RUSTFLAGS because the CLI ignores .cargo/config.toml for this build — see there.
+( cd crates/hearth && RUSTFLAGS=--cfg=web_sys_unstable_apis \
+    idealyst build --web --release --out-dir "$STAGE/web" )
 
 echo "==> uploading"
 # Made here rather than in bootstrap, because bootstrap runs once and this runs
@@ -57,12 +60,13 @@ rsync -az --delete -e "ssh ${ssh_opts[*]}" "$STAGE/web/" "admin@$host:/opt/heart
 if [ -f crates/hearth/assets/DeepFilterNet3_onnx.tar.gz ]; then
   rsync -az -e "ssh ${ssh_opts[*]}" crates/hearth/assets/ "admin@$host:/opt/hearth/assets/"
 fi
-rsync -az -e "ssh ${ssh_opts[*]}" deploy/systemd/*.service "admin@$host:/tmp/units/"
+rsync -az -e "ssh ${ssh_opts[*]}" deploy/systemd/hearth*.service deploy/systemd/hearth*.timer "admin@$host:/tmp/units/"
 
 echo "==> installing units and restarting"
 ssh "${ssh_opts[@]}" "admin@$host" "HOSTNAME_FQDN='$name' bash -s" <<'REMOTE'
 set -euo pipefail
-sudo install -m 0644 /tmp/units/*.service /etc/systemd/system/
+sudo install -m 0644 /tmp/units/hearth* /etc/systemd/system/
+echo "HEARTH_FQDN=$HOSTNAME_FQDN" | sudo tee /opt/hearth/fqdn.env >/dev/null
 
 # Secrets are generated ON the box, once, and never travel. Regenerating them
 # would invalidate every session and every room ticket in flight.
@@ -78,7 +82,6 @@ ENV
 HEARTH_BIND=127.0.0.1:8080
 DATABASE_URL=postgres://postgres:hearth@127.0.0.1:5432/hearth
 REDIS_URL=redis://127.0.0.1:6379
-VOICE_DIRECTOR_URL=http://127.0.0.1:9100
 VOICE_SHARED_SECRET=$secret
 HEARTH_ORIGINS=https://$HOSTNAME_FQDN
 ENV
@@ -86,11 +89,28 @@ ENV
   sudo chmod 0600 /opt/hearth/voice.env /opt/hearth/hearth.env
 fi
 
+# The call relay's settings, added to an existing hearth.env as well as a new
+# one: it runs inside hearth now, on UDP 8798 (open in the security group),
+# with the site's certificate once Caddy has one (see sync-relay-cert).
+set_env() {
+  sudo sed -i "/^$1=/d" /opt/hearth/hearth.env
+  echo "$1=$2" | sudo tee -a /opt/hearth/hearth.env >/dev/null
+}
+sudo sed -i '/^VOICE_DIRECTOR_URL=/d' /opt/hearth/hearth.env
+set_env CALL_RELAY_BIND 0.0.0.0:8798
+set_env CALL_RELAY_HOST "$HOSTNAME_FQDN"
+set_env CALL_RELAY_CERT /opt/hearth/tls/fullchain.pem
+set_env CALL_RELAY_KEY /opt/hearth/tls/privkey.pem
+
+# The old voice fleet is replaced by the relay in hearth; it also held 8798.
+sudo systemctl disable --now voice-node voice-director 2>/dev/null || true
+
 sudo systemctl daemon-reload
-sudo systemctl enable --now voice-director voice-node hearth
-sudo systemctl restart voice-director voice-node hearth
+sudo /opt/hearth/bin/sync-relay-cert "$HOSTNAME_FQDN"
+sudo systemctl enable --now hearth hearth-relay-cert.timer
+sudo systemctl restart hearth
 sleep 3
-systemctl is-active voice-director voice-node hearth
+systemctl is-active hearth
 REMOTE
 
 echo

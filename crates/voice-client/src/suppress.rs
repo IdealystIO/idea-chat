@@ -304,10 +304,12 @@ pub async fn bench(seconds: u32) -> Result<String, String> {
         .map_err(|e| format!("model build: {e}"))?;
     let build_ms = now_ms() - built;
 
-    let hops = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let hops = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let _sub = {
         let hops = hops.clone();
-        clean.subscribe(move |_: &AudioFrame| hops.set(hops.get() + 1))
+        clean.subscribe(move |_: &AudioFrame| {
+            hops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
     };
 
     // Speech-shaped-ish: two voiced harmonics under hiss. The content does not
@@ -336,8 +338,8 @@ pub async fn bench(seconds: u32) -> Result<String, String> {
         build_ms,
         process_ms,
         process_ms / audio_ms,
-        process_ms / hops.get().max(1) as f64,
-        hops.get(),
+        process_ms / hops.load(std::sync::atomic::Ordering::Relaxed).max(1) as f64,
+        hops.load(std::sync::atomic::Ordering::Relaxed),
     ))
 }
 

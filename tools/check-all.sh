@@ -21,15 +21,16 @@ verdict() { if [ "$1" = 0 ]; then echo "  PASS"; else echo "  FAIL"; FAILED=1; f
 # failing. Always take the status of the command that actually ran the tests.
 run() { "$@" 2>&1 | tail -"${TAIL:-3}"; verdict "${PIPESTATUS[0]}"; }
 
-step "1/11  build — client (wasm bundle) and server"
+step "1/12  build — client (wasm bundle) and server"
 # A real bundle, not `cargo check`. Step 6 loads whatever is in dist/web, so a
 # check-only step here means the browser test can pass against stale wasm from
 # an earlier build — which is exactly how a broken client once went green.
-( cd crates/hearth && idealyst build --web ) 2>&1 | tail -2
+# RUSTFLAGS because the CLI ignores .cargo/config.toml for this build — see there.
+( cd crates/hearth && RUSTFLAGS=--cfg=web_sys_unstable_apis idealyst build --web ) 2>&1 | tail -2
 verdict "${PIPESTATUS[0]}"
 run cargo check -p hearth --features server -q
 
-step "2/11  unit tests — client model, ids, invite codes, the DSP, and device I/O"
+step "2/12  unit tests — client model, ids, invite codes, the DSP, and device I/O"
 run cargo test -p hearth --lib -q
 # The signal conditioning is testable without a browser and mostly isn't
 # tested by one: what a leveller does to a gate, or what a fader does to a
@@ -56,19 +57,24 @@ run cargo test -p audio-io -q
 # notice as silence — and stayed red because nothing ran them. A suite that is
 # not in this file does not exist.
 run cargo test -p voice-server -q
+# The call stack hearth's voice runs on: the wire format, grants and
+# revocations, end-to-end encryption (against RFC 9605's vectors), bitrate
+# control, lip-sync arithmetic, the room layout, and the relay over real QUIC
+# — who gets in, what is forwarded, and how fast a revocation lands.
+run cargo test -p call-proto -p call-auth -p call-e2ee -p call-rate -p av-sync -p call-relay -p quic-call -q
 
-step "3/11  data layer — 41 tests against real Postgres"
+step "3/12  data layer — 41 tests against real Postgres"
 TAIL=4 run env HEARTH_TEST_DATABASE_URL="$TEST_DB" cargo test -p hearth-db -q
 
-step "4/11  auth flows — 42 assertions over HTTP"
+step "4/12  auth flows — 42 assertions over HTTP"
 cargo build -p hearth --bin server --features server -q || exit 1
 bash tools/reset-dev.sh >/dev/null || exit 1
 TAIL=1 run bash tools/auth-flows.sh
 
-step "5/11  message flows — 17 assertions over HTTP"
+step "5/12  message flows — 17 assertions over HTTP"
 TAIL=1 run bash tools/message-flows.sh
 
-step "6/11  the whole app — 39 assertions, two browsers"
+step "6/12  the whole app — 39 assertions, two browsers"
 if [ ! -d crates/hearth/dist/web/pkg ]; then
   echo "  no wasm bundle — run: (cd crates/hearth && idealyst build --web)"
   FAILED=1
@@ -77,63 +83,41 @@ else
   TAIL=1 run node tools/hearth-e2e.js
 fi
 
-step "7/11  voice — 55 assertions, two browsers and a real relay"
-# Skipped rather than failed when the fleet is not up: it is a separate set of
-# processes, and a red suite for "you did not start the relay" trains people to
-# ignore the colour. The skip is loud and does NOT count as a pass.
-if curl -fsS -m 2 http://127.0.0.1:9100/health >/dev/null 2>&1; then
-  bash tools/reset-dev.sh >/dev/null || exit 1
-  TAIL=1 run node tools/voice-flows.js
-else
-  echo "  SKIP — no ticket-checking fleet on :9100. Start one with:"
-  echo "         bash tools/voice-fleet.sh"
-  SKIPPED=1
-fi
+# Voice needs nothing started separately: the call relay runs inside the
+# test server (call-relay, on UDP 8799 — see reset-dev.sh).
+step "7/12  voice — 56 assertions, two browsers and the call relay"
+bash tools/reset-dev.sh >/dev/null || exit 1
+TAIL=1 run node tools/voice-flows.js
 
-step "8/11  noise suppression — 22 assertions, both modes, a real relay"
-# Needs the same fleet, and needs it to PERMIT server-side suppression —
-# tools/voice-fleet.sh sets VOICE_DENOISE=on. A fleet started without it is not
-# a failure, it is a different (also supported) configuration, so the suite is
-# told which one it is looking at rather than guessing.
-if curl -fsS -m 2 http://127.0.0.1:9100/health >/dev/null 2>&1; then
-  bash tools/reset-dev.sh >/dev/null || exit 1
-  TAIL=1 run node tools/suppression-flows.js
-else
-  echo "  SKIP — no fleet on :9100. Start one with: bash tools/voice-fleet.sh"
-  SKIPPED=1
-fi
+step "8/12  noise suppression — 19 assertions, on this device and off"
+bash tools/reset-dev.sh >/dev/null || exit 1
+TAIL=1 run node tools/suppression-flows.js
 
-step "9/11  presence — 8 assertions on the live event stream"
+step "9/12  presence — 8 assertions on the live event stream"
 # Judged by what the server SAYS, not what it stores. The database was
 # perfectly consistent while the server announced a join on every heartbeat,
 # so no assertion about the table could have caught it.
 bash tools/reset-dev.sh >/dev/null || exit 1
 TAIL=1 run node tools/presence-flows.js
 
-step "10/11  voice activity — 7 assertions against a speech-like fixture"
+step "10/12  voice activity — 7 assertions against a speech-like fixture"
 # Chromium's DEFAULT fake device is a pure tone, which a working suppressor
 # removes — so a VAD suite built on it measures the suppressor, not the VAD.
 # This one plays tools/fixtures/speech-like.wav, which has a known duty cycle.
-if curl -fsS -m 2 http://127.0.0.1:9100/health >/dev/null 2>&1; then
-  bash tools/reset-dev.sh >/dev/null || exit 1
-  TAIL=1 run node tools/vad-flows.js
-else
-  echo "  SKIP — no fleet on :9100. Start one with: bash tools/voice-fleet.sh"
-  SKIPPED=1
-fi
+bash tools/reset-dev.sh >/dev/null || exit 1
+TAIL=1 run node tools/vad-flows.js
 
-step "11/11  listener volume — 17 assertions, master, per-person, and mute"
+step "11/12  listener volume — 17 assertions, master, per-person, and mute"
 # The only stage in the audio chain nobody else can hear. Every silence check
 # is paired with a packet count: a volume control implemented by dropping
 # packets or closing a sink would pass "it got quieter" and fail "it is still
 # connected".
-if curl -fsS -m 2 http://127.0.0.1:9100/health >/dev/null 2>&1; then
-  bash tools/reset-dev.sh >/dev/null || exit 1
-  TAIL=1 run node tools/volume-flows.js
-else
-  echo "  SKIP — no fleet on :9100. Start one with: bash tools/voice-fleet.sh"
-  SKIPPED=1
-fi
+bash tools/reset-dev.sh >/dev/null || exit 1
+TAIL=1 run node tools/volume-flows.js
+
+step "12/12  video and removal — 20 assertions: cameras, a screen share, a moderator's kick"
+bash tools/reset-dev.sh >/dev/null || exit 1
+TAIL=1 run node tools/hearth-video-flows.js
 
 printf '\n'
 if [ "${SKIPPED:-0}" = 1 ] && [ "$FAILED" = 0 ]; then

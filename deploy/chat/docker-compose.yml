@@ -1,0 +1,96 @@
+# Idea Chat, locally: everything the server talks to, in containers.
+#
+#   docker compose -f deploy/chat/docker-compose.yml up -d            # services only
+#   docker compose -f deploy/chat/docker-compose.yml --profile app up -d --build   # and the server
+#
+# Ports are offset from the defaults (and from the voice-fleet compose at the
+# repo root) so this runs beside a local Postgres or that stack:
+#
+#   Postgres  localhost:55433   postgres / dev, database `chat`
+#   Redis     localhost:56379   sessions, rate limits, pub/sub fan-out
+#   MinIO     localhost:59000   S3 API      (console on :59001, minio / minio-dev-secret)
+#   Server    localhost:8090    the app and its API          (profile `app`)
+#             udp 8798          the call relay (QUIC)        (profile `app`)
+#
+# Email: the server's dev default is the `log` mailer, which prints every
+# message (verification codes included) to its log. Set CHAT_MAILER=ses and
+# AWS credentials to send for real.
+
+name: idea-chat-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports: ["55433:5432"]
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: chat
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chat"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["56379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # MinIO stopped publishing public images in 2025; Chainguard builds it
+  # from source. The server creates its bucket on start if it is missing.
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports: ["59000:9000", "59001:9001"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio-dev-secret
+    volumes:
+      - miniodata:/data
+
+  server:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: deploy/chat/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    ports: ["8090:8090", "8798:8798/udp"]
+    environment:
+      CHAT_BIND: 0.0.0.0:8090
+      CHAT_PUBLIC_URL: http://localhost:8090
+      DATABASE_URL: postgres://postgres:dev@postgres:5432/chat
+      REDIS_URL: redis://redis:6379
+      CHAT_MAILER: log
+      CHAT_MAIL_FROM: Idea Chat <no-reply@localhost>
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:59000
+      S3_BUCKET: idea-chat
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio-dev-secret
+      CALL_RELAY_BIND: 0.0.0.0:8798
+      CALL_RELAY_PUBLIC_URL: https://localhost:8798/
+      CALL_RELAY_HOSTS: localhost,127.0.0.1
+      # Dev only; production generates and keeps a real secret.
+      CALL_SECRET: dev-call-secret-change-me-0123456789
+      LIVE_SECRET: dev-live-secret-change-me-0123456789
+
+volumes:
+  pgdata:
+  miniodata:

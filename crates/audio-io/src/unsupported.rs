@@ -30,6 +30,10 @@ impl Capture {
     pub fn opened(&self) -> Opened {
         unreachable!("a Capture is never constructed on this platform")
     }
+
+    pub fn input_latency_ms(&self) -> f64 {
+        0.0
+    }
 }
 
 pub struct Output;
@@ -51,6 +55,10 @@ impl Output {
 
     pub fn underruns(&self) -> u32 {
         0
+    }
+
+    pub fn device_latency_ms(&self) -> f64 {
+        0.0
     }
 }
 

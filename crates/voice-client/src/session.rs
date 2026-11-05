@@ -1303,14 +1303,17 @@ async fn pump(
         // a loud room to somebody who had turned it down.
         meter(&REMOTE_PEAK, &pcm, packet.sample_rate, packet.channels);
 
-        // Straight to the device. `write_at` resamples if this sender's rate is
-        // not the output's, which is what keeps a 44.1 kHz caller from playing
-        // back fast in a room that is otherwise at 48.
+        // Straight to the device. `write_at` resamples if this sender's rate
+        // is not the output's, which is what keeps a 44.1 kHz caller from
+        // playing back fast in a room that is otherwise at 48.
         //
-        // The packet's own `pts_micros` is deliberately unused here — it is the
-        // sender's timeline, and reconciling the two is the jitter buffer's
-        // job, which it does by sequence number.
+        // The packet's own `pts_micros` is deliberately unused here — it is
+        // the sender's timeline, and reconciling the two is the jitter
+        // buffer's job, which it does by sequence number.
+        #[cfg(target_arch = "wasm32")]
         sink.output.write_at(&pcm, packet.sample_rate);
+        #[cfg(not(target_arch = "wasm32"))]
+        sink.output.write(&pcm);
     }
 }
 

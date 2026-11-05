@@ -5,10 +5,12 @@
   "runServices": ["dev", "postgres", "redis", "chrome"],
   "workspaceFolder": "/workspaces/idea-chat",
   "features": {
-    "ghcr.io/devcontainers/features/node:1": {}
+    "ghcr.io/devcontainers/features/node:1": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
+    "ghcr.io/devcontainers/features/aws-cli:1": {}
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
-  "forwardPorts": [8080, 9000, 8787, 8788, 8789, 55432, 6399],
+  "forwardPorts": [8080, 9000, 8787, 8788, 8789, 6399],
   "portsAttributes": {
     "8080": { "label": "web client (idealyst dev)" },
     "9000": { "label": "voice-director" },

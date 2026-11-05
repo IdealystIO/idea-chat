@@ -72,12 +72,24 @@ pub fn set_muted(muted: bool) {
     let _ = muted;
 }
 
+/// Deafen or undeafen the live call — everyone else's audio to nothing, or
+/// back — where there is one. A shim for the same reason as [`set_muted`].
+pub fn set_deafened(app: model::App, deafened: bool) {
+    #[cfg(all(not(feature = "server"), target_arch = "wasm32"))]
+    voice::set_deafened(app, deafened);
+    #[cfg(not(all(not(feature = "server"), target_arch = "wasm32")))]
+    let _ = (app, deafened);
+}
+
 /// SDK-handler registration seam the CLI-generated wrappers invoke after
-/// `runtime_vocabulary::register_builtins`. Hearth renders entirely from
-/// builtin primitives and idea-ui components, so there is nothing to register.
-pub fn register_scene_extensions<H: runtime_scene::Host>(
-    _registry: &mut runtime_scene::Registry<H>,
-) {
+/// `runtime_vocabulary::register_builtins`: the SDK's `Video`, which the
+/// call stage plays cameras and screen shares in. Everything else Hearth draws
+/// is builtin primitives and idea-ui components.
+pub fn register_scene_extensions<H: idealyst::SceneHost>(registry: &mut runtime_scene::Registry<H>) {
+    #[cfg(not(feature = "server"))]
+    call_video::register_scene_extensions(registry);
+    #[cfg(feature = "server")]
+    let _ = registry;
 }
 
 /// Android entry point used by the generated wrapper.
@@ -139,6 +151,8 @@ mod client {
             // Collects the capture chain's voice-activity decision into a
             // signal the UI can read. See `voice::watch_activity`.
             crate::voice::watch_activity(state);
+            // The camera and share buttons, and who is sending video.
+            crate::voice::watch_media(state);
             // One connection, held for the session. It serves the opening
             // state and every change after it.
             crate::livewire::start(state);

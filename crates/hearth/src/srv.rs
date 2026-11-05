@@ -246,13 +246,38 @@ pub fn voice_secret() -> Option<Vec<u8>> {
     }
 }
 
-/// Where clients reach the fleet.
-///
-/// Same-origin by default: the gateway is mounted under `/_voice`, so a
-/// browser on `https://…` gets `wss://` with no configuration, and there is
-/// no second origin for a cookie or a certificate to disagree about.
-pub fn voice_relay() -> String {
-    std::env::var("VOICE_RELAY").unwrap_or_else(|_| "/_voice".to_string())
+/// How long a voice grant lasts. Clients renew at half-life by asking for
+/// another ticket — which re-checks that they may still see the channel — so
+/// this is also the longest someone who lost access stays in a call when
+/// nothing revokes them directly.
+pub const GRANT_TTL_MS: u64 = 120_000;
+
+/// The call relay this process runs: its handle, for revocations, and what a
+/// browser needs to dial it.
+pub struct CallRelay {
+    pub handle: call_relay::Handle,
+    pub url: String,
+    /// Hex; empty for a CA certificate.
+    pub cert_hash: String,
+}
+
+static CALL_RELAY: std::sync::OnceLock<CallRelay> = std::sync::OnceLock::new();
+
+/// Record the relay started at boot.
+pub fn install_call_relay(relay: CallRelay) {
+    let _ = CALL_RELAY.set(relay);
+}
+
+/// The relay, if voice is on.
+pub fn call_relay() -> Option<&'static CallRelay> {
+    CALL_RELAY.get()
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub fn now_secs() -> u64 {
@@ -260,21 +285,6 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// A stable small integer for one user, for the transport's sender field.
-///
-/// The wire wants a `u32` and the app has a UUID, so this folds one into the
-/// other. Collisions are possible and survivable: two people who collide in
-/// the same room would each filter the other's frames as their own, which is
-/// a bad call for those two — not a security boundary, which the ticket is.
-///
-/// The arithmetic lives in `voice_proto` rather than here because the CLIENT
-/// needs the same mapping: per-person volume is chosen against a person and
-/// applied against a sender number, so a second spelling of this would present
-/// as a slider that turns down the wrong voice.
-pub fn participant_number(id: Uuid) -> u32 {
-    voice_proto::participant_id(id.as_bytes())
 }
 
 /// Group occupants into one entry per room.

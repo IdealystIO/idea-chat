@@ -185,6 +185,46 @@ impl Capture {
     ) -> Result<Capture, Error> {
         let wanted_rate = config.sample_rate.unwrap_or(PREFERRED_RATE);
         let ctx = context(wanted_rate).await?;
+        let stream = get_user_media(&config, ctx.sample_rate() as u32).await?;
+        Capture::start(ctx, stream, config, pipeline, on_block)
+    }
+
+    /// Capture from a stream the caller already has — a screen share's or a
+    /// tab's audio, from `getDisplayMedia` — instead of opening a microphone.
+    ///
+    /// Web only: there is no such stream anywhere else. The processing flags
+    /// in `config` do not apply (they are `getUserMedia` constraints); its
+    /// rate, channels and latency do.
+    ///
+    /// The capture runs on CLONES of `stream`'s audio tracks, so closing it
+    /// stops only those: the caller's stream, and its video, carry on.
+    pub async fn open_stream(
+        stream: &MediaStream,
+        config: CaptureConfig,
+        pipeline: Pipeline,
+        on_block: impl FnMut(&[f32], u32, u16, u64) + 'static,
+    ) -> Result<Capture, Error> {
+        let audio = stream.get_audio_tracks();
+        if audio.length() == 0 {
+            return Err(Error::NoDevice);
+        }
+        let own = MediaStream::new().map_err(|e| js_error("MediaStream", e))?;
+        for track in audio.iter() {
+            if let Ok(track) = track.dyn_into::<web_sys::MediaStreamTrack>() {
+                own.add_track(&track.clone());
+            }
+        }
+        let ctx = context(config.sample_rate.unwrap_or(PREFERRED_RATE)).await?;
+        Capture::start(ctx, own, config, pipeline, on_block)
+    }
+
+    fn start(
+        ctx: AudioContext,
+        stream: MediaStream,
+        config: CaptureConfig,
+        pipeline: Pipeline,
+        on_block: impl FnMut(&[f32], u32, u16, u64) + 'static,
+    ) -> Result<Capture, Error> {
         // The context's rate is authoritative — the browser is free to have
         // clamped what we asked for, and everything downstream (the codec, the
         // packetiser, the jitter buffer) has to agree with reality rather than
@@ -193,7 +233,6 @@ impl Capture {
         let channels = config.channels.max(1);
         let block_frames = resolve(config.latency, &WORKLET);
 
-        let stream = get_user_media(&config, rate).await?;
         let source =
             ctx.create_media_stream_source(&stream).map_err(|e| js_error("createMediaStreamSource", e))?;
 
@@ -267,6 +306,21 @@ impl Capture {
     /// What the platform actually gave us.
     pub fn opened(&self) -> Opened {
         self.opened
+    }
+
+    /// How long the microphone takes to deliver a sound, in ms: the track's
+    /// own `latency` setting, where the browser reports one (Chromium does),
+    /// else 0. For anyone timestamping what was captured — lip sync, for one.
+    pub fn input_latency_ms(&self) -> f64 {
+        self.stream
+            .get_audio_tracks()
+            .get(0)
+            .dyn_into::<web_sys::MediaStreamTrack>()
+            .ok()
+            .and_then(|t| Reflect::get(&t.get_settings(), &"latency".into()).ok())
+            .and_then(|v| v.as_f64())
+            .map(|s| s * 1000.0)
+            .unwrap_or(0.0)
     }
 }
 
@@ -460,6 +514,18 @@ impl Output {
     /// longer be late.
     pub fn underruns(&self) -> u32 {
         self.telemetry.get().1
+    }
+
+    /// How long audio takes from this output's context to the speaker, past
+    /// the queue [`queued_frames`](Self::queued_frames) measures: the
+    /// context's `baseLatency` + `outputLatency`, in ms. Tens of ms on a wired
+    /// device, a couple of hundred over Bluetooth; 0 where the browser does
+    /// not say. Read through `Reflect` because `web-sys` gates both getters
+    /// behind its unstable APIs.
+    pub fn device_latency_ms(&self) -> f64 {
+        let ctx = self.node.context();
+        let get = |key: &str| Reflect::get(&ctx, &key.into()).ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+        (get("baseLatency") + get("outputLatency")) * 1000.0
     }
 }
 
