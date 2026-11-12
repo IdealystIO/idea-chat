@@ -40,6 +40,14 @@ members = [
     "crates/chat-api",
     "crates/chat",
     "crates/chat-server",
+    # Sigil: the group E2EE protocol (docs/e2ee-protocol.md).
+    "crates/sigil",
+    "crates/sigil-server",
+    "crates/sigil-media",
+    "crates/sigil-relay",
+    "crates/sigil-api",
+    "crates/sigil-host",
+    "crates/sigil-demo",
 ]
 
 [workspace.package]

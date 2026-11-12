@@ -1,0 +1,19 @@
+[package]
+name = "sigil-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The relay for Sigil's lossy services: call-relay's forwarding, admitted by grants a Sigil server issues to member devices."
+
+# The forwarding is call-relay's, unchanged; this crate decides who it
+# admits, in Sigil's terms.
+[dependencies]
+sigil = { path = "../sigil" }
+call-relay = { path = "../call-relay" }
+call-auth = { workspace = true }
+call-proto = { workspace = true }
+datagram = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+sigil-media = { path = "../sigil-media" }

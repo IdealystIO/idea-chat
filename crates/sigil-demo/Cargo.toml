@@ -1,0 +1,17 @@
+[package]
+name = "sigil-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A narrated run of Sigil against a live sigil-host: three devices, a group, stored messages, voice through the relay, removal and history."
+
+[dependencies]
+sigil = { path = "../sigil" }
+sigil-api = { path = "../sigil-api" }
+sigil-media = { path = "../sigil-media" }
+call-proto = { workspace = true }
+datagram = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

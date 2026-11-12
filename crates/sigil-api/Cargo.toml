@@ -1,0 +1,39 @@
+[package]
+name = "sigil-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Sigil API: #[server] functions and the live connection a device uses to reach a Sigil server. Without the `server` feature it is the client's stubs; with it, the real bodies over sigil-server. Every payload is ciphertext or public, carried as base64url text."
+
+[features]
+default = []
+server = [
+    "server/server",
+    "server-kit/server",
+    "dep:sigil",
+    "dep:sigil-server",
+    "dep:sigil-relay",
+    "dep:tokio",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:rand",
+]
+
+[dependencies]
+server = { workspace = true }
+server-kit = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+
+# Server-only.
+sigil = { path = "../sigil", optional = true }
+sigil-server = { path = "../sigil-server", optional = true }
+sigil-relay = { path = "../sigil-relay", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
+
+[dev-dependencies]
+cache = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

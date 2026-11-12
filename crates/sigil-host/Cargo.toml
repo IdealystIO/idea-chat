@@ -1,0 +1,20 @@
+[package]
+name = "sigil-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A Sigil server in one process: the Sigil API, its live connections, and the relay for lossy services."
+
+[dependencies]
+sigil-api = { path = "../sigil-api", features = ["server"] }
+sigil-server = { path = "../sigil-server" }
+sigil-relay = { path = "../sigil-relay" }
+sigil = { path = "../sigil" }
+datagram = { workspace = true }
+server = { workspace = true, features = ["server"] }
+server-kit = { workspace = true, features = ["server"] }
+cache = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+axum = "0.7"
+rand = "0.8"
+base64 = "0.22"

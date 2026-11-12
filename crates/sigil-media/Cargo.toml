@@ -1,0 +1,13 @@
+[package]
+name = "sigil-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sigil's lossy realtime envelope (spec §6.3): SFrame keyed from a group's epoch, with sender ids that name MLS leaves."
+
+# Platform-free; the caller supplies the epoch's base key (sigil's
+# Group::sframe_base), its leaf index, randomness-free counters and the time.
+# The SFrame primitives are call-e2ee's, used as they are.
+[dependencies]
+call-e2ee = { workspace = true }
+call-proto = { workspace = true }
