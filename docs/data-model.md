@@ -54,6 +54,10 @@ The same conviction applies to permissions: **three roles, no capability
 bitfields** (§8). If a permission matrix is wanted later it is an additive
 migration; starting with one guarantees we ship the thing the product exists to
 avoid.
+*Update: that matrix now exists as that additive change: named roles that
+carry permission bits (see [permissions.md](permissions.md)). A new space still
+starts with just its owner and an everyone baseline, and the client gains no
+role-editing screens with it.*
 
 **A voice tier already exists and is not mine to redesign.** `voice-server` is
 a binary WebSocket audio relay with its own coordination store. The chat tier
@@ -322,6 +326,14 @@ authorization is in the signature rather than in the body.
 No per-channel overrides and no capability bitfield. That is a product
 decision as much as a schema one, and it is the same decision the design makes
 about notifications.
+
+> **Update.** The chat model now has named roles that carry permission bits, a
+> per-space everyone baseline, and per-role overwrites on a channel: the additive
+> change the opening of this document anticipated. See
+> [permissions.md](permissions.md). The table above is what the first three
+> roles looked like; a new space now has its owner and everyone on the baseline,
+> and admins and moderators are roles a space creates. This change adds no
+> role-editing screens, so the client stays as simple as the table.
 
 ## 5. Authentication — the model
 
