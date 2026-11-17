@@ -440,9 +440,11 @@ pub fn can_attach(channel: &Channel, space: Option<&Space>, user: Id) -> bool {
 }
 
 /// Posting a link a reader expands: [`Permission::EmbedLink`] buys it. The
-/// server sees the act because it reads the message bodies it is handed
-/// (`send` and `edit` resolve mentions in the cleartext they were given), so
-/// this is checked where the act is, not guessed from encrypted content.
+/// server sees the act because today it stores and reads message bodies in the
+/// clear (`send` and `edit` resolve mentions in the text they are given), so this
+/// is checked where the act is. If messages move to the sealed records of
+/// `docs/e2ee-protocol.md`, the server can no longer read a body and a
+/// permission about content like this one would have to be enforced by clients.
 pub fn can_embed(channel: &Channel, space: Option<&Space>, user: Id) -> bool {
     can_at(channel, space, user, Permission::EmbedLink)
 }
