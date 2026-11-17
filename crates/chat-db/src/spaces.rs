@@ -375,11 +375,10 @@ impl Db {
         match minutes {
             Some(m) => {
                 sqlx::query(
-                    "UPDATE space_members SET timeout_ends = $3::interval * $4 WHERE space_id = $1 AND user_id = $2",
+                    "UPDATE space_members SET timeout_ends = now() + make_interval(mins => $3) WHERE space_id = $1 AND user_id = $2",
                 )
                     .bind(space)
                     .bind(user)
-                    .bind("minutes")
                     .bind(m as i32)
                     .execute(&self.pool)
                     .await?;

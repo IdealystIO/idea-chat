@@ -182,6 +182,25 @@ async fn roles_are_created_named_and_deleted_with_their_holders() {
 }
 
 #[tokio::test]
+async fn a_timeout_holds_a_member_back_until_it_passes_or_is_lifted() {
+    let Some(db) = db().await else { return };
+    let ana = account(&db, "ana").await;
+    let (space, _) = db.create_space(&NewSpace { name: "Club".into(), owner: ana }).await.unwrap();
+    let bob = account(&db, "bob").await;
+    let invite = db.create_invite(space.id, ana, None, None).await.unwrap();
+    db.redeem_invite(&invite.code, bob).await.unwrap();
+
+    assert!(!db.timed_out(space.id, bob).await.unwrap(), "nobody starts timed out");
+    db.set_timeout(space.id, bob, Some(5)).await.unwrap();
+    assert!(db.timed_out(space.id, bob).await.unwrap(), "five minutes from now is still ahead");
+    assert!(!db.timed_out(space.id, ana).await.unwrap(), "and it is only bob's");
+    db.set_timeout(space.id, bob, None).await.unwrap();
+    assert!(!db.timed_out(space.id, bob).await.unwrap(), "clearing it lifts it");
+    db.set_timeout(space.id, bob, Some(0)).await.unwrap();
+    assert!(!db.timed_out(space.id, bob).await.unwrap(), "a zero-minute timeout has already passed");
+}
+
+#[tokio::test]
 async fn posting_counts_mentions_and_reading_clears_them() {
     let Some(db) = db().await else { return };
     let ana = account(&db, "ana").await;
