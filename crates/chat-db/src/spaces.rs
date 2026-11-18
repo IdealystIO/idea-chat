@@ -8,7 +8,7 @@ use rand::Rng;
 use time::OffsetDateTime;
 
 use crate::channels::ChannelInit;
-use crate::{millis, new_id, opt_millis, role_of, role_text, Db, Error, Result};
+use crate::{millis, new_id, opt_millis, Db, Error, Result};
 
 /// What creating a space needs.
 #[derive(Debug, Clone)]
@@ -32,6 +32,7 @@ struct SpaceRow {
     name: String,
     icon: Option<String>,
     owner_id: Id,
+    everyone: i64,
     created_at: OffsetDateTime,
 }
 
@@ -74,17 +75,18 @@ impl Db {
     pub async fn create_space(&self, new: &NewSpace) -> Result<(Space, Vec<Channel>)> {
         let mut tx = self.pool.begin().await?;
         let id = new_id();
-        sqlx::query("INSERT INTO spaces (id, name, owner_id) VALUES ($1, $2, $3)")
+        sqlx::query("INSERT INTO spaces (id, name, owner_id, everyone) VALUES ($1, $2, $3, $4)")
             .bind(id)
             .bind(&new.name)
             .bind(new.owner)
+            .bind(chat_model::perms::DEFAULT_EVERYONE as i64)
             .execute(&mut *tx)
             .await?;
         let position: i32 = sqlx::query_scalar("SELECT coalesce(max(position) + 1, 0) FROM space_members WHERE user_id = $1")
             .bind(new.owner)
             .fetch_one(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO space_members (space_id, user_id, role, position) VALUES ($1, $2, 'owner', $3)")
+        sqlx::query("INSERT INTO space_members (space_id, user_id, role_ids, position) VALUES ($1, $2, '{}', $3)")
             .bind(id)
             .bind(new.owner)
             .bind(position)
@@ -111,8 +113,8 @@ impl Db {
                     category: Some(cat),
                     parent: None,
                     starter: None,
-                    view: Role::Member,
-                    post: Role::Member,
+                    view: 0,
+                    post: 0,
                     created_by: new.owner,
                 },
             )
@@ -126,13 +128,13 @@ impl Db {
 
     /// A space, with its members and categories.
     pub async fn space(&self, id: Id) -> Result<Space> {
-        let row: SpaceRow = sqlx::query_as("SELECT id, name, icon, owner_id, created_at FROM spaces WHERE id = $1")
+        let row: SpaceRow = sqlx::query_as("SELECT id, name, icon, owner_id, everyone, created_at FROM spaces WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound)?;
-        let members: Vec<(Id, String, OffsetDateTime)> =
-            sqlx::query_as("SELECT user_id, role, joined_at FROM space_members WHERE space_id = $1")
+        let members: Vec<(Id, Vec<Id>, OffsetDateTime)> =
+            sqlx::query_as("SELECT user_id, role_ids, joined_at FROM space_members WHERE space_id = $1")
                 .bind(id)
                 .fetch_all(&self.pool)
                 .await?;
@@ -141,15 +143,23 @@ impl Db {
                 .bind(id)
                 .fetch_all(&self.pool)
                 .await?;
+        let roles: Vec<(Id, String, i64, i32)> =
+            sqlx::query_as("SELECT role_id, name, permissions, position FROM space_roles WHERE space_id = $1")
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(Space {
             id: row.id,
             name: row.name,
             icon: row.icon,
             owner: row.owner_id,
+            everyone: row.everyone as u64,
             members: members
                 .into_iter()
-                .map(|(u, r, at)| (u, Member { role: role_of(&r), joined_at: millis(at) }))
+                .map(|(u, rs, at)| (u, Member { roles: rs, joined_at: millis(at) }))
                 .collect::<BTreeMap<_, _>>(),
+            roles: roles.into_iter().map(|(role_id, name, permissions, position)|
+                    (role_id, Role { id: role_id, name, permissions: permissions as u64, position })).collect::<BTreeMap<_, _>>(),
             categories: categories.into_iter().map(|(id, name, position)| Category { id, name, position }).collect(),
             created_at: millis(row.created_at),
         })
@@ -163,14 +173,14 @@ impl Db {
             .await?)
     }
 
-    /// `user`'s role in `space`, or `None` if they are not in it.
-    pub async fn role(&self, space: Id, user: Id) -> Result<Option<Role>> {
-        let r: Option<String> = sqlx::query_scalar("SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2")
+    /// `user`'s role ids in `space`, or `None` if they are not in it.
+    pub async fn role_ids(&self, space: Id, user: Id) -> Result<Option<Vec<Id>>> {
+        let r: Option<Vec<Id>> = sqlx::query_scalar("SELECT role_ids FROM space_members WHERE space_id = $1 AND user_id = $2")
             .bind(space)
             .bind(user)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(r.as_deref().map(role_of))
+        Ok(r)
     }
 
     pub async fn member_ids(&self, space: Id) -> Result<Vec<Id>> {
@@ -198,7 +208,9 @@ impl Db {
     /// Take `user` out of `space`. The owner cannot leave; they transfer the
     /// space or delete it.
     pub async fn remove_member(&self, space: Id, user: Id) -> Result<()> {
-        let done = sqlx::query("DELETE FROM space_members WHERE space_id = $1 AND user_id = $2 AND role <> 'owner'")
+        let done = sqlx::query(
+            "DELETE FROM space_members WHERE space_id = $1 AND user_id = $2 AND user_id <> (SELECT owner_id FROM spaces WHERE id = $1)",
+        )
             .bind(space)
             .bind(user)
             .execute(&self.pool)
@@ -217,21 +229,174 @@ impl Db {
         Ok(())
     }
 
-    pub async fn set_role(&self, space: Id, user: Id, role: Role) -> Result<()> {
-        if role == Role::Owner {
-            return Err(Error::Refused("Ownership is transferred, not granted.".into()));
-        }
-        sqlx::query("UPDATE space_members SET role = $3 WHERE space_id = $1 AND user_id = $2 AND role <> 'owner'")
+    /// Restate the space's everyone baseline: what every member holds
+    /// whatever their roles say.
+    pub async fn set_everyone(&self, space: Id, everyone: u64) -> Result<()> {
+        sqlx::query("UPDATE spaces SET everyone = $2 WHERE id = $1")
             .bind(space)
-            .bind(user)
-            .bind(role_text(role))
+            .bind(everyone as i64)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// Make `to` the owner; the old owner becomes an admin.
-    pub async fn transfer_space(&self, space: Id, from: Id, to: Id) -> Result<()> {
+    /// Restate the role ids `user` holds. The owner holds none by choice:
+    /// their control comes from ownership, so a grant never reaches them.
+    pub async fn set_role_ids(&self, space: Id, user: Id, roles: &[Id]) -> Result<()> {
+        sqlx::query(
+            "UPDATE space_members SET role_ids = $3 WHERE space_id = $1 AND user_id = $2 AND user_id <> (SELECT owner_id FROM spaces WHERE id = $1)",
+        )
+            .bind(space)
+            .bind(user)
+            .bind(roles)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Create a space role; `permissions` is the bitset its holders get.
+    pub async fn create_role(&self, space: Id, name: &str, permissions: u64) -> Result<Role> {
+        let position: i32 = sqlx::query_scalar("SELECT coalesce(max(position) + 1, 0) FROM space_roles WHERE space_id = $1")
+            .bind(space)
+            .fetch_one(&self.pool)
+            .await?;
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO space_roles (space_id, role_id, name, permissions, position) VALUES ($1, $2, $3, $4, $5)",
+        )
+            .bind(space)
+            .bind(id)
+            .bind(name)
+            .bind(permissions as i64)
+            .bind(position)
+            .execute(&self.pool)
+            .await?;
+        Ok(Role { id, name: name.to_string(), permissions, position })
+    }
+
+    /// Rename a role and restate its permissions, in place.
+    pub async fn update_role(&self, space: Id, role: Id, name: &str, permissions: u64) -> Result<()> {
+        sqlx::query(
+            "UPDATE space_roles SET name = $3, permissions = $4 WHERE space_id = $1 AND role_id = $2",
+        )
+            .bind(space)
+            .bind(role)
+            .bind(name)
+            .bind(permissions as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a role: every member holding it drops it. Channel masks are
+    /// permission bits, not role names, so they are untouched — a mask a
+    /// deleted role used simply becomes one nobody covers.
+    pub async fn delete_role(&self, space: Id, role: Id) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM space_roles WHERE space_id = $1 AND role_id = $2")
+            .bind(space)
+            .bind(role)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE space_members SET role_ids = array_remove(role_ids, $2::uuid) WHERE space_id = $1 AND $2::uuid = ANY (role_ids)",
+        )
+            .bind(space)
+            .bind(role)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Make `to` the owner. The old owner keeps whatever roles they hold;
+    /// ownership is the space's own fact, so it simply moves.
+    /// Ban `user`: record the ban and take them out of the space now. The
+    /// ban is what keeps their seat closed while they are out of it.
+    pub async fn ban(&self, space: Id, user: Id) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO space_bans (space_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+            .bind(space)
+            .bind(user)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "DELETE FROM space_members WHERE space_id = $1 AND user_id = $2 AND user_id <> (SELECT owner_id FROM spaces WHERE id = $1)",
+        )
+            .bind(space)
+            .bind(user)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Lift a ban. The member does not come back by itself; an invite or a
+    /// space join does.
+    pub async fn unban(&self, space: Id, user: Id) -> Result<()> {
+        sqlx::query("DELETE FROM space_bans WHERE space_id = $1 AND user_id = $2")
+            .bind(space)
+            .bind(user)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Whether `user` is banned in `space`.
+    pub async fn banned(&self, space: Id, user: Id) -> Result<bool> {
+        let hit: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM space_bans WHERE space_id = $1 AND user_id = $2",
+        )
+            .bind(space)
+            .bind(user)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(hit.is_some())
+    }
+
+    /// Whether `user` is timed out in `space` right now: their seat stays
+    /// open, but their sends and speech are held back until the row passes.
+    pub async fn timed_out(&self, space: Id, user: Id) -> Result<bool> {
+        let hit: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM space_members WHERE space_id = $1 AND user_id = $2 AND timeout_ends > now()",
+        )
+            .bind(space)
+            .bind(user)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(hit.is_some())
+    }
+
+    /// Time `user` out in `space` until `until` (a fresh `now()` plus
+    /// `minutes`), or clear it with `None`.
+    pub async fn set_timeout(&self, space: Id, user: Id, minutes: Option<u32>) -> Result<()> {
+        match minutes {
+            Some(m) => {
+                sqlx::query(
+                    "UPDATE space_members SET timeout_ends = now() + make_interval(mins => $3) WHERE space_id = $1 AND user_id = $2",
+                )
+                    .bind(space)
+                    .bind(user)
+                    .bind(m as i32)
+                    .execute(&self.pool)
+                    .await?;
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE space_members SET timeout_ends = NULL WHERE space_id = $1 AND user_id = $2",
+                )
+                    .bind(space)
+                    .bind(user)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn transfer_space(&self, space: Id, _from: Id, to: Id) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         let is_member: Option<i32> =
             sqlx::query_scalar("SELECT 1 FROM space_members WHERE space_id = $1 AND user_id = $2")
@@ -242,16 +407,6 @@ impl Db {
         if is_member.is_none() {
             return Err(Error::NotFound);
         }
-        sqlx::query("UPDATE space_members SET role = 'admin' WHERE space_id = $1 AND user_id = $2")
-            .bind(space)
-            .bind(from)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE space_members SET role = 'owner' WHERE space_id = $1 AND user_id = $2")
-            .bind(space)
-            .bind(to)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query("UPDATE spaces SET owner_id = $2 WHERE id = $1").bind(space).bind(to).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
@@ -409,12 +564,23 @@ impl Db {
         .fetch_optional(&mut *tx)
         .await?;
         let space = space.ok_or(Error::NotFound)?;
+        let banned: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM space_bans WHERE space_id = $1 AND user_id = $2",
+        )
+            .bind(space)
+            .bind(user)
+            .fetch_one(&mut *tx)
+            .await?;
+        if banned > 0 {
+            tx.rollback().await?;
+            return Err(Error::Refused("That invite no longer works for you.".into()));
+        }
         let position: i32 = sqlx::query_scalar("SELECT coalesce(max(position) + 1, 0) FROM space_members WHERE user_id = $1")
             .bind(user)
             .fetch_one(&mut *tx)
             .await?;
         let joined: Option<OffsetDateTime> = sqlx::query_scalar(
-            "INSERT INTO space_members (space_id, user_id, role, position) VALUES ($1, $2, 'member', $3) \
+            "INSERT INTO space_members (space_id, user_id, role_ids, position) VALUES ($1, $2, '{}', $3) \
              ON CONFLICT DO NOTHING RETURNING joined_at",
         )
         .bind(space)
@@ -427,6 +593,6 @@ impl Db {
         };
         sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1").bind(code).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(InviteOutcome::Joined { space, member: Member { role: Role::Member, joined_at: millis(joined_at) } })
+        Ok(InviteOutcome::Joined { space, member: Member { roles: vec![], joined_at: millis(joined_at) } })
     }
 }

@@ -19,10 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::perms::{self, Access};
+use crate::perms::{self, Access, Permission};
 use crate::{
     Category, Channel, ChannelKind, Device, Id, KeyRequest, Me, Member, Message, Millis, Presence, ReadState,
-    Relation, Ring, Role, SealedKey, Space, Status, User, VoiceState,
+    Relation, Ring, Role, SealedKey, Space, PermissionSet, Status, User, VoiceState,
 };
 
 /// Everything one viewer's client draws from, apart from message history.
@@ -75,7 +75,15 @@ pub enum Event {
     /// The viewer is no longer in a space: left, removed, or it was deleted.
     SpaceRemoved { space: Id },
     MemberJoined { space: Id, user: User, member: Member },
-    MemberRole { space: Id, user: Id, role: Role },
+    MemberRoles { space: Id, user: Id, roles: Vec<Id> },
+    /// Ownership moved: the space now belongs to another member.
+    OwnerChanged { space: Id, owner: Id },
+    /// The space's whole role set restated, so every connection can see the
+    /// new names and permissions.
+    RolesChanged { space: Id, roles: Vec<Role> },
+    /// The space's baseline of what every member holds restated, so
+    /// connections can re-derive what they may see.
+    BaselineChanged { space: Id, everyone: PermissionSet },
     MemberLeft { space: Id, user: Id },
     CategoriesChanged { space: Id, categories: Vec<Category> },
     SpaceOrder { spaces: Vec<Id> },
@@ -202,12 +210,24 @@ impl State {
                     s.members.insert(user.id, member.clone());
                 }
             }
-            Event::MemberRole { space, user, role } => {
+            Event::MemberRoles { space, user, roles } => {
                 if let Some(m) = self.spaces.get_mut(space).and_then(|s| s.members.get_mut(user)) {
-                    m.role = *role;
+                    m.roles = roles.clone();
                 }
-                if let Some(s) = self.spaces.get_mut(space).filter(|_| *role == Role::Owner) {
-                    s.owner = *user;
+            }
+            Event::RolesChanged { space, roles } => {
+                if let Some(s) = self.spaces.get_mut(space) {
+                    s.roles = roles.iter().map(|r| (r.id, r.clone())).collect();
+                }
+            }
+            Event::BaselineChanged { space, everyone } => {
+                if let Some(s) = self.spaces.get_mut(space) {
+                    s.everyone = *everyone;
+                }
+            }
+            Event::OwnerChanged { space, owner } => {
+                if let Some(s) = self.spaces.get_mut(space) {
+                    s.owner = *owner;
                 }
             }
             Event::MemberLeft { space, user } => {
@@ -367,9 +387,10 @@ impl State {
         perms::channel_access(me, &rules, self.space_of(c))
     }
 
-    /// The viewer's role in a space.
-    pub fn my_role(&self, space: Id) -> Option<Role> {
-        self.spaces.get(&space).and_then(|s| s.role_of(self.me_id()?))
+    /// The viewer's permission set in a space — what they may do there.
+    pub fn my_permissions(&self, space: Id) -> Option<u64> {
+        let Some(me) = self.me_id() else { return None };
+        self.spaces.get(&space).and_then(|s| perms::effective(s, me))
     }
 
     /// Whether a channel has messages the viewer has not read.
@@ -539,17 +560,18 @@ impl State {
         self.rings.values().find(|r| r.started_by != me && r.ringing.contains(&me))
     }
 
-    /// The people in a space, grouped for its member list: online first by
-    /// role, then offline, each by name.
+    /// The people in a space, grouped for its member list: admins (anyone
+    /// whose permission set covers the admin tag) online first, then others
+    /// online, then offline, each by name.
     pub fn roster(&self, space: Id) -> Roster {
         let mut roster = Roster::default();
         let Some(s) = self.spaces.get(&space) else { return roster };
-        let mut members: Vec<(Id, Role)> = s.members.iter().map(|(u, m)| (*u, m.role)).collect();
-        members.sort_by_cached_key(|(u, r)| (std::cmp::Reverse(*r), self.display_name(*u).to_lowercase()));
-        for (user, role) in members {
+        let mut members: Vec<(Id, bool)> = s.members.keys().map(|u| (*u, perms::can(s, *u, Permission::IsAdmin))).collect();
+        members.sort_by_key(|(u, admin)| (std::cmp::Reverse(*admin), self.display_name(*u).to_lowercase()));
+        for (user, _) in members {
             if self.presence_of(user) == Presence::Offline {
                 roster.offline.push(user);
-            } else if role >= Role::Admin {
+            } else if perms::can(s, user, Permission::IsAdmin) {
                 roster.admins.push(user);
             } else {
                 roster.online.push(user);
@@ -606,6 +628,51 @@ pub struct Roster {
     pub offline: Vec<Id>,
 }
 
+/// The topic a space's shared events ride, the topic a channel's own gated
+/// events ride, and the topic a viewer's presence rides. A space channel
+/// rides its own topic only when it is gated — see
+/// [`crate::perms::rides_own_topic`] — so only the viewers who may read it
+/// subscribe to it; the fan-out, not the client, is what enforces reading.
+pub fn space_topic(space: Id) -> String {
+    format!("s:{space}")
+}
+
+pub fn conversation_topic(channel: Id) -> String {
+    format!("c:{channel}")
+}
+
+pub fn user_topic(user: Id) -> String {
+    format!("u:{user}")
+}
+
+/// Everything the viewer of `state` hears: their presence topic, each space's
+/// shared topic, each conversation they are in, and each gated space channel
+/// they may read — judged by the parent's rules for a thread, so a subscription
+/// follows exactly what [`crate::perms::channel_access`] decides they see. The
+/// server uses this on every recompute; the tests exercise the same path.
+pub fn topics_for(state: &State) -> Vec<String> {
+    use crate::perms::{channel_access, rides_own_topic};
+
+    let Some(me) = state.me_id() else { return Vec::new() };
+    let mut topics = vec![user_topic(me)];
+    for space in state.spaces.values() {
+        topics.push(space_topic(space.id));
+    }
+    for c in state.channels.values() {
+        if c.kind.is_private() {
+            topics.push(conversation_topic(c.id));
+            continue;
+        }
+        let Some(s) = c.space.and_then(|id| state.spaces.get(&id)) else { continue };
+        // A thread is judged by its parent's rules and overwrites.
+        let rules = c.parent.and_then(|p| state.channels.get(&p)).unwrap_or(c);
+        if rides_own_topic(rules, s.everyone) && channel_access(me, rules, Some(s)).can_read() {
+            topics.push(conversation_topic(c.id));
+        }
+    }
+    topics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,13 +690,18 @@ mod tests {
         Me { user: user(n, "Me"), email: "me@example.com".into(), status: Status { presence: Presence::Online, text: None } }
     }
 
-    fn space(n: u128, members: &[(u128, Role)]) -> Space {
+    fn space(n: u128, members: &[(u128, Vec<u128>)]) -> Space {
         Space {
             id: id(n),
             name: "Space".into(),
             icon: None,
             owner: id(1),
-            members: members.iter().map(|&(u, r)| (id(u), Member { role: r, joined_at: 0 })).collect(),
+            everyone: 0,
+            members: members
+                .iter()
+                .map(|(u, rs)| (id(*u), Member { roles: rs.iter().map(|&n| id(n)).collect(), joined_at: 0 }))
+                .collect(),
+            roles: BTreeMap::new(),
             categories: vec![],
             created_at: 0,
         }
@@ -646,10 +718,11 @@ mod tests {
             position: 0,
             parent: None,
             starter: None,
-            view: Role::Member,
-            post: Role::Member,
+            view: 0,
+            post: 0,
             members: vec![],
             archived: false,
+            overwrites: BTreeMap::new(),
             last_message: None,
             message_count: 0,
             created_by: id(1),
@@ -680,7 +753,7 @@ mod tests {
     fn world() -> State {
         let mut s = State { me: Some(me(1)), ..Default::default() };
         s.apply(&Event::SpaceUpserted {
-            space: space(100, &[(1, Role::Owner), (2, Role::Member)]),
+            space: space(100, &[(1, vec![]), (2, vec![])]),
             channels: vec![channel(200, Some(100), ChannelKind::Text)],
             users: vec![user(1, "Me"), user(2, "Ana")],
         });
@@ -771,9 +844,9 @@ mod tests {
     fn a_locked_channel_is_never_unread() {
         let mut s = State { me: Some(me(2)), ..Default::default() };
         let mut locked = channel(200, Some(100), ChannelKind::Text);
-        locked.view = Role::Admin;
+        locked.view = perms::ADMIN;
         s.apply(&Event::SpaceUpserted {
-            space: space(100, &[(1, Role::Owner), (2, Role::Member)]),
+            space: space(100, &[(1, vec![]), (2, vec![])]),
             channels: vec![locked],
             users: vec![],
         });
@@ -796,7 +869,7 @@ mod tests {
     fn restating_a_space_drops_channels_deleted_meanwhile() {
         let mut s = world();
         s.apply(&Event::SpaceUpserted {
-            space: space(100, &[(1, Role::Owner)]),
+            space: space(100, &[(1, vec![])]),
             channels: vec![channel(201, Some(100), ChannelKind::Text)],
             users: vec![],
         });
@@ -894,9 +967,70 @@ mod tests {
     #[test]
     fn the_space_order_never_loses_a_space() {
         let mut s = world();
-        s.apply(&Event::SpaceUpserted { space: space(101, &[(1, Role::Member)]), channels: vec![], users: vec![] });
+        s.apply(&Event::SpaceUpserted { space: space(101, &[(1, vec![])]), channels: vec![], users: vec![] });
         s.apply(&Event::SpaceOrder { spaces: vec![id(101), id(999)] });
         assert_eq!(s.space_order, vec![id(101), id(100)]);
+    }
+
+    #[test]
+    fn a_restated_baseline_moves_what_a_member_may_do() {
+        // A space whose baseline asks nothing: viewer 2 sees channel 200 locked,
+        // the owner's set is ALL so the same channel is theirs.
+        let mut s = State { me: Some(me(2)), ..world() };
+        s.apply(&Event::BaselineChanged { space: id(100), everyone: 0 });
+        assert_eq!(s.access(id(200)), Access::Locked, "a baseline with no view locks the channel");
+        s.apply(
+            &Event::BaselineChanged {
+                space: id(100),
+                everyone: Permission::ViewChannel.bit() | Permission::SendMessage.bit(),
+            },
+        );
+        assert_eq!(s.access(id(200)), Access::Full, "a baseline that holds view and send opens it again");
+        s.apply(
+            &Event::BaselineChanged {
+                space: id(100),
+                everyone: Permission::ViewChannel.bit() | Permission::SendMessage.bit(),
+            },
+        );
+        assert_eq!(s.access(id(200)), Access::Full, "the same baseline restated changes nothing");
+    }
+
+    #[test]
+    fn a_restated_channel_carries_its_overwrites_into_the_state() {
+        use crate::Overwrite;
+        use std::collections::BTreeMap;
+
+        let mut s = State { me: Some(me(2)), ..world() };
+        s.apply(
+            &Event::RolesChanged {
+                space: id(100),
+                roles: vec![Role {
+                    id: id(8),
+                    name: "r".into(),
+                    permissions: Permission::ViewChannel.bit() | Permission::SendMessage.bit(),
+                    position: 0,
+                }],
+            },
+        );
+        s.apply(&Event::MemberRoles { space: id(100), user: id(2), roles: vec![id(8)] });
+        assert_eq!(s.access(id(200)), Access::Full, "open before any overwrite");
+        // set_overwrite's server event: the channel restated with its rows.
+        let mut gated = channel(200, Some(100), ChannelKind::Text);
+        gated.overwrites = [
+            (
+                id(8),
+                Overwrite { allow: 0, deny: Permission::SendMessage.bit() },
+            )
+        ]
+            .into_iter()
+            .collect::<BTreeMap<Id, Overwrite>>();
+        s.apply(&Event::ChannelUpserted { channel: gated.clone() });
+        assert_eq!(s.access(id(200)), Access::ReadOnly, "the deny cuts posting on the client, as at_channel says");
+        s.apply(&Event::ChannelUpserted { channel: gated.clone() });
+        assert_eq!(s.channels[&id(200)].overwrites.len(), 1, "restating an upsert leaves one row");
+        // clear_overwrite's event: the channel restated without the row.
+        s.apply(&Event::ChannelUpserted { channel: channel(200, Some(100), ChannelKind::Text) });
+        assert_eq!(s.access(id(200)), Access::Full, "the cleared channel opens back up");
     }
 
     #[test]

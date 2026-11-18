@@ -49,6 +49,18 @@ rooms render and the controls are local-only — the audio path is
 HEARTH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:55432/hearth \
   cargo test -p hearth-db                # 41
 
+# Idea Chat: the shared rules and the server's gates (no database needed), then
+# its data layer. That one takes a server URL (each test makes its own database
+# on it) and skips without the variable.
+cargo test -p chat-model -p chat-api
+CHAT_TEST_DATABASE_URL=postgres://postgres:dev@localhost:55432/postgres \
+  cargo test -p chat-db
+
+# The roles and permissions over HTTP, against a running chat-server (tools/chat-dev.sh).
+# CHAT_DB_URL is the server database: accounts are verified there with psql.
+CHAT_URL=http://localhost:8090 CHAT_DB_URL=postgres://postgres:dev@localhost:55433/chat \
+  node tools/chat-roles-flows.js
+
 bash tools/reset-dev.sh
 bash tools/auth-flows.sh                 # 34 — session, CSRF, timing, invites
 bash tools/message-flows.sh              # 17 — posting, threads, authorization

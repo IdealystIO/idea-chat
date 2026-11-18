@@ -1,7 +1,8 @@
 //! Spaces: making them, inviting people in, roles, categories, and each
 //! person's own arrangement of them.
 
-use chat_model::{Category, Id, Invite, InvitePreview, Role};
+use chat_model::{Category, Id, Invite, InvitePreview, PermissionSet, Role};
+use chat_model::perms::Permission;
 use server::server;
 use server_kit::Auth;
 
@@ -9,26 +10,36 @@ use crate::{Answer, Principal};
 
 #[cfg(feature = "server")]
 mod body {
-    use chat_model::{perms, Id, Role, Space};
+    use chat_model::perms::{self, Permission};
+    use chat_model::{Id, Role, Space};
 
-    use crate::srv::{app, db, fail, forbidden, me};
+    use crate::srv::{app, db, fail, forbidden, me, space_topic};
+    use chat_model::live::Event;
     use crate::{ApiError, Failure, Principal};
 
-    /// The space and the caller's role in it; refused unless they are in it.
-    pub async fn member(p: &Principal, space: Id) -> Result<(Id, Role, Space), Failure> {
-        let account = me(p).await?;
-        let s = app().db.space(space).await.map_err(db)?;
-        let role = s.role_of(account.id()).ok_or_else(|| fail(ApiError::NotFound))?;
-        Ok((account.id(), role, s))
+    /// Restate the space's whole role set to everyone in it, so new names and
+    /// permissions land on every connection.
+    pub async fn publish_roles(space: Id) {
+        let roles = app().db.space(space).await.map(|s| s.roles.values().into_iter().cloned().collect::<Vec<Role>>()).unwrap_or_default();
+        app().bus.publish(vec![space_topic(space)], Event::RolesChanged { space, roles }).await;
     }
 
-    /// As [`member`], and they may manage it.
-    pub async fn manager(p: &Principal, space: Id) -> Result<(Id, Role, Space), Failure> {
-        let (me, role, s) = member(p, space).await?;
-        if !perms::can_manage_space(role) {
-            return Err(forbidden("Only admins can change that."));
+    /// The space and the caller's effective permissions in it; refused unless
+    /// they are in it.
+    pub async fn member(p: &Principal, space: Id) -> Result<(Id, Space), Failure> {
+        let account = me(p).await?;
+        let s = app().db.space(space).await.map_err(db)?;
+        perms::effective(&s, account.id()).ok_or_else(|| fail(ApiError::NotFound))?;
+        Ok((account.id(), s))
+    }
+
+    /// As [`member`], and they may manage the space's own settings.
+    pub async fn manager(p: &Principal, space: Id) -> Result<(Id, Space), Failure> {
+        let (me, s) = member(p, space).await?;
+        if !perms::can(&s, me, Permission::ManageSpaceSettings) {
+            return Err(forbidden("Only those who manage space settings can change that."));
         }
-        Ok((me, role, s))
+        Ok((me, s))
     }
 }
 
@@ -52,12 +63,12 @@ pub async fn rename_space(space: Id, name: String, user: Auth<Principal>) -> Ans
     use chat_model::live::Event;
 
     use crate::srv::{app, db, invalid, space_topic};
-    let (_, _, s) = body::manager(&user.0, space).await?;
+    let (_, s) = body::manager(&user.0, space).await?;
     let name = chat_model::text::name(&name).map_err(invalid("name"))?;
     app().db.rename_space(space, &name, s.icon.as_deref()).await.map_err(db)?;
     app()
         .bus
-        .publish(vec![space_topic(space, Role::Member)], Event::SpaceRenamed { space, name, icon: s.icon })
+        .publish(vec![space_topic(space)], Event::SpaceRenamed { space, name, icon: s.icon })
         .await;
     Ok(())
 }
@@ -68,13 +79,13 @@ pub async fn delete_space(space: Id, user: Auth<Principal>) -> Answer<()> {
     use chat_model::live::Event;
 
     use crate::srv::{app, db, forbidden, space_topic};
-    let (_, role, _) = body::member(&user.0, space).await?;
-    if role != Role::Owner {
+    let (me, s) = body::member(&user.0, space).await?;
+    if me != s.owner {
         return Err(forbidden("Only the owner can delete a space."));
     }
     let members = app().db.member_ids(space).await.map_err(db)?;
     app().db.delete_space(space).await.map_err(db)?;
-    app().bus.publish(vec![space_topic(space, Role::Member)], Event::SpaceRemoved { space }).await;
+    app().bus.publish(vec![space_topic(space)], Event::SpaceRemoved { space }).await;
     crate::srv::resync(&members).await;
     Ok(())
 }
@@ -85,7 +96,7 @@ pub async fn leave_space(space: Id, user: Auth<Principal>) -> Answer<()> {
     use chat_model::live::Event;
 
     use crate::srv::{app, db, resync, space_topic};
-    let (me, _, _) = body::member(&user.0, space).await?;
+    let (me, _) = body::member(&user.0, space).await?;
     app().db.remove_member(space, me).await.map_err(db)?;
     // A call in one of its channels goes with it.
     if let Ok(Some((_, channel, _))) = app().db.my_room(me).await {
@@ -93,7 +104,7 @@ pub async fn leave_space(space: Id, user: Auth<Principal>) -> Answer<()> {
             crate::calls::leave_everywhere(me).await;
         }
     }
-    app().bus.publish(vec![space_topic(space, Role::Member)], Event::MemberLeft { space, user: me }).await;
+    app().bus.publish(vec![space_topic(space)], Event::MemberLeft { space, user: me }).await;
     app().bus.to_user(me, Event::SpaceRemoved { space }).await;
     resync(&[me]).await;
     Ok(())
@@ -105,37 +116,184 @@ pub async fn remove_member(space: Id, member: Id, user: Auth<Principal>) -> Answ
     use chat_model::live::Event;
     use chat_model::perms;
 
-    use crate::srv::{app, db, fail, forbidden, resync, space_topic};
-    use crate::ApiError;
-    let (_, role, s) = body::member(&user.0, space).await?;
-    let target = s.role_of(member).ok_or_else(|| fail(ApiError::NotFound))?;
-    if !perms::can_moderate(role, target) {
+    use crate::srv::{app, db, forbidden, resync, space_topic};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can_moderate(&s, me, member) {
         return Err(forbidden("You can't remove them."));
     }
     app().db.remove_member(space, member).await.map_err(db)?;
-    app().bus.publish(vec![space_topic(space, Role::Member)], Event::MemberLeft { space, user: member }).await;
+    app().bus.publish(vec![space_topic(space)], Event::MemberLeft { space, user: member }).await;
     app().bus.to_user(member, Event::SpaceRemoved { space }).await;
     resync(&[member]).await;
     Ok(())
 }
 
-/// Make someone an admin, or a member again.
+/// Ban someone: they leave now, and a ban holds the seat closed until unban.
 #[server]
-pub async fn set_role(space: Id, member: Id, role: crate::Rank, user: Auth<Principal>) -> Answer<()> {
+pub async fn ban_member(space: Id, member: Id, user: Auth<Principal>) -> Answer<()> {
     use chat_model::live::Event;
     use chat_model::perms;
 
-    use crate::srv::{app, db, fail, forbidden, resync, space_topic};
-    use crate::ApiError;
-    let (_, mine, s) = body::member(&user.0, space).await?;
-    let theirs = s.role_of(member).ok_or_else(|| fail(ApiError::NotFound))?;
-    if !perms::can_grant(mine, theirs, role) {
-        return Err(forbidden("You can't give that role."));
+    use crate::srv::{app, db, forbidden, resync, space_topic};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can_ban(&s, me, member) {
+        return Err(forbidden("You can't ban them."));
     }
-    app().db.set_role(space, member, role).await.map_err(db)?;
-    app().bus.publish(vec![space_topic(space, Role::Member)], Event::MemberRole { space, user: member, role }).await;
-    // What they hear in the space changes with their role.
+    app().db.ban(space, member).await.map_err(db)?;
+    app().bus.publish(vec![space_topic(space)], Event::MemberLeft { space, user: member }).await;
+    app().bus.to_user(member, Event::SpaceRemoved { space }).await;
     resync(&[member]).await;
+    Ok(())
+}
+
+/// Lift a ban. They come back the way anyone does: through an invite.
+#[server]
+pub async fn unban_member(space: Id, member: Id, user: Auth<Principal>) -> Answer<()> {
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden};
+    let (me, s) = body::member(&user.0, space).await?;
+    // The banned person is out of the space, so rank cannot be compared
+    // against their seat; the permission bit is what buys the lift.
+    if !perms::can(&s, me, Permission::BanMembers) {
+        return Err(forbidden("You can't unban them."));
+    }
+    app().db.unban(space, member).await.map_err(db)?;
+    Ok(())
+}
+
+/// Time someone out for `minutes`, or clear their timeout with `None`. A
+/// timed-out member cannot send or speak until it expires.
+#[server]
+pub async fn timeout_member(space: Id, member: Id, minutes: Option<u32>, user: Auth<Principal>) -> Answer<()> {
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can_timeout(&s, me, member) {
+        return Err(forbidden("You can't time them out."));
+    }
+    app().db.set_timeout(space, member, minutes).await.map_err(db)?;
+    Ok(())
+}
+
+/// Set the roles someone holds. The caller moderates the target and manages
+/// roles — clearing a member's roles is an act too — and no role handed out
+/// carries power the caller does not hold.
+#[server]
+pub async fn set_roles(space: Id, member: Id, roles: Vec<Id>, user: Auth<Principal>) -> Answer<()> {
+    use chat_model::live::Event;
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden, resync, space_topic};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can_set_roles(&s, me, member, &roles) {
+        return Err(forbidden("You can't give those roles."));
+    }
+    app().db.set_role_ids(space, member, &roles).await.map_err(db)?;
+    app().bus.publish(vec![space_topic(space)], Event::MemberRoles { space, user: member, roles }).await;
+    // What they hear in the space changes with their roles.
+    resync(&[member]).await;
+    Ok(())
+}
+
+/// Set the space's everyone baseline: what every member holds whatever
+/// their roles say. [`Permission::ManageRoles`] buys the act (the owner
+/// always may), the new baseline may carry only powers the caller holds,
+/// and the admin tag is never allowed in a baseline.
+#[server]
+pub async fn set_everyone(space: Id, permissions: PermissionSet, user: Auth<Principal>) -> Answer<()> {
+    use chat_model::live::Event;
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden, resync, space_topic};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can_set_everyone(&s, me, permissions) {
+        return Err(forbidden("You can't set a baseline beyond the powers you have."));
+    }
+    app().db.set_everyone(space, permissions).await.map_err(db)?;
+    // Restate the space's baseline, so every connection re-derives what they may see.
+    app().bus
+        .publish(
+            vec![space_topic(space)],
+            Event::BaselineChanged { space, everyone: permissions },
+        )
+        .await;
+    // Who may see a gated channel changes with the baseline: everyone re-derives
+    // their subscriptions.
+    resync(&app().db.member_ids(space).await.unwrap_or_default()).await;
+    Ok(())
+}
+
+/// The roles a space hands out, in list order.
+#[server]
+pub async fn space_roles(space: Id, user: Auth<Principal>) -> Answer<Vec<Role>> {
+    let (_, s) = body::member(&user.0, space).await?;
+    let mut roles = s.roles.values().into_iter().map(|r| r.clone()).collect::<Vec<Role>>();
+    roles.sort_by_key(|r| (r.position, r.id));
+    Ok(roles)
+}
+
+/// Create a role with a name and a permission set.
+#[server]
+pub async fn create_role(space: Id, name: String, permissions: PermissionSet, user: Auth<Principal>) -> Answer<Role> {
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden, invalid};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can_author_role(&s, me, permissions) {
+        return Err(forbidden("You can't create a role with powers you do not have."));
+    }
+    let name = chat_model::text::name(&name).map_err(invalid("name"))?;
+    let role = app().db.create_role(space, &name, permissions).await.map_err(db)?;
+    body::publish_roles(space).await;
+    Ok(role)
+}
+
+/// Rename a role or change what it allows, in place.
+#[server]
+pub async fn update_role(space: Id, role: Id, name: String, permissions: PermissionSet, user: Auth<Principal>) -> Answer<()> {
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden, invalid};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !s.roles.contains_key(&role) {
+        return Err(forbidden("That role doesn't exist."));
+    }
+    // Hierarchy: a member may rewrite only roles at or below their own top
+    // role; the owner is exempt.
+    if !perms::can_edit_role(&s, me, role) {
+        return Err(forbidden("You can't edit a role above your own."));
+    }
+    if !perms::can_author_role(&s, me, permissions) {
+        return Err(forbidden("You can't grant powers you do not have."));
+    }
+    let name = chat_model::text::name(&name).map_err(invalid("name"))?;
+    app().db.update_role(space, role, &name, permissions).await.map_err(db)?;
+    body::publish_roles(space).await;
+    // A role's powers moved, so who can see a gated channel may change:
+    // everyone in the space must re-derive their subscriptions.
+    crate::srv::resync(&app().db.member_ids(space).await.unwrap_or_default()).await;
+    Ok(())
+}
+
+/// Delete a role; everyone holding it drops it.
+#[server]
+pub async fn delete_role(space: Id, role: Id, user: Auth<Principal>) -> Answer<()> {
+    use chat_model::perms;
+
+    use crate::srv::{app, db, forbidden};
+    let (me, s) = body::member(&user.0, space).await?;
+    // Hierarchy: a member may delete only roles at or below their own top
+    // role; the owner is exempt.
+    if !perms::can_edit_role(&s, me, role) {
+        return Err(forbidden("You can't delete a role above your own."));
+    }
+    app().db.delete_role(space, role).await.map_err(db)?;
+    body::publish_roles(space).await;
+    // The role is gone for everyone holding it, so who may see a gated
+    // channel changes again: everyone re-derives their subscriptions.
+    crate::srv::resync(&app().db.member_ids(space).await.unwrap_or_default()).await;
     Ok(())
 }
 
@@ -145,24 +303,25 @@ pub async fn transfer_space(space: Id, to: Id, user: Auth<Principal>) -> Answer<
     use chat_model::live::Event;
 
     use crate::srv::{app, db, forbidden, resync, space_topic};
-    let (me, role, _) = body::member(&user.0, space).await?;
-    if role != Role::Owner {
+    let (me, s) = body::member(&user.0, space).await?;
+    if me != s.owner {
         return Err(forbidden("Only the owner can transfer a space."));
     }
     app().db.transfer_space(space, me, to).await.map_err(db)?;
-    let topic = vec![space_topic(space, Role::Member)];
-    app().bus.publish(topic.clone(), Event::MemberRole { space, user: to, role: Role::Owner }).await;
-    app().bus.publish(topic, Event::MemberRole { space, user: me, role: Role::Admin }).await;
+    app().bus.publish(vec![space_topic(space)], Event::OwnerChanged { space, owner: to }).await;
     resync(&[me, to]).await;
     Ok(())
 }
 
-/// Make an invite. `max_uses` and `hours` of `None` mean unlimited.
-#[server]
+/// Make an invite. Managing invites is what buys it: a plain member cannot
+/// hand out ways into a space.
+#[server(tags(limit = "10/min"))]
 pub async fn create_invite(space: Id, max_uses: Option<u32>, hours: Option<u32>, user: Auth<Principal>) -> Answer<Invite> {
-    use crate::srv::{app, db};
-    // Anyone in a space may invite to it; managing invites is for admins.
-    let (me, _, _) = body::member(&user.0, space).await?;
+    use crate::srv::{app, db, forbidden};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !chat_model::perms::can(&s, me, chat_model::perms::Permission::ManageInvites) {
+        return Err(forbidden("Only those who manage invites can make one."));
+    }
     let expires = hours.map(|h| time::OffsetDateTime::now_utc() + time::Duration::hours(h.clamp(1, 24 * 30) as i64));
     app().db.create_invite(space, me, max_uses.map(|m| m.clamp(1, 1000)), expires).await.map_err(db)
 }
@@ -170,15 +329,23 @@ pub async fn create_invite(space: Id, max_uses: Option<u32>, hours: Option<u32>,
 /// A space's invites that still work.
 #[server]
 pub async fn invites(space: Id, user: Auth<Principal>) -> Answer<Vec<Invite>> {
-    use crate::srv::{app, db};
-    body::manager(&user.0, space).await?;
+    use chat_model::perms;
+    use crate::srv::{app, db, forbidden};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can(&s, me, Permission::ManageInvites) {
+        return Err(forbidden("Only those who manage invites can see them."));
+    }
     app().db.invites(space).await.map_err(db)
 }
 
 #[server]
 pub async fn revoke_invite(space: Id, code: String, user: Auth<Principal>) -> Answer<()> {
-    use crate::srv::{app, db};
-    body::manager(&user.0, space).await?;
+    use chat_model::perms;
+    use crate::srv::{app, db, forbidden};
+    let (me, s) = body::member(&user.0, space).await?;
+    if !perms::can(&s, me, Permission::ManageInvites) {
+        return Err(forbidden("Only those who manage invites can revoke one."));
+    }
     app().db.revoke_invite(space, &code).await.map_err(db)
 }
 
@@ -206,14 +373,14 @@ pub async fn join_space(code: String, user: Auth<Principal>) -> Answer<Id> {
         InviteOutcome::Joined { space, member } => {
             a.bus
                 .publish(
-                    vec![space_topic(space, Role::Member)],
+                    vec![space_topic(space)],
                     Event::MemberJoined { space, user: account.me.user.clone(), member },
                 )
                 .await;
             // Say so in the space's first text channel everyone can see.
             let channels = a.db.space_channels(space).await.map_err(db)?;
             let mut open: Vec<_> =
-                channels.iter().filter(|c| c.kind == ChannelKind::Text && c.view == Role::Member).collect();
+                channels.iter().filter(|c| c.kind == ChannelKind::Text && c.view == 0).collect();
             open.sort_by_key(|c| (c.category.is_some(), c.position));
             if let Some(c) = open.first() {
                 if let Ok(posted) = a
@@ -231,7 +398,7 @@ pub async fn join_space(code: String, user: Auth<Principal>) -> Answer<Id> {
                     .await
                 {
                     a.bus
-                        .publish(vec![space_topic(space, Role::Member)], Event::MessageCreated { message: posted.message })
+                        .publish(vec![space_topic(space)], Event::MessageCreated { message: posted.message })
                         .await;
                 }
             }
@@ -251,7 +418,7 @@ pub async fn create_category(space: Id, name: String, user: Auth<Principal>) -> 
     let name = chat_model::text::name(&name).map_err(invalid("name"))?;
     let cat = app().db.create_category(space, &name).await.map_err(db)?;
     let categories = app().db.space(space).await.map_err(db)?.categories;
-    app().bus.publish(vec![space_topic(space, Role::Member)], Event::CategoriesChanged { space, categories }).await;
+    app().bus.publish(vec![space_topic(space)], Event::CategoriesChanged { space, categories }).await;
     Ok(cat)
 }
 
@@ -264,7 +431,7 @@ pub async fn rename_category(space: Id, category: Id, name: String, user: Auth<P
     let name = chat_model::text::name(&name).map_err(invalid("name"))?;
     app().db.rename_category(space, category, &name).await.map_err(db)?;
     let categories = app().db.space(space).await.map_err(db)?.categories;
-    app().bus.publish(vec![space_topic(space, Role::Member)], Event::CategoriesChanged { space, categories }).await;
+    app().bus.publish(vec![space_topic(space)], Event::CategoriesChanged { space, categories }).await;
     Ok(())
 }
 
@@ -280,7 +447,7 @@ pub async fn delete_category(space: Id, category: Id, user: Auth<Principal>) -> 
     let s = a.db.space(space).await.map_err(db)?;
     let channels = a.db.space_channels(space).await.map_err(db)?;
     let users = a.db.users(&s.members.keys().copied().collect::<Vec<_>>()).await.map_err(db)?;
-    a.bus.publish(vec![space_topic(space, Role::Member)], Event::SpaceUpserted { space: s, channels, users }).await;
+    a.bus.publish(vec![space_topic(space)], Event::SpaceUpserted { space: s, channels, users }).await;
     Ok(())
 }
 

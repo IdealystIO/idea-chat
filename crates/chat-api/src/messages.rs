@@ -98,6 +98,12 @@ pub async fn send(
         return Err(forbidden(if c.archived { "This thread is archived." } else { "You can't post in this channel." }));
     }
     let a = app();
+    // A timed-out member cannot send until their timeout expires.
+    if let Some(s) = space.as_ref() {
+        if a.db.timed_out(s.id, me).await.map_err(db)? {
+            return Err(forbidden("You are timed out in this space."));
+        }
+    }
     if c.kind == ChannelKind::Direct {
         if let Some(other) = c.members.iter().find(|m| **m != me) {
             if a.db.blocked_between(me, *other).await.map_err(db)? {
@@ -108,9 +114,17 @@ pub async fn send(
     if attachments.len() > 10 {
         return Err(invalid("attachments")("At most 10 files per message.".into()));
     }
+    if !attachments.is_empty() && !chat_model::perms::can_at(&c, space.as_ref(), me, chat_model::perms::Permission::AttachFile) {
+        return Err(forbidden("You can't attach files in this channel."));
+    }
     let text = chat_model::text::message(&body).map_err(invalid("body"))?;
     if text.is_empty() && attachments.is_empty() {
         return Err(invalid("body")("Write something first.".into()));
+    }
+    // A link the reader expands needs EmbedLink. The body is checked where
+    // the server sees it — message bodies reach the server in cleartext.
+    if chat_model::text::embeds(&text) && !chat_model::perms::can_at(&c, space.as_ref(), me, chat_model::perms::Permission::EmbedLink) {
+        return Err(forbidden("You can't post links here."));
     }
     // Who can be mentioned: the space's members, or the conversation's.
     let audience: Vec<Id> = match &space {
@@ -122,10 +136,10 @@ pub async fn send(
         people.iter().find(|u| u.handle.eq_ignore_ascii_case(h)).map(|u| u.id)
     });
     resolved.mentions.retain(|m| audience.contains(m));
-    // `@everyone` in a space is for its admins.
+    // `@everyone` needs the MentionEveryone permission.
     let everyone = resolved.everyone
         && match &space {
-            Some(s) => s.role_of(me).is_some_and(chat_model::perms::can_manage_space),
+            Some(s) => chat_model::perms::can(&s, me, chat_model::perms::Permission::MentionEveryone),
             None => true,
         };
     if let Some(r) = reply_to {
@@ -169,7 +183,7 @@ pub async fn edit(id: Id, body: String, user: Auth<Principal>) -> Answer<Message
     let a = app();
     let m = a.db.message(id).await.map_err(db)?;
     let (me, c, access, space) = open(&user.0, m.channel).await?;
-    if !chat_model::perms::can_edit_message(me, m.author) || !matches!(m.kind, MessageKind::Text) {
+    if !chat_model::perms::can_edit_message(&c, space.as_ref(), me, m.author) || !matches!(m.kind, MessageKind::Text) {
         return Err(forbidden("You can only edit your own messages."));
     }
     if !access.can_post() {
@@ -178,6 +192,11 @@ pub async fn edit(id: Id, body: String, user: Auth<Principal>) -> Answer<Message
     let text = chat_model::text::message(&body).map_err(invalid("body"))?;
     if text.is_empty() && m.attachments.is_empty() {
         return Err(invalid("body")("A message can't be empty. Delete it instead.".into()));
+    }
+    // An edit that leaves a link in the body needs EmbedLink as much as
+    // posting one did.
+    if chat_model::text::embeds(&text) && !chat_model::perms::can_at(&c, space.as_ref(), me, chat_model::perms::Permission::EmbedLink) {
+        return Err(forbidden("You can't post links here."));
     }
     let audience: Vec<Id> = match &space {
         Some(s) => s.members.keys().copied().collect(),
@@ -199,12 +218,12 @@ pub async fn edit(id: Id, body: String, user: Auth<Principal>) -> Answer<Message
 pub async fn delete(id: Id, user: Auth<Principal>) -> Answer<()> {
     use chat_model::live::Event;
 
-    use crate::channels::body::{open, role_in};
+    use crate::channels::body::open;
     use crate::srv::{app, channel_topic, db, forbidden};
     let a = app();
     let m = a.db.message(id).await.map_err(db)?;
     let (me, c, _, space) = open(&user.0, m.channel).await?;
-    if !chat_model::perms::can_delete_message(me, m.author, role_in(&space, me)) {
+    if !chat_model::perms::can_delete_message(&c, space.as_ref(), me, m.author) {
         return Err(forbidden("You can't delete that."));
     }
     let keys = a.db.delete_message(id).await.map_err(db)?;
@@ -228,9 +247,12 @@ pub async fn react(id: Id, emoji: String, add: bool, user: Auth<Principal>) -> A
     }
     let a = app();
     let m = a.db.message(id).await.map_err(db)?;
-    let (me, c, access, _) = open(&user.0, m.channel).await?;
+    let (me, c, access, space) = open(&user.0, m.channel).await?;
     if !access.can_read() || c.archived {
         return Err(forbidden("You can't react here."));
+    }
+    if !chat_model::perms::can_at(&c, space.as_ref(), me, chat_model::perms::Permission::AddReaction) {
+        return Err(forbidden("You can't react in this channel."));
     }
     if add && !m.reactions.iter().any(|r| r.emoji == emoji) && a.db.reaction_kinds(id).await.map_err(db)? >= REACTION_KINDS {
         return Err(forbidden("That message has all the reactions it can take."));
@@ -281,7 +303,7 @@ pub async fn search(scope: Scope, query: String, user: Auth<Principal>) -> Answe
         Scope::Space { id } => {
             let account = me(&user.0).await?;
             let space = a.db.space(id).await.map_err(db)?;
-            if space.role_of(account.id()).is_none() {
+            if !space.members.contains_key(&account.id()) {
                 return Err(fail(ApiError::NotFound));
             }
             let all = a.db.space_channels(id).await.map_err(db)?;

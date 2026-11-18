@@ -2,7 +2,8 @@
 //! `CHAT_TEST_DATABASE_URL` (a server URL; each test makes its own database).
 
 use chat_db::{CodeCheck, CodePurpose, Db, InviteOutcome, NewAccount, NewMessage, NewSpace};
-use chat_model::{ChannelKind, Id, MessageKind, Presence, Relation, Role, Status};
+use chat_model::perms::Permission;
+use chat_model::{ChannelKind, Id, MessageKind, Presence, Relation, Status};
 use sqlx::Connection;
 
 async fn db() -> Option<Db> {
@@ -107,7 +108,7 @@ async fn a_new_space_has_an_owner_and_starter_channels() {
     let Some(db) = db().await else { return };
     let ana = account(&db, "ana").await;
     let (space, channels) = db.create_space(&NewSpace { name: "Club".into(), owner: ana }).await.unwrap();
-    assert_eq!(space.role_of(ana), Some(Role::Owner));
+    assert_eq!(space.owner, ana);
     assert_eq!(space.categories.len(), 2);
     assert!(channels.iter().any(|c| c.kind == ChannelKind::Text && c.name == "general"));
     assert!(channels.iter().any(|c| c.kind == ChannelKind::Voice));
@@ -150,9 +151,53 @@ async fn the_owner_cannot_leave_but_can_transfer() {
     db.redeem_invite(&invite.code, bob).await.unwrap();
     assert!(db.remove_member(space.id, ana).await.is_err());
     db.transfer_space(space.id, ana, bob).await.unwrap();
-    assert_eq!(db.role(space.id, bob).await.unwrap(), Some(Role::Owner));
+    assert_eq!(db.role_ids(space.id, bob).await.unwrap(), Some(Vec::<Id>::new()));
     db.remove_member(space.id, ana).await.unwrap();
     assert_eq!(db.space(space.id).await.unwrap().owner, bob);
+}
+
+#[tokio::test]
+async fn roles_are_created_named_and_deleted_with_their_holders() {
+    let Some(db) = db().await else { return };
+    let ana = account(&db, "ana").await;
+    let (space, _) = db.create_space(&NewSpace { name: "Club".into(), owner: ana }).await.unwrap();
+    let bob = account(&db, "bob").await;
+    let invite = db.create_invite(space.id, ana, None, None).await.unwrap();
+    db.redeem_invite(&invite.code, bob).await.unwrap();
+
+    let role = db.create_role(space.id, "Mod", Permission::ManageMembers.bit()).await.unwrap();
+    db.set_role_ids(space.id, bob, &[role.id]).await.unwrap();
+    assert_eq!(db.role_ids(space.id, bob).await.unwrap(), Some(vec![role.id]));
+
+    db.update_role(space.id, role.id, "Moderator", Permission::ManageMembers.bit() | Permission::ManagePins.bit()).await.unwrap();
+    let after_update = db.space(space.id).await.unwrap();
+    let updated = after_update.roles.get(&role.id).unwrap();
+    assert_eq!(updated.name, "Moderator");
+    assert_eq!(updated.permissions, Permission::ManageMembers.bit() | Permission::ManagePins.bit());
+
+    db.delete_role(space.id, role.id).await.unwrap();
+    let after = db.space(space.id).await.unwrap();
+    assert_eq!(db.role_ids(space.id, bob).await.unwrap(), Some(Vec::<Id>::new()));
+    assert!(after.roles.is_empty());
+}
+
+#[tokio::test]
+async fn a_timeout_holds_a_member_back_until_it_passes_or_is_lifted() {
+    let Some(db) = db().await else { return };
+    let ana = account(&db, "ana").await;
+    let (space, _) = db.create_space(&NewSpace { name: "Club".into(), owner: ana }).await.unwrap();
+    let bob = account(&db, "bob").await;
+    let invite = db.create_invite(space.id, ana, None, None).await.unwrap();
+    db.redeem_invite(&invite.code, bob).await.unwrap();
+
+    assert!(!db.timed_out(space.id, bob).await.unwrap(), "nobody starts timed out");
+    db.set_timeout(space.id, bob, Some(5)).await.unwrap();
+    assert!(db.timed_out(space.id, bob).await.unwrap(), "five minutes from now is still ahead");
+    assert!(!db.timed_out(space.id, ana).await.unwrap(), "and it is only bob's");
+    db.set_timeout(space.id, bob, None).await.unwrap();
+    assert!(!db.timed_out(space.id, bob).await.unwrap(), "clearing it lifts it");
+    db.set_timeout(space.id, bob, Some(0)).await.unwrap();
+    assert!(!db.timed_out(space.id, bob).await.unwrap(), "a zero-minute timeout has already passed");
 }
 
 #[tokio::test]
@@ -342,6 +387,59 @@ async fn the_first_into_a_call_keys_it_and_the_last_out_ends_it() {
     let again = db.join_call(ana, voice, ca, da.id).await.unwrap();
     assert!(again.started && again.make_key);
     assert_ne!(again.room, a.room, "a new instance has a new room, and so a new key");
+}
+
+#[tokio::test]
+async fn the_roles_migration_backfills_the_old_ranks() {
+    let Ok(base) = std::env::var("CHAT_TEST_DATABASE_URL") else {
+        eprintln!("CHAT_TEST_DATABASE_URL not set; skipping");
+        return;
+    };
+    // A database seeded with the old schema: 0001 on its own, data in the
+    // old shape (an admin-ranked member and a channel locked to admins),
+    // then the roles migration. The backfill is what carries that data
+    // across; without it the admin loses power and the lock opens.
+    let name = format!("chat_test_{}", uuid::Uuid::now_v7().simple());
+    {
+        let mut admin = sqlx::PgConnection::connect(&base).await.expect("connect to the test server");
+        sqlx::query(&format!("CREATE DATABASE {name}")).execute(&mut admin).await.unwrap();
+    }
+    let url = match base.rsplit_once('/') {
+        Some((server, _)) => format!("{server}/{name}"),
+        None => panic!("CHAT_TEST_DATABASE_URL must name a database"),
+    };
+    let migrations = sqlx::migrate!("./migrations");
+    let sql_of = |version| migrations.iter()
+        .find(|m| m.version == version)
+        .unwrap()
+        .sql
+        .to_string();
+    let mut conn = sqlx::PgConnection::connect(&url).await.expect("connect");
+    sqlx::raw_sql(&sql_of(1)).execute(&mut conn).await.unwrap();
+    let seed = "INSERT INTO users (id, email, password_hash, handle, display_name) VALUES ('00000000-0000-0000-0000-000000000001', 'a@x', 'x', 'a', 'A'), ('00000000-0000-0000-0000-000000000002', 'b@x', 'x', 'b', 'B'); INSERT INTO spaces (id, name, owner_id) VALUES ('00000000-0000-0000-0000-000000000009', 'sp', '00000000-0000-0000-0000-000000000001'); INSERT INTO space_members (space_id, user_id, role) VALUES ('00000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-000000000001', 'owner'), ('00000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-000000000002', 'admin'); INSERT INTO channels (id, kind, space_id, name, created_by, view_role, post_role) VALUES ('00000000-0000-0000-0000-0000000000a0', 'text', '00000000-0000-0000-0000-000000000009', 'ann', '00000000-0000-0000-0000-000000000001', 'admin', 'admin'), ('00000000-0000-0000-0000-0000000000a1', 'text', '00000000-0000-0000-0000-000000000009', 'open', '00000000-0000-0000-0000-000000000001', 'member', 'member');";
+    sqlx::raw_sql(seed).execute(&mut conn).await.unwrap();
+    sqlx::raw_sql(&sql_of(2)).execute(&mut conn).await.unwrap();
+
+    let admins: i64 = sqlx::query_scalar("SELECT count(*) FROM space_roles WHERE name = 'Admin'")
+        .fetch_one(&mut conn)
+        .await.unwrap();
+    assert_eq!(admins, 1i64, "the space with old admins gets an Admin role");
+    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM space_members WHERE role_ids <> '{}'")
+        .fetch_one(&mut conn)
+        .await.unwrap();
+    assert_eq!(held, 1i64, "exactly the old admin holds the backfilled role");
+    let locked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM channels WHERE name = 'ann' AND view_mask <> 0 AND post_mask <> 0",
+    )
+        .fetch_one(&mut conn)
+        .await.unwrap();
+    assert_eq!(locked, 1i64, "the admin-locked channel keeps its lock as masks");
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM channels WHERE name = 'open' AND view_mask = 0 AND post_mask = 0",
+    )
+        .fetch_one(&mut conn)
+        .await.unwrap();
+    assert_eq!(open, 1i64, "the open channel stays open");
 }
 
 #[tokio::test]

@@ -1,11 +1,12 @@
 //! Channels: a space's text and voice channels, threads, and direct and
 //! group conversations.
 
-use chat_model::{Channel, ChannelKind, Id, Role};
+use chat_model::{Channel, ChannelKind, Id, Overwrite};
+use std::collections::BTreeMap;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
-use crate::{kind_of, kind_text, millis, new_id, role_of, role_text, Db, Error, Result};
+use crate::{kind_of, kind_text, millis, new_id, Db, Error, Result};
 
 /// The most people in a group conversation.
 pub const GROUP_MAX: usize = 10;
@@ -20,8 +21,8 @@ pub struct ChannelInit {
     pub category: Option<Id>,
     pub parent: Option<Id>,
     pub starter: Option<Id>,
-    pub view: Role,
-    pub post: Role,
+    pub view: u64,
+    pub post: u64,
     pub created_by: Id,
 }
 
@@ -36,14 +37,17 @@ pub(crate) struct ChannelRow {
     position: i32,
     parent_id: Option<Id>,
     starter_id: Option<Id>,
-    view_role: String,
-    post_role: String,
+    view_mask: i64,
+    post_mask: i64,
     archived: bool,
     last_message_id: Option<Id>,
     message_count: i32,
     created_by: Id,
     created_at: OffsetDateTime,
     members: Vec<Id>,
+    overwrite_roles: Vec<Id>,
+    overwrite_allows: Vec<i64>,
+    overwrite_denies: Vec<i64>,
 }
 
 impl From<ChannelRow> for Channel {
@@ -58,14 +62,25 @@ impl From<ChannelRow> for Channel {
             position: r.position,
             parent: r.parent_id,
             starter: r.starter_id,
-            view: role_of(&r.view_role),
-            post: role_of(&r.post_role),
+            view: r.view_mask as u64,
+            post: r.post_mask as u64,
             members: r.members,
             archived: r.archived,
             last_message: r.last_message_id,
             message_count: r.message_count.max(0) as u32,
             created_by: r.created_by,
             created_at: millis(r.created_at),
+            overwrites: r.overwrite_roles.iter()
+                .zip(r.overwrite_allows.iter())
+                .zip(r.overwrite_denies.iter())
+                .map(|((role, allow), deny)| (
+                    *role,
+                    Overwrite {
+                        allow: *allow as u64,
+                        deny: *deny as u64,
+                    },
+                ))
+                .collect(),
         }
     }
 }
@@ -73,10 +88,16 @@ impl From<ChannelRow> for Channel {
 /// A channel's columns, with its conversation members aggregated in (empty
 /// for space channels). `c` is the channel's alias.
 pub(crate) const CHANNEL_SELECT: &str = "SELECT c.id, c.kind, c.space_id, c.name, c.topic, c.category_id, c.position, \
-     c.parent_id, c.starter_id, c.view_role, c.post_role, c.archived, c.last_message_id, c.message_count, \
+     c.parent_id, c.starter_id, c.view_mask, c.post_mask, c.archived, c.last_message_id, c.message_count, \
      c.created_by, c.created_at, \
      coalesce((SELECT array_agg(m.user_id ORDER BY m.joined_at) FROM channel_members m WHERE m.channel_id = c.id), \
-              '{}') AS members \
+              '{}') AS members, \
+     coalesce((SELECT array_agg(o.role_id ORDER BY o.role_id) FROM channel_overwrites o WHERE o.channel_id = c.id), \
+              '{}') AS overwrite_roles, \
+     coalesce((SELECT array_agg(o.allow ORDER BY o.role_id) FROM channel_overwrites o WHERE o.channel_id = c.id), \
+              '{}') AS overwrite_allows, \
+     coalesce((SELECT array_agg(o.deny ORDER BY o.role_id) FROM channel_overwrites o WHERE o.channel_id = c.id), \
+              '{}') AS overwrite_denies \
      FROM channels c";
 
 pub(crate) async fn insert_channel(tx: &mut Transaction<'_, Postgres>, init: &ChannelInit) -> Result<Id> {
@@ -91,7 +112,7 @@ pub(crate) async fn insert_channel(tx: &mut Transaction<'_, Postgres>, init: &Ch
     .await?;
     sqlx::query(
         "INSERT INTO channels (id, kind, space_id, name, topic, category_id, position, parent_id, starter_id, \
-                               view_role, post_role, created_by) \
+                               view_mask, post_mask, created_by) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(id)
@@ -103,8 +124,8 @@ pub(crate) async fn insert_channel(tx: &mut Transaction<'_, Postgres>, init: &Ch
     .bind(position)
     .bind(init.parent)
     .bind(init.starter)
-    .bind(role_text(init.view))
-    .bind(role_text(init.post))
+    .bind(init.view as i64)
+    .bind(init.post as i64)
     .bind(init.created_by)
     .execute(&mut **tx)
     .await?;
@@ -114,8 +135,11 @@ pub(crate) async fn insert_channel(tx: &mut Transaction<'_, Postgres>, init: &Ch
 /// Who a channel's events go to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Audience {
-    /// Members of the space at or above the role. For a thread, its parent's.
-    Space { space: Id, view: Role },
+    /// A space channel: it rides the space's shared topic when open to every
+    /// member who can see it, and its own topic when gated. `rules` is the
+    /// channel whose masks and overwrites decide (the parent's, for a
+    /// thread); `everyone` is the space's baseline permission set.
+    Space { space: Id, rules: Channel, everyone: u64 },
     /// The people in a conversation.
     People(Vec<Id>),
 }
@@ -149,17 +173,20 @@ impl Db {
         Ok(rows.into_iter().map(Channel::from).collect())
     }
 
-    /// Who should hear about a channel.
+    /// Who should hear about a channel: the rules channel (the parent's for
+    /// a thread) and the space's baseline, so the topic decision reads the
+    /// same gates the viewer's access does.
     pub async fn audience(&self, channel: &Channel) -> Result<Audience> {
         if channel.kind.is_private() {
             return Ok(Audience::People(channel.members.clone()));
         }
         let space = channel.space.ok_or(Error::NotFound)?;
-        let view = match channel.parent {
-            Some(parent) => self.channel(parent).await?.view,
-            None => channel.view,
+        let rules = match channel.parent {
+            Some(parent) => self.channel(parent).await?,
+            None => channel.clone(),
         };
-        Ok(Audience::Space { space, view })
+        let s = self.space(space).await?;
+        Ok(Audience::Space { space, rules, everyone: s.everyone })
     }
 
     pub async fn create_channel(&self, init: &ChannelInit) -> Result<Channel> {
@@ -169,6 +196,42 @@ impl Db {
         self.channel(id).await
     }
 
+    /// Restate one role's allow/deny overwrite on a channel: the pair rewrites
+    /// the row, and `(0, 0)` means no overwrite, so it deletes the row.
+    pub async fn set_overwrite(&self, channel: Id, space: Id, role: Id, allow: u64, deny: u64) -> Result<()> {
+        if allow == 0 && deny == 0 {
+            sqlx::query("DELETE FROM channel_overwrites WHERE channel_id = $1 AND role_id = $2")
+                .bind(channel)
+                .bind(role)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO channel_overwrites (channel_id, space_id, role_id, allow, deny) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT (channel_id, role_id) DO UPDATE SET allow = $4, deny = $5",
+            )
+                .bind(channel)
+                .bind(space)
+                .bind(role)
+                .bind(allow as i64)
+                .bind(deny as i64)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Drop one role's overwrite on a channel, whatever it held.
+    pub async fn clear_overwrite(&self, channel: Id, role: Id) -> Result<()> {
+        sqlx::query("DELETE FROM channel_overwrites WHERE channel_id = $1 AND role_id = $2")
+            .bind(channel)
+            .bind(role)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Change a space channel's settings. Every field is set as given.
     pub async fn update_channel(
         &self,
@@ -176,18 +239,18 @@ impl Db {
         name: &str,
         topic: &str,
         category: Option<Id>,
-        view: Role,
-        post: Role,
+        view: u64,
+        post: u64,
     ) -> Result<Channel> {
         sqlx::query(
-            "UPDATE channels SET name = $2, topic = $3, category_id = $4, view_role = $5, post_role = $6 WHERE id = $1",
+            "UPDATE channels SET name = $2, topic = $3, category_id = $4, view_mask = $5, post_mask = $6 WHERE id = $1",
         )
         .bind(id)
         .bind(name)
         .bind(topic)
         .bind(category)
-        .bind(role_text(view))
-        .bind(role_text(post.max(view)))
+        .bind(view as i64)
+        .bind(post as i64)
         .execute(&self.pool)
         .await?;
         self.channel(id).await
@@ -294,8 +357,8 @@ impl Db {
                         category: None,
                         parent: None,
                         starter: None,
-                        view: Role::Member,
-                        post: Role::Member,
+                        view: 0,
+                        post: 0,
                         created_by: opener,
                     },
                 )
@@ -353,8 +416,8 @@ impl Db {
                 category: None,
                 parent: None,
                 starter: None,
-                view: Role::Member,
-                post: Role::Member,
+                view: 0,
+                post: 0,
                 created_by: owner,
             },
         )
